@@ -1228,6 +1228,17 @@ function Timer({
       className="relative flex min-h-screen flex-col items-center justify-center gap-6 overflow-hidden px-4 py-8"
       onClick={() => setPaused((p) => !p)}
     >
+      <button
+        aria-label="Exit timer"
+        className="absolute top-4 right-4 z-10 flex h-11 w-11 items-center justify-center rounded-md text-[20px] text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
+        onClick={(e) => {
+          tap(e);
+          logAndExit(false);
+          onExit();
+        }}
+      >
+        ✕
+      </button>
       <h2 className="max-w-3xl text-center text-[20px] text-zinc-400">{task.content}</h2>
       <div className="relative flex items-center justify-center">
         <svg viewBox="0 0 100 100" className="absolute h-[64vmin] w-[64vmin] -rotate-90">
