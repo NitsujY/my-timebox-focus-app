@@ -1,14 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 const API = "https://api.todoist.com/api/v1";
-const QUICK = [15, 25, 50, 90];
-const BUFFER_QUICK = [15, 25];
+const QUICK = [2, 5, 15, 25, 90];
 
 type Task = {
   id: string;
   content: string;
   priority: number; // 4 = highest
   section_id?: string | null;
+  description?: string | null;
   due?: { datetime?: string; date: string } | null;
   duration?: { amount: number; unit: string } | null;
 };
@@ -109,14 +109,49 @@ const sortTasks = (ts: Task[]) =>
     return da.localeCompare(db);
   });
 
+const pBar = (p: number) =>
+  p === 4
+    ? "border-l-zinc-200"
+    : p === 3
+      ? "border-l-zinc-500"
+      : p === 2
+        ? "border-l-zinc-700"
+        : "border-l-zinc-800";
+
+// mini NL parse: "Fix VPN 15m #Focus p1" -> content + duration + section + priority
+// Todoist priority is inverted (4 = urgent), so p1..p4 maps to 4..1
+function parseAdd(raw: string, sections: SectionMap) {
+  let content = ` ${raw} `;
+  let duration: number | undefined;
+  let priority: number | undefined;
+  let sectionName: string | undefined;
+  content = content.replace(/\s(\d+)m(?=\s)/i, (_m, n) => {
+    duration = +n;
+    return " ";
+  });
+  content = content.replace(/\s#(\w+)(?=\s)/, (m, n) =>
+    sections[(n as string).toLowerCase()] ? ((sectionName = n as string), " ") : (m as string),
+  );
+  content = content.replace(/\sp([1-4])(?=\s)/i, (_m, n) => {
+    priority = 5 - +n;
+    return " ";
+  });
+  return { content: content.trim().replace(/\s{2,}/g, " "), duration, priority, sectionName };
+}
+
 export default function App() {
   const [token, setToken] = useState(() => load("tb_token", ""));
   const [projectId, setProjectId] = useState(() => load("tb_project", ""));
   const [tasks, setTasks] = useState<Task[]>([]);
+  const tasksRef = useRef<Task[]>([]);
+  tasksRef.current = tasks; // fresh snapshot for async rollback paths
   const [sections, setSections] = useState<SectionMap>(() => load("tb_sections", {}));
   const [sessions, setSessions] = useState<Session[]>(() => load("tb_sessions", []));
   const [archivedDay, setArchivedDay] = useState(() => load("tb_archived", ""));
   const [active, setActive] = useState<{ task: Task; minutes: number } | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ msg: string; undo?: () => void } | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [view, setView] = useState<"focus" | "backlog" | "review">("focus");
   const [error, setError] = useState("");
 
@@ -156,9 +191,17 @@ export default function App() {
     save("tb_sessions", next);
   };
 
+  const showToast = (msg: string, undo?: () => void) => {
+    setToast({ msg, undo });
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 3000);
+  };
+
+  const toggleRow = (id: string) => setExpandedId((cur) => (cur === id ? null : id));
+
   // optimistic move with rollback on API failure (offline queues instead)
   const moveTo = async (t: Task, sectionId: string) => {
-    const prev = tasks;
+    const prev = tasksRef.current;
     setTasks((ts) => ts.map((x) => (x.id === t.id ? { ...x, section_id: sectionId } : x)));
     try {
       await mutate(token, {
@@ -168,32 +211,106 @@ export default function App() {
       });
     } catch {
       setTasks(prev);
-      setError("Move failed — rolled back");
+      showToast("Move failed — rolled back");
     }
   };
 
-  const quickAdd = async (content: string) => {
+  const addTask = async (raw: string, fallbackSection?: string) => {
+    const p = parseAdd(raw, sections);
+    if (!p.content) return;
+    const sectionId = (p.sectionName && sections[p.sectionName.toLowerCase()]) || fallbackSection;
     const tmp: Task = {
       id: `tmp-${Date.now()}`,
-      content,
-      priority: 1,
-      section_id: sections.buffer,
+      content: p.content,
+      priority: p.priority ?? 1,
+      section_id: sectionId ?? null,
+      duration: p.duration != null ? { amount: p.duration, unit: "minute" } : undefined,
     };
     setTasks((ts) => [...ts, tmp]);
     try {
       await mutate(token, {
         path: "/tasks",
         method: "POST",
-        body: { content, project_id: projectId, section_id: sections.buffer },
+        body: {
+          content: p.content,
+          project_id: projectId,
+          ...(sectionId ? { section_id: sectionId } : {}),
+          ...(p.duration != null ? { duration: p.duration, duration_unit: "minute" } : {}),
+          ...(p.priority ? { priority: p.priority } : {}),
+        },
       });
     } catch {
       setTasks((ts) => ts.filter((t) => t.id !== tmp.id));
-      setError("Add failed — rolled back");
+      showToast("Add failed — rolled back");
     }
   };
 
+  const changeDuration = async (t: Task, minutes: number) => {
+    setTasks((ts) =>
+      sortTasks(
+        ts.map((x) => (x.id === t.id ? { ...x, duration: { amount: minutes, unit: "minute" } } : x)),
+      ),
+    );
+    await mutate(token, {
+      path: `/tasks/${t.id}`,
+      method: "POST",
+      body: { duration: minutes, duration_unit: "minute" },
+    });
+  };
+
+  // partial update, optimistic + rollback; rethrows so the editor can clear its indicator
+  const updateTask = async (id: string, fields: { content?: string; description?: string }) => {
+    const prev = tasksRef.current;
+    setTasks((ts) => ts.map((x) => (x.id === id ? { ...x, ...fields } : x)));
+    try {
+      await mutate(token, { path: `/tasks/${id}`, method: "POST", body: fields });
+    } catch {
+      setTasks(prev);
+      showToast("Save failed — rolled back");
+      throw new Error("save failed");
+    }
+  };
+
+  const deleteTask = async (t: Task) => {
+    const snapshot = t;
+    const prev = tasksRef.current;
+    setExpandedId(null);
+    setTasks((ts) => ts.filter((x) => x.id !== t.id));
+    try {
+      await mutate(token, { path: `/tasks/${t.id}`, method: "DELETE" });
+    } catch {
+      setTasks(prev);
+      showToast("Delete failed — rolled back");
+      return;
+    }
+    showToast("Task deleted.", async () => {
+      try {
+        const created = (await api(token, "/tasks", "POST", {
+          content: snapshot.content,
+          description: snapshot.description ?? "",
+          project_id: projectId,
+          ...(snapshot.section_id ? { section_id: snapshot.section_id } : {}),
+          priority: snapshot.priority,
+          ...(snapshot.duration
+            ? { duration: snapshot.duration.amount, duration_unit: "minute" }
+            : {}),
+        })) as Task;
+        setTasks((ts) => [...ts, created]);
+        setSessions((ss) => {
+          const next = ss.map((s) =>
+            s.task_id === snapshot.id ? { ...s, task_id: created.id } : s,
+          );
+          save("tb_sessions", next);
+          return next;
+        });
+      } catch {
+        showToast("Undo failed");
+      }
+    });
+  };
+
   const archiveAll = async () => {
-    const prev = tasks;
+    const prev = tasksRef.current;
     const done = tasks.filter((t) => t.section_id === sections.done);
     setTasks((ts) => ts.filter((t) => t.section_id !== sections.done));
     try {
@@ -281,7 +398,7 @@ export default function App() {
           </div>
         </div>
       </header>
-      <main className="mx-auto max-w-[640px] px-4 py-8">
+      <main className="mx-auto max-w-[640px] px-4 pt-8 pb-24 md:pb-8">
         {error && <p className="mb-4 text-[13px] text-zinc-500">{error}</p>}
         {view === "review" ? (
           <Review
@@ -292,41 +409,73 @@ export default function App() {
           />
         ) : view === "backlog" ? (
           <section>
-            <p className="mb-4 text-[13px] text-zinc-500">Click a task to pull it into Focus.</p>
-            <BacklogList
-              tasks={backlogTasks}
-              canPull={!!sections.focus}
-              onMove={(t) => moveTo(t, sections.focus)}
+            {backlogTasks.length === 0 ? (
+              <p className="py-4 text-[13px] text-zinc-500">Backlog is empty.</p>
+            ) : (
+              <ul className="space-y-0.5">
+                {backlogTasks.map((t) => (
+                  <TaskRow
+                    key={t.id}
+                    t={t}
+                    expanded={expandedId === t.id}
+                    onToggle={() => toggleRow(t.id)}
+                    onMove={sections.focus ? (x) => moveTo(x, sections.focus) : undefined}
+                    onUpdate={updateTask}
+                    onDuration={changeDuration}
+                    onDelete={deleteTask}
+                  />
+                ))}
+              </ul>
+            )}
+            <AddRow
+              placeholder="＋ Add to Backlog…"
+              sections={sections}
+              onAdd={(raw) => addTask(raw, sections.backlog)}
             />
           </section>
         ) : (
           <FocusView
             focusTasks={focusTasks}
             bufferTasks={bufferTasks}
-            backlogTasks={backlogTasks}
-            canBuffer={!!sections.buffer}
-            canPull={!!sections.focus}
+            backlogCount={backlogTasks.length}
+            sections={sections}
+            expandedId={expandedId}
+            onToggle={toggleRow}
             onMove={(t) => moveTo(t, sections.focus)}
             onDemote={sections.backlog ? (t) => moveTo(t, sections.backlog) : undefined}
-            onAdd={quickAdd}
-            onDuration={async (t, minutes) => {
-              setTasks((ts) =>
-                sortTasks(
-                  ts.map((x) =>
-                    x.id === t.id ? { ...x, duration: { amount: minutes, unit: "minute" } } : x,
-                  ),
-                ),
-              );
-              await mutate(token, {
-                path: `/tasks/${t.id}`,
-                method: "POST",
-                body: { duration: minutes, duration_unit: "minute" },
-              });
-            }}
+            onAdd={addTask}
+            onUpdate={updateTask}
+            onDuration={changeDuration}
+            onDelete={deleteTask}
             onStart={(t, minutes) => setActive({ task: t, minutes })}
+            onGoBacklog={() => setView("backlog")}
           />
         )}
       </main>
+      <div className="fixed inset-x-0 bottom-0 z-20 border-t border-zinc-800 bg-zinc-950 px-3 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] md:hidden">
+        <AddRow
+          placeholder="＋ Quick add to Buffer…"
+          alwaysOpen
+          sections={sections}
+          onAdd={(raw) => addTask(raw, sections.buffer)}
+        />
+      </div>
+      {toast && (
+        <div className="fixed bottom-20 left-1/2 z-40 -translate-x-1/2 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-2 text-[13px] whitespace-nowrap md:bottom-6">
+          {toast.msg}
+          {toast.undo && (
+            <button
+              className="ml-2 text-orange-500"
+              onClick={() => {
+                toast.undo?.();
+                setToast(null);
+              }}
+            >
+              Undo
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -390,69 +539,39 @@ function Settings({
   );
 }
 
-function BacklogList({
-  tasks,
-  canPull,
-  onMove,
-}: {
-  tasks: Task[];
-  canPull: boolean;
-  onMove: (t: Task) => void;
-}) {
-  if (!tasks.length) return <p className="py-4 text-[13px] text-zinc-500">Backlog is empty.</p>;
-  return (
-    <ul className="divide-y divide-zinc-800">
-      {tasks.map((t) => (
-        <li key={t.id}>
-          <button
-            className="w-full rounded-md px-2 py-2 text-left text-[15px] transition-colors duration-150 hover:bg-zinc-900 disabled:opacity-40"
-            disabled={!canPull}
-            onClick={() => onMove(t)}
-          >
-            {t.content}
-            {t.duration && (
-              <span className="ml-2 font-mono text-[13px] tabular-nums text-zinc-500">
-                {t.duration.amount}m
-              </span>
-            )}
-            {t.due && (
-              <span className="ml-2 text-[13px] text-zinc-600">
-                {t.due.datetime ?? t.due.date}
-              </span>
-            )}
-          </button>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
 function FocusView({
   focusTasks,
   bufferTasks,
-  backlogTasks,
-  canBuffer,
-  canPull,
+  backlogCount,
+  sections,
+  expandedId,
+  onToggle,
   onMove,
   onDemote,
   onAdd,
+  onUpdate,
   onDuration,
+  onDelete,
   onStart,
+  onGoBacklog,
 }: {
   focusTasks: Task[];
   bufferTasks: Task[];
-  backlogTasks: Task[];
-  canBuffer: boolean;
-  canPull: boolean;
+  backlogCount: number;
+  sections: SectionMap;
+  expandedId: string | null;
+  onToggle: (id: string) => void;
   onMove: (t: Task) => void;
   onDemote?: (t: Task) => void;
-  onAdd: (content: string) => void;
+  onAdd: (raw: string, fallbackSection?: string) => void;
+  onUpdate: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
   onDuration: (t: Task, minutes: number) => void;
+  onDelete: (t: Task) => void;
   onStart: (t: Task, minutes: number) => void;
+  onGoBacklog: () => void;
 }) {
-  const [drawer, setDrawer] = useState(false);
   const [dismissed, setDismissed] = useState(() => load("tb_plan_dismissed", ""));
-  const showPlan = focusTasks.length === 0 && backlogTasks.length > 0 && dismissed !== todayStr();
+  const showPlan = focusTasks.length === 0 && backlogCount > 0 && dismissed !== todayStr();
 
   return (
     <div className="space-y-6">
@@ -460,7 +579,7 @@ function FocusView({
         <div className="flex items-center justify-between gap-4 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-3">
           <p className="text-[13px] text-zinc-400">Plan your day — pull up to 3 tasks into Focus</p>
           <div className="flex shrink-0 gap-1">
-            <button className={`${btn} text-orange-500`} onClick={() => setDrawer(true)}>
+            <button className={`${btn} text-orange-500`} onClick={onGoBacklog}>
               Pull from Backlog
             </button>
             <button
@@ -476,31 +595,31 @@ function FocusView({
         </div>
       )}
 
-      {canBuffer && (
+      {sections.buffer && (
         <section>
-          <QuickAdd onAdd={onAdd} />
+          <p className="mb-1 px-2 text-[13px] text-zinc-500">Buffer</p>
           {bufferTasks.length > 0 && (
-            <ul className="mt-2 flex flex-wrap gap-2">
+            <ul className="space-y-0.5">
               {bufferTasks.map((t) => (
-                <li
+                <TaskRow
                   key={t.id}
-                  className="flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 py-1 pr-1 pl-3 text-[13px]"
-                >
-                  <span className="mr-1 max-w-[220px] truncate">{t.content}</span>
-                  {BUFFER_QUICK.map((m) => (
-                    <button
-                      key={m}
-                      className="rounded px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-orange-500 transition-colors duration-150 hover:bg-zinc-800"
-                      title={`Start ${m}m timebox`}
-                      onClick={() => onStart(t, m)}
-                    >
-                      ▶{m}
-                    </button>
-                  ))}
-                </li>
+                  t={t}
+                  expanded={expandedId === t.id}
+                  onToggle={() => onToggle(t.id)}
+                  onStart={onStart}
+                  onUpdate={onUpdate}
+                  onDuration={onDuration}
+                  onDelete={onDelete}
+                />
               ))}
             </ul>
           )}
+          <AddRow
+            placeholder="＋ Quick add to Buffer…"
+            hotkey="b"
+            sections={sections}
+            onAdd={(raw) => onAdd(raw, sections.buffer)}
+          />
         </section>
       )}
 
@@ -510,114 +629,416 @@ function FocusView({
         </p>
       )}
 
-      {focusTasks.length === 0 ? (
-        <button
-          className="block w-full py-8 text-center text-[13px] text-zinc-500"
-          onClick={() => setDrawer(true)}
-        >
-          Focus is empty. Pull from Backlog →
-        </button>
-      ) : (
-        <ul className="space-y-3">
-          {focusTasks.map((t) => (
-            <TaskCard key={t.id} t={t} onDuration={onDuration} onStart={onStart} onDemote={onDemote} />
-          ))}
-        </ul>
-      )}
-
-      <section className="border-t border-zinc-800 pt-4">
-        <button className={btn} onClick={() => setDrawer((d) => !d)}>
-          {drawer ? "Hide Backlog" : `Pull from Backlog (${backlogTasks.length})`}
-        </button>
-        {drawer && (
-          <div className="mt-2">
-            <BacklogList tasks={backlogTasks} canPull={canPull} onMove={onMove} />
-          </div>
+      <section>
+        <p className="mb-1 px-2 text-[13px] text-zinc-500">Focus</p>
+        {focusTasks.length === 0 ? (
+          <button
+            className="block w-full py-8 text-center text-[13px] text-zinc-500"
+            onClick={onGoBacklog}
+          >
+            Focus is empty. Pull from Backlog →
+          </button>
+        ) : (
+          <ul className="space-y-0.5">
+            {focusTasks.map((t) => (
+              <TaskRow
+                key={t.id}
+                t={t}
+                large
+                expanded={expandedId === t.id}
+                onToggle={() => onToggle(t.id)}
+                onStart={onStart}
+                onDemote={onDemote}
+                onUpdate={onUpdate}
+                onDuration={onDuration}
+                onDelete={onDelete}
+              />
+            ))}
+          </ul>
+        )}
+        {sections.focus && (
+          <AddRow
+            placeholder="＋ Add to Focus…"
+            hotkey="n"
+            sections={sections}
+            onAdd={(raw) => onAdd(raw, sections.focus)}
+          />
         )}
       </section>
     </div>
   );
 }
 
-function QuickAdd({ onAdd }: { onAdd: (content: string) => void }) {
-  const [v, setV] = useState("");
+function TaskRow({
+  t,
+  large,
+  expanded,
+  onToggle,
+  onStart,
+  defaultMinutes = 5,
+  onMove,
+  onDemote,
+  onUpdate,
+  onDuration,
+  onDelete,
+}: {
+  t: Task;
+  large?: boolean;
+  expanded: boolean;
+  onToggle: () => void;
+  onStart?: (t: Task, minutes: number) => void;
+  defaultMinutes?: number;
+  onMove?: (t: Task) => void;
+  onDemote?: (t: Task) => void;
+  onUpdate: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
+  onDuration: (t: Task, minutes: number) => void;
+  onDelete: (t: Task) => void;
+}) {
+  const rootRef = useRef<HTMLLIElement>(null);
+
+  // collapse on tap-outside / Esc (collapse flushes via RowEditor unmount)
+  useEffect(() => {
+    if (!expanded) return;
+    const down = (e: PointerEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) onToggle();
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onToggle();
+    };
+    document.addEventListener("pointerdown", down);
+    window.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("pointerdown", down);
+      window.removeEventListener("keydown", key);
+    };
+  }, [expanded, onToggle]);
+
+  const dur = t.duration && (
+    <span className="shrink-0 font-mono text-[13px] tabular-nums text-zinc-500">
+      {t.duration.amount}m
+    </span>
+  );
+  const actions = (
+    <>
+      {onStart && (
+        <button
+          className="shrink-0 rounded px-2 py-1 text-orange-500 transition-colors duration-150 hover:bg-zinc-800"
+          title="Start timebox"
+          onClick={() => onStart(t, t.duration?.amount ?? defaultMinutes)}
+        >
+          ▶
+        </button>
+      )}
+      {onMove && (
+        <button
+          className={`${btn} shrink-0 px-2 py-1`}
+          title="Pull into Focus"
+          onClick={() => onMove(t)}
+        >
+          →
+        </button>
+      )}
+    </>
+  );
+
   return (
-    <input
-      className={input}
-      placeholder="＋ Quick add to Buffer…"
-      value={v}
-      onChange={(e) => setV(e.target.value)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" && v.trim()) {
-          onAdd(v.trim());
-          setV("");
-        }
-      }}
-    />
+    <li
+      ref={rootRef}
+      className={`rounded-md border-l-2 transition-colors duration-150 ${
+        expanded
+          ? "border-l-orange-500 bg-zinc-900 ring-1 ring-zinc-700"
+          : `${pBar(t.priority)} hover:bg-zinc-900 active:bg-zinc-800`
+      }`}
+    >
+      {expanded ? (
+        <RowEditor
+          t={t}
+          large={large}
+          dur={dur}
+          actions={actions}
+          onClose={onToggle}
+          onUpdate={onUpdate}
+          onDuration={onDuration}
+          onDemote={onDemote}
+          onDelete={onDelete}
+        />
+      ) : (
+        <div className={`flex items-center gap-2 px-2 ${large ? "min-h-14" : "min-h-11"}`}>
+          <button
+            className={`min-w-0 flex-1 truncate text-left ${large ? "text-[15px] font-medium" : "text-[14px]"}`}
+            onClick={onToggle}
+          >
+            {t.content}
+          </button>
+          {dur}
+          {actions}
+        </div>
+      )}
+    </li>
   );
 }
 
-function TaskCard({
+function RowEditor({
+  t,
+  large,
+  dur,
+  actions,
+  onClose,
+  onUpdate,
+  onDuration,
+  onDemote,
+  onDelete,
+}: {
+  t: Task;
+  large?: boolean;
+  dur: ReactNode;
+  actions: ReactNode;
+  onClose: () => void;
+  onUpdate: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
+  onDuration: (t: Task, minutes: number) => void;
+  onDemote?: (t: Task) => void;
+  onDelete: (t: Task) => void;
+}) {
+  const [title, setTitle] = useState(t.content);
+  const [desc, setDesc] = useState(t.description ?? "");
+  const [saveState, setSaveState] = useState<"" | "saving" | "saved">("");
+  const [confirming, setConfirming] = useState(false);
+  const titleLive = useRef(title);
+  titleLive.current = title;
+  const descLive = useRef(desc);
+  descLive.current = desc;
+  const tLive = useRef(t);
+  tLive.current = t;
+  const savedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const debRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  const persist = async (fields: { content?: string; description?: string }) => {
+    setSaveState("saving");
+    clearTimeout(savedTimer.current);
+    try {
+      await onUpdate(t.id, fields);
+      setSaveState("saved");
+      savedTimer.current = setTimeout(() => setSaveState(""), 1000);
+    } catch {
+      setSaveState(""); // rollback toast already shown by onUpdate
+    }
+  };
+
+  // refs keep this closure current, so the unmount flush never saves stale values
+  const flush = () => {
+    clearTimeout(debRef.current);
+    const v = titleLive.current.trim();
+    if (v && v !== tLive.current.content) persist({ content: v });
+    if (descLive.current !== (tLive.current.description ?? ""))
+      persist({ description: descLive.current });
+  };
+  // ponytail: unmount = collapse/switch row — auto-save happens here, always
+  useEffect(() => () => flush(), []);
+
+  // auto-grow textarea
+  const descRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const el = descRef.current;
+    if (el) {
+      el.style.height = "0";
+      el.style.height = `${el.scrollHeight}px`;
+    }
+  }, [desc]);
+
+  return (
+    <div>
+      {/* title morphs in place: same font/line-height as the collapsed button, so no layout shift */}
+      <div
+        className={`flex items-center gap-2 px-2 ${large ? "min-h-14" : "min-h-11"}`}
+        onClick={(e) => {
+          if (!(e.target as HTMLElement).closest("input,button")) onClose();
+        }}
+      >
+        <input
+          autoFocus
+          className={`min-w-0 flex-1 bg-transparent p-0 text-left outline-none ${
+            large ? "text-[15px] font-medium" : "text-[14px]"
+          }`}
+          value={title}
+          onChange={(e) => {
+            setTitle(e.target.value);
+            clearTimeout(debRef.current);
+            debRef.current = setTimeout(flush, 500);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onClose();
+          }}
+        />
+        {saveState && (
+          <span className="shrink-0 text-[12px] text-zinc-500 transition-opacity duration-150">
+            {saveState === "saving" ? "Saving…" : "Saved ✓"}
+          </span>
+        )}
+        {dur}
+        {actions}
+      </div>
+      <div className="row-expand">
+        <div className="space-y-2 px-2 pb-3">
+          <div className="border-t border-zinc-800" />
+          <textarea
+            ref={descRef}
+            className="w-full resize-none overflow-hidden bg-transparent font-mono text-[13px] text-zinc-400 outline-none placeholder:text-zinc-600"
+            placeholder="Add notes…"
+            rows={2}
+            value={desc}
+            onChange={(e) => {
+              setDesc(e.target.value);
+              clearTimeout(debRef.current);
+              debRef.current = setTimeout(flush, 500);
+            }}
+          />
+          <div className="flex items-center gap-2">
+            <DurationChips t={t} onDuration={onDuration} />
+            {onDemote && (
+              <button className={btn} title="Move back to Backlog" onClick={() => onDemote(t)}>
+                ↓ Backlog
+              </button>
+            )}
+            <button
+              className={`ml-auto text-[13px] transition-colors duration-150 ${
+                confirming ? "text-red-500" : "text-zinc-600 hover:text-zinc-400"
+              }`}
+              onClick={() => (confirming ? onDelete(t) : setConfirming(true))}
+            >
+              {confirming ? "Click again to confirm" : "Delete"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DurationChips({
   t,
   onDuration,
-  onStart,
-  onDemote,
 }: {
   t: Task;
   onDuration: (t: Task, minutes: number) => void;
-  onStart: (t: Task, minutes: number) => void;
-  onDemote?: (t: Task) => void;
 }) {
-  const lb =
-    t.priority === 4
-      ? "border-l-zinc-200"
-      : t.priority === 3
-        ? "border-l-zinc-500"
-        : t.priority === 2
-          ? "border-l-zinc-700"
-          : "border-l-zinc-800";
   return (
-    <li className={`rounded-md border border-zinc-800 border-l-2 bg-zinc-900 p-4 ${lb}`}>
-      <div className="flex items-center justify-between gap-4">
-        <div className="min-w-0">
-          <p className="truncate text-[15px] font-medium">{t.content}</p>
-          <p className="mt-0.5 font-mono text-[13px] tabular-nums text-zinc-500">
-            {t.duration ? `${t.duration.amount}m` : "no duration"}
-            {t.due && ` · ${t.due.datetime ?? t.due.date}`}
-          </p>
-        </div>
+    <div className="flex gap-1">
+      {QUICK.map((m) => (
         <button
-          className="shrink-0 rounded-md px-4 py-2 text-[15px] font-medium text-orange-500 transition-colors duration-150 hover:bg-zinc-800"
-          onClick={() => onStart(t, t.duration?.amount ?? 25)}
+          key={m}
+          className={`rounded-md border px-2 py-0.5 font-mono text-[11px] tabular-nums transition-colors duration-150 ${
+            t.duration?.amount === m
+              ? "border-zinc-600 text-zinc-200"
+              : "border-zinc-800 text-zinc-500 hover:bg-zinc-800"
+          }`}
+          onClick={() => onDuration(t, m)}
         >
-          ▶ Start
+          {m}
         </button>
-      </div>
-      <div className="mt-3 flex gap-1">
-        {QUICK.map((m) => (
-          <button
-            key={m}
-            className={`rounded-md border px-2 py-0.5 font-mono text-[11px] tabular-nums transition-colors duration-150 ${
-              t.duration?.amount === m
-                ? "border-zinc-600 text-zinc-200"
-                : "border-zinc-800 text-zinc-500 hover:bg-zinc-800"
-            }`}
-            onClick={() => onDuration(t, m)}
-          >
-            {m}
-          </button>
-        ))}
-        {onDemote && (
-          <button
-            className={`${btn} ml-auto`}
-            title="Move back to Backlog"
-            onClick={() => onDemote(t)}
-          >
-            ↓ Backlog
-          </button>
-        )}
-      </div>
-    </li>
+      ))}
+    </div>
+  );
+}
+
+function AddRow({
+  placeholder,
+  hotkey,
+  alwaysOpen,
+  sections,
+  onAdd,
+}: {
+  placeholder: string;
+  hotkey?: string;
+  alwaysOpen?: boolean;
+  sections: SectionMap;
+  onAdd: (raw: string) => void;
+}) {
+  const [open, setOpen] = useState(!!alwaysOpen);
+  const [v, setV] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!hotkey) return;
+    const h = (e: KeyboardEvent) => {
+      if (
+        e.key.toLowerCase() === hotkey &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !(e.target instanceof HTMLInputElement) &&
+        !(e.target instanceof HTMLTextAreaElement)
+      ) {
+        e.preventDefault();
+        setOpen(true);
+      }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [hotkey]);
+
+  useEffect(() => {
+    if (open) inputRef.current?.focus();
+  }, [open]);
+
+  const parsed = parseAdd(v, sections);
+  const submit = () => {
+    const raw = v.trim();
+    if (raw) {
+      onAdd(raw);
+      setV("");
+    }
+  };
+
+  if (!open)
+    return (
+      <button
+        className="min-h-11 w-full rounded-md px-2 text-left text-[13px] text-zinc-600 transition-colors duration-150 hover:bg-zinc-900"
+        onClick={() => setOpen(true)}
+      >
+        {placeholder}
+      </button>
+    );
+  return (
+    <div className="py-1">
+      <input
+        ref={inputRef}
+        className={input}
+        placeholder={placeholder}
+        value={v}
+        onChange={(e) => setV(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            submit();
+          } else if (e.key === "Escape") {
+            setV("");
+            if (!alwaysOpen) setOpen(false);
+          }
+        }}
+        onBlur={() => {
+          if (!alwaysOpen) setOpen(false);
+        }}
+      />
+      {v.trim() && (
+        <div className="mt-1 flex flex-wrap gap-1 font-mono text-[11px] text-zinc-500">
+          <span className="rounded border border-zinc-800 px-1.5 py-0.5">
+            {parsed.content || "…"}
+          </span>
+          {parsed.duration != null && (
+            <span className="rounded border border-zinc-800 px-1.5 py-0.5">{parsed.duration}m</span>
+          )}
+          {parsed.sectionName && (
+            <span className="rounded border border-zinc-800 px-1.5 py-0.5">
+              #{parsed.sectionName}
+            </span>
+          )}
+          {parsed.priority != null && (
+            <span className="rounded border border-zinc-800 px-1.5 py-0.5">
+              p{5 - parsed.priority}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -707,6 +1128,7 @@ function Review({
   );
 }
 
+// ponytail: tap anywhere toggles pause; buttons stopPropagation
 function Timer({
   task,
   minutes,
@@ -797,13 +1219,18 @@ function Timer({
     });
   };
 
+  const tbtn =
+    "min-h-12 rounded-md px-3 py-3 text-[13px] text-zinc-400 transition-colors duration-150 hover:bg-zinc-800 hover:text-zinc-200";
+  const tap = (e: React.MouseEvent) => e.stopPropagation();
+
   return (
-    <div className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden">
-      <h2 className="absolute top-16 max-w-3xl px-4 text-center text-[20px] text-zinc-400">
-        {task.content}
-      </h2>
+    <div
+      className="relative flex min-h-screen flex-col items-center justify-center gap-6 overflow-hidden px-4 py-8"
+      onClick={() => setPaused((p) => !p)}
+    >
+      <h2 className="max-w-3xl text-center text-[20px] text-zinc-400">{task.content}</h2>
       <div className="relative flex items-center justify-center">
-        <svg viewBox="0 0 100 100" className="absolute h-[92vmin] w-[92vmin] -rotate-90">
+        <svg viewBox="0 0 100 100" className="absolute h-[64vmin] w-[64vmin] -rotate-90">
           <circle cx="50" cy="50" r="48" fill="none" stroke="#27272a" strokeWidth="0.75" />
           <circle
             cx="50"
@@ -819,23 +1246,36 @@ function Timer({
           />
         </svg>
         <p
-          className={`relative font-mono text-[min(22vw,26vh)] leading-none font-bold tabular-nums ${
+          className={`relative font-mono text-[14vmin] leading-none font-bold tabular-nums ${
             frac <= 0.1 ? "text-orange-500" : "text-zinc-100"
           }`}
         >
           {fmt(left)}
         </p>
       </div>
-      <div className="absolute bottom-16 flex gap-2">
-        <button className={btn} onClick={() => extend(5)}>
+      <div className="flex w-full max-w-xs flex-col gap-2 px-6 sm:w-auto sm:max-w-none sm:flex-row">
+        <button
+          className={tbtn}
+          onClick={(e) => {
+            tap(e);
+            extend(5);
+          }}
+        >
           +5 min
         </button>
-        <button className={btn} onClick={() => setPaused((p) => !p)}>
+        <button
+          className={tbtn}
+          onClick={(e) => {
+            tap(e);
+            setPaused((p) => !p);
+          }}
+        >
           {paused ? "Resume" : "Pause"}
         </button>
         <button
-          className={`${btn} text-orange-500`}
-          onClick={() => {
+          className={`${tbtn} text-orange-500`}
+          onClick={(e) => {
+            tap(e);
             logAndExit(true);
             onComplete();
           }}
@@ -843,8 +1283,9 @@ function Timer({
           Complete ✓
         </button>
         <button
-          className={btn}
-          onClick={() => {
+          className={tbtn}
+          onClick={(e) => {
+            tap(e);
             logAndExit(false);
             onExit();
           }}
@@ -854,11 +1295,14 @@ function Timer({
       </div>
 
       {timesUp && (
-        <div className="fixed inset-0 z-20 flex items-center justify-center bg-zinc-950/80">
-          <div className="w-full max-w-sm space-y-2 rounded-md border border-zinc-800 bg-zinc-900 p-6">
+        <div
+          className="fixed inset-0 z-20 flex items-center justify-center bg-zinc-950/80"
+          onClick={tap}
+        >
+          <div className="w-full max-w-xs space-y-2 rounded-md border border-zinc-800 bg-zinc-900 p-6">
             <h3 className="mb-4 text-[20px] font-semibold">Time's up!</h3>
             <button
-              className="block w-full rounded-md px-4 py-2 text-[15px] font-medium text-orange-500 transition-colors duration-150 hover:bg-zinc-800"
+              className={`${tbtn} block w-full text-orange-500`}
               onClick={() => {
                 logAndExit(true);
                 onComplete();
@@ -866,14 +1310,11 @@ function Timer({
             >
               Mark complete
             </button>
-            <button
-              className={`${btn} block w-full`}
-              onClick={() => extend(5)}
-            >
+            <button className={`${tbtn} block w-full`} onClick={() => extend(5)}>
               Extend +5 min
             </button>
             <button
-              className={`${btn} block w-full`}
+              className={`${tbtn} block w-full`}
               onClick={() => {
                 logAndExit(false);
                 onExit();

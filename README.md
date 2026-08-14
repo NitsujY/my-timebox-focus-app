@@ -32,8 +32,10 @@ Tasks in no section are treated as Backlog. Section IDs are cached in localStora
 
 ## Use
 
-- **Focus tab**: Buffer quick-add strip (Enter to capture), Buffer chips, then Focus cards. Set a card's duration with the 15/25/50/90 chips (written back to Todoist), then ▶ Start. More than 3 Focus tasks shows a warning banner. If Focus is empty and Backlog isn't, a morning banner prompts you to plan your day.
-- **Timer**: fullscreen countdown with progress ring. `Space` pause/resume, `Enter` complete, `Esc` exit. Time's up → alarm, notification, and a complete/extend/stop prompt.
+- **Task rows**: every task is a compact single-line row (▶ Start always visible). Tap a row to expand it in place — edit title (Enter/blur saves), notes (auto-saves after 500ms and on collapse), duration chips, two-step delete with 3s **Undo** toast. Only one row expands at a time; tap outside or `Esc` collapses (auto-saving).
+- **Fast add**: each section has a ghost "＋ Add…" row; input stays open after Enter for rapid entry. Supports mini syntax: `Fix VPN 15m #Focus p1` (duration, target section, priority — p1 = urgent). On mobile a sticky bottom bar (safe-area aware) quick-adds to Buffer. Desktop: `N` opens the Focus input, `B` the Buffer input.
+- **Focus tab**: Buffer rows on top, then Focus rows (max 3, warning banner above that). If Focus is empty and Backlog isn't, a morning banner prompts you to plan your day. Backlog rows pull into Focus via the `→` button.
+- **Timer**: fullscreen countdown with progress ring. `Space` (or tap anywhere) pause/resume, `Enter` complete, `Esc` exit. Time's up → alarm, notification, and a complete/extend/stop prompt.
 - **Review tab**: today's stats (focused minutes, completions, planned-vs-actual %) and a table of Done tasks — planned (Todoist duration) vs actual (local session log) vs delta. **Archive All** closes every Done task and shows "Day complete ✓".
 
 Tasks re-sync from Todoist every 30s. Mutations are optimistic with rollback; if you're offline they queue locally and flush on reconnect. Uses the Todoist API v1 (`/api/v1`).
