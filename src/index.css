@@ -1,0 +1,19 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: #09090b;
+  color: #f4f4f5;
+}
+
+@keyframes flash {
+  0%, 100% { background: transparent; }
+  50% { background: rgba(249, 115, 22, 0.2); }
+}
+.flash {
+  animation: flash 0.6s ease-in-out 6;
+}
