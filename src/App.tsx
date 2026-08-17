@@ -19,6 +19,7 @@ type Prefs = {
   bufferOn: boolean;
   timerEnd: "hard" | "gentle";
   planBanner: boolean;
+  completeAction: "done" | "close";
 };
 const DEFAULT_PREFS: Prefs = {
   focusCap: 3,
@@ -26,6 +27,7 @@ const DEFAULT_PREFS: Prefs = {
   bufferOn: true,
   timerEnd: "hard",
   planBanner: true,
+  completeAction: "done",
 };
 
 type Task = {
@@ -415,7 +417,7 @@ export default function App() {
       setArchivedDay(todayStr());
     } catch {
       setTasks(prev);
-      setError("Archive failed — rolled back");
+      setError("Complete failed — rolled back");
     }
   };
 
@@ -462,8 +464,12 @@ export default function App() {
         onExit={() => setActive(null)}
         onLog={logSession}
         onComplete={async () => {
-          await mutate(token, { path: `/tasks/${active.task.id}/close`, method: "POST" });
-          setTasks((ts) => ts.filter((t) => t.id !== active.task.id));
+          if (prefs.completeAction === "done" && roles.done) {
+            await moveTo(active.task, roles.done); // ponytail: move, not close — Done section feeds estimation/review; evening archive closes them
+          } else {
+            await mutate(token, { path: `/tasks/${active.task.id}/close`, method: "POST" });
+            setTasks((ts) => ts.filter((t) => t.id !== active.task.id));
+          }
           setActive(null);
         }}
       />
@@ -547,6 +553,12 @@ export default function App() {
           <SettingsPage
             prefs={prefs}
             onPrefs={updatePrefs}
+            token={token}
+            projectId={projectId}
+            onProject={(id) => {
+              save("tb_project", id);
+              setProjectId(id); // refresh() re-fetches tasks/sections and re-detects roles
+            }}
             mappingProps={{
               sectionList,
               roles,
@@ -1365,7 +1377,7 @@ function Review({
             className="rounded-md border border-zinc-800 px-4 py-2 text-[13px] text-orange-500 transition-colors duration-150 hover:bg-zinc-900"
             onClick={onArchiveAll}
           >
-            Archive All
+            Complete all
           </button>
         </>
       )}
@@ -1408,8 +1420,10 @@ function Timer({
       document.title = `${fmt(rem)} - ${task.content}`;
       if (rem <= 0 && !alarmedRef.current) {
         alarmedRef.current = true;
-        if (Notification.permission === "granted")
-          new Notification("Time's up!", { body: task.content });
+        if (Notification.permission === "granted") {
+          const n = new Notification("Time's up!", { body: task.content });
+          n.onclick = () => window.focus(); // ponytail: browsers only allow window.focus() from a user gesture like this
+        }
         if (!gentle) {
           alarm();
           document.body.classList.add("flash");
@@ -1850,6 +1864,9 @@ function SettingsPage({
   onViewGuide,
   onTheory,
   onReset,
+  token,
+  projectId,
+  onProject,
 }: {
   prefs: Prefs;
   onPrefs: (p: Partial<Prefs>) => void;
@@ -1857,6 +1874,9 @@ function SettingsPage({
   onViewGuide: () => void;
   onTheory: () => void;
   onReset: () => void;
+  token: string;
+  projectId: string;
+  onProject: (id: string) => void;
 }) {
   const h = "mb-2 text-[13px] font-medium text-zinc-500";
   const row = "flex items-center justify-between gap-4 py-2";
@@ -1864,6 +1884,10 @@ function SettingsPage({
     `relative h-6 w-10 shrink-0 rounded-full transition-colors ${on ? "bg-orange-500" : "bg-zinc-700"}`;
   return (
     <div className="max-w-md space-y-8">
+      <section>
+        <h2 className={h}>List (Todoist project)</h2>
+        <ProjectSelect token={token} projectId={projectId} onProject={onProject} />
+      </section>
       <section>
         <h2 className={h}>Section roles</h2>
         <MappingScreen {...mappingProps} />
@@ -1925,6 +1949,24 @@ function SettingsPage({
           </button>
         </div>
         <div className={row}>
+          <span className="text-[14px]">On complete</span>
+          <div className="flex gap-1">
+            {(["done", "close"] as const).map((m) => (
+              <button
+                key={m}
+                className={`rounded-md border px-3 py-1 text-[13px] ${
+                  prefs.completeAction === m
+                    ? "border-zinc-600 text-zinc-200"
+                    : "border-zinc-800 text-zinc-500 hover:bg-zinc-800"
+                }`}
+                onClick={() => onPrefs({ completeAction: m })}
+              >
+                {m === "done" ? "Move to Done" : "Close task"}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className={row}>
           <span className="text-[14px]">Timer end</span>
           <div className="flex gap-1">
             {(["hard", "gentle"] as const).map((m) => (
@@ -1961,5 +2003,39 @@ function SettingsPage({
         </button>
       </section>
     </div>
+  );
+}
+
+// ponytail: native <select>, roles auto re-detect on project switch via refresh()
+function ProjectSelect({
+  token,
+  projectId,
+  onProject,
+}: {
+  token: string;
+  projectId: string;
+  onProject: (id: string) => void;
+}) {
+  const [projects, setProjects] = useState<Project[] | null>(null);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    api(token, "/projects")
+      .then((r) => setProjects(arr<Project>(r)))
+      .catch(() => setErr("Couldn't load projects"));
+  }, [token]);
+  if (err) return <p className="text-[13px] text-zinc-500">{err}</p>;
+  if (!projects) return <p className="text-[13px] text-zinc-500">Loading projects…</p>;
+  return (
+    <select
+      className={input}
+      value={projectId}
+      onChange={(e) => onProject(e.target.value)}
+    >
+      {projects.map((p) => (
+        <option key={p.id} value={p.id}>
+          {p.name}
+        </option>
+      ))}
+    </select>
   );
 }
