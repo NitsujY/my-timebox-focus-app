@@ -1005,15 +1005,6 @@ function TaskRow({
           ▶
         </button>
       )}
-      {onComplete && (
-        <button
-          className="shrink-0 rounded px-2 py-1 text-orange-500 transition-colors duration-150 hover:bg-zinc-800"
-          title="Mark complete"
-          onClick={onComplete}
-        >
-          ✓
-        </button>
-      )}
       {onMove && (
         <button
           className={`${btn} shrink-0 px-2 py-1`}
@@ -1046,6 +1037,7 @@ function TaskRow({
           onUpdate={onUpdate}
           onDuration={onDuration}
           onDemote={onDemote}
+          onComplete={onComplete}
           onDelete={onDelete}
         />
       ) : (
@@ -1074,6 +1066,7 @@ function RowEditor({
   onUpdate,
   onDuration,
   onDemote,
+  onComplete,
   onDelete,
 }: {
   t: Task;
@@ -1085,6 +1078,7 @@ function RowEditor({
   onUpdate: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
   onDuration: (t: Task, minutes: number) => void;
   onDemote?: (t: Task) => void;
+  onComplete?: () => void;
   onDelete: (t: Task) => void;
 }) {
   const [title, setTitle] = useState(t.content);
@@ -1185,6 +1179,11 @@ function RowEditor({
             {onDemote && (
               <button className={btn} title="Move back to Backlog" onClick={() => onDemote(t)}>
                 ↓ Backlog
+              </button>
+            )}
+            {onComplete && (
+              <button className={`${btn} text-orange-500`} onClick={onComplete}>
+                ✓ Complete
               </button>
             )}
             <button
