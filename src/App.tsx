@@ -20,6 +20,7 @@ type Prefs = {
   timerEnd: "hard" | "gentle";
   planBanner: boolean;
   completeAction: "done" | "close";
+  defaultMinutes: number;
 };
 const DEFAULT_PREFS: Prefs = {
   focusCap: 3,
@@ -28,6 +29,7 @@ const DEFAULT_PREFS: Prefs = {
   timerEnd: "hard",
   planBanner: true,
   completeAction: "done",
+  defaultMinutes: 5,
 };
 
 type Task = {
@@ -615,6 +617,7 @@ export default function App() {
             cap={prefs.focusCap}
             planBanner={prefs.planBanner}
             durations={prefs.durations}
+            defaultMinutes={prefs.defaultMinutes}
             expandedId={expandedId}
             onToggle={toggleRow}
             onMove={(t) => roles.focus && moveTo(t, roles.focus)}
@@ -728,6 +731,7 @@ function FocusView({
   cap,
   planBanner,
   durations,
+  defaultMinutes,
   expandedId,
   onToggle,
   onMove,
@@ -748,6 +752,7 @@ function FocusView({
   cap: number;
   planBanner: boolean;
   durations: number[];
+  defaultMinutes: number;
   expandedId: string | null;
   onToggle: (id: string) => void;
   onMove: (t: Task) => void;
@@ -801,6 +806,7 @@ function FocusView({
                   key={t.id}
                   t={t}
                   durations={durations}
+                  defaultMinutes={defaultMinutes}
                   expanded={expandedId === t.id}
                   onToggle={() => onToggle(t.id)}
                   onStart={onStart}
@@ -844,6 +850,7 @@ function FocusView({
                 t={t}
                 large
                 durations={durations}
+                defaultMinutes={defaultMinutes}
                 expanded={expandedId === t.id}
                 onToggle={() => onToggle(t.id)}
                 onStart={onStart}
@@ -1506,7 +1513,7 @@ function Timer({
       </button>
       <h2 className="max-w-3xl text-center text-[20px] text-zinc-400">{task.content}</h2>
       <div className="relative flex items-center justify-center">
-        <svg viewBox="0 0 100 100" className="absolute h-[64vmin] w-[64vmin] -rotate-90">
+        <svg viewBox="0 0 100 100" className="pointer-events-none absolute h-[64vmin] w-[64vmin] -rotate-90">
           <circle cx="50" cy="50" r="48" fill="none" stroke="#27272a" strokeWidth="0.75" />
           <circle
             cx="50"
@@ -1933,6 +1940,20 @@ function SettingsPage({
       </section>
       <section>
         <h2 className={h}>Behavior</h2>
+        <div className={row}>
+          <span className="text-[14px]">Default duration (no estimate)</span>
+          <select
+            className={`${input} w-24`}
+            value={prefs.defaultMinutes}
+            onChange={(e) => onPrefs({ defaultMinutes: +e.target.value })}
+          >
+            {prefs.durations.map((d) => (
+              <option key={d} value={d}>
+                {d}m
+              </option>
+            ))}
+          </select>
+        </div>
         <div className={row}>
           <span className="text-[14px]">Buffer section</span>
           <button
