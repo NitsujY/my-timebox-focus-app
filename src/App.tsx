@@ -409,6 +409,20 @@ export default function App() {
     });
   };
 
+  // ponytail: move, not close — Done section feeds estimation/review; evening archive closes them
+  const completeTask = async (t: Task) => {
+    if (prefs.completeAction === "done" && roles.done) {
+      await moveTo(t, roles.done);
+    } else {
+      try {
+        await mutate(token, { path: `/tasks/${t.id}/close`, method: "POST" });
+        setTasks((ts) => ts.filter((x) => x.id !== t.id));
+      } catch {
+        showToast("Complete failed");
+      }
+    }
+  };
+
   const archiveAll = async () => {
     const prev = tasksRef.current;
     const done = tasks.filter((t) => t.section_id === roles.done);
@@ -466,12 +480,7 @@ export default function App() {
         onExit={() => setActive(null)}
         onLog={logSession}
         onComplete={async () => {
-          if (prefs.completeAction === "done" && roles.done) {
-            await moveTo(active.task, roles.done); // ponytail: move, not close — Done section feeds estimation/review; evening archive closes them
-          } else {
-            await mutate(token, { path: `/tasks/${active.task.id}/close`, method: "POST" });
-            setTasks((ts) => ts.filter((t) => t.id !== active.task.id));
-          }
+          await completeTask(active.task);
           setActive(null);
         }}
       />
@@ -594,6 +603,7 @@ export default function App() {
                 expandedId={expandedId}
                 onToggle={toggleRow}
                 onMove={roles.focus ? (x) => moveTo(x, roles.focus!) : undefined}
+                onComplete={completeTask}
                 onUpdate={updateTask}
                 onDuration={changeDuration}
                 onDelete={deleteTask}
@@ -626,6 +636,7 @@ export default function App() {
             onUpdate={updateTask}
             onDuration={changeDuration}
             onDelete={deleteTask}
+            onComplete={completeTask}
             onStart={(t, minutes) => setActive({ task: t, minutes })}
             onGoBacklog={() => setView("backlog")}
           />
@@ -740,6 +751,7 @@ function FocusView({
   onUpdate,
   onDuration,
   onDelete,
+  onComplete,
   onStart,
   onGoBacklog,
 }: {
@@ -761,6 +773,7 @@ function FocusView({
   onUpdate: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
   onDuration: (t: Task, minutes: number) => void;
   onDelete: (t: Task) => void;
+  onComplete: (t: Task) => void;
   onStart: (t: Task, minutes: number) => void;
   onGoBacklog: () => void;
 }) {
@@ -810,6 +823,7 @@ function FocusView({
                   expanded={expandedId === t.id}
                   onToggle={() => onToggle(t.id)}
                   onStart={onStart}
+                  onComplete={() => onComplete(t)}
                   onUpdate={onUpdate}
                   onDuration={onDuration}
                   onDelete={onDelete}
@@ -854,6 +868,7 @@ function FocusView({
                 expanded={expandedId === t.id}
                 onToggle={() => onToggle(t.id)}
                 onStart={onStart}
+                onComplete={() => onComplete(t)}
                 onDemote={onDemote}
                 onUpdate={onUpdate}
                 onDuration={onDuration}
@@ -881,6 +896,7 @@ function BacklogList({
   expandedId,
   onToggle,
   onMove,
+  onComplete,
   onUpdate,
   onDuration,
   onDelete,
@@ -890,6 +906,7 @@ function BacklogList({
   expandedId: string | null;
   onToggle: (id: string) => void;
   onMove?: (t: Task) => void;
+  onComplete: (t: Task) => void;
   onUpdate: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
   onDuration: (t: Task, minutes: number) => void;
   onDelete: (t: Task) => void;
@@ -908,6 +925,7 @@ function BacklogList({
             expanded={expandedId === t.id}
             onToggle={() => onToggle(t.id)}
             onMove={onMove}
+            onComplete={() => onComplete(t)}
             onUpdate={onUpdate}
             onDuration={onDuration}
             onDelete={onDelete}
@@ -929,6 +947,7 @@ function TaskRow({
   expanded,
   onToggle,
   onStart,
+  onComplete,
   defaultMinutes = 5,
   onMove,
   onDemote,
@@ -942,6 +961,7 @@ function TaskRow({
   expanded: boolean;
   onToggle: () => void;
   onStart?: (t: Task, minutes: number) => void;
+  onComplete?: () => void;
   defaultMinutes?: number;
   onMove?: (t: Task) => void;
   onDemote?: (t: Task) => void;
@@ -983,6 +1003,15 @@ function TaskRow({
           onClick={() => onStart(t, t.duration?.amount ?? defaultMinutes)}
         >
           ▶
+        </button>
+      )}
+      {onComplete && (
+        <button
+          className="shrink-0 rounded px-2 py-1 text-orange-500 transition-colors duration-150 hover:bg-zinc-800"
+          title="Mark complete"
+          onClick={onComplete}
+        >
+          ✓
         </button>
       )}
       {onMove && (
