@@ -1564,8 +1564,8 @@ function Timer({
         ✕
       </button>
       <h2 className="max-w-3xl text-center text-[20px] text-zinc-400">{task.content}</h2>
-      <div className="relative flex items-center justify-center">
-        <svg viewBox="0 0 100 100" className="pointer-events-none absolute h-[64vmin] w-[64vmin] -rotate-90">
+      <div className="relative flex h-[64vmin] w-[64vmin] items-center justify-center">
+        <svg viewBox="0 0 100 100" className="pointer-events-none absolute inset-0 h-full w-full -rotate-90">
           <circle cx="50" cy="50" r="48" fill="none" stroke="#27272a" strokeWidth="0.75" />
           <circle
             cx="50"
