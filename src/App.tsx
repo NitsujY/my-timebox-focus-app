@@ -1,7 +1,32 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 const API = "https://api.todoist.com/api/v1";
-const QUICK = [2, 5, 15, 25, 90];
+const PAGE = 50; // ponytail: render cap for long lists, "show all" button instead of virtualization
+
+type Role = "focus" | "buffer" | "backlog" | "done";
+type RoleMap = Partial<Record<Role, string>>; // role -> todoist_section_id
+type SectionInfo = { id: string; name: string };
+// auto-detect variants, in priority order
+const ROLE_DEF: { role: Role; label: string; names: string[] }[] = [
+  { role: "focus", label: "Focus", names: ["focus", "today"] },
+  { role: "buffer", label: "Buffer", names: ["buffer"] },
+  { role: "backlog", label: "Backlog", names: ["backlog", "inbox", "later", "someday"] },
+  { role: "done", label: "Done", names: ["done"] },
+];
+type Prefs = {
+  focusCap: number;
+  durations: number[];
+  bufferOn: boolean;
+  timerEnd: "hard" | "gentle";
+  planBanner: boolean;
+};
+const DEFAULT_PREFS: Prefs = {
+  focusCap: 3,
+  durations: [15, 25, 50, 90],
+  bufferOn: true,
+  timerEnd: "hard",
+  planBanner: true,
+};
 
 type Task = {
   id: string;
@@ -146,14 +171,49 @@ export default function App() {
   const tasksRef = useRef<Task[]>([]);
   tasksRef.current = tasks; // fresh snapshot for async rollback paths
   const [sections, setSections] = useState<SectionMap>(() => load("tb_sections", {}));
+  const [sectionList, setSectionList] = useState<SectionInfo[]>(() => load("tb_section_list", []));
+  const [roles, setRoles] = useState<RoleMap>(() => load("tb_roles", {}));
+  const [prefs, setPrefs] = useState<Prefs>(() => ({ ...DEFAULT_PREFS, ...load("tb_prefs", {}) }));
+  const [noDuration, setNoDuration] = useState(() => load("tb_no_duration", false));
   const [sessions, setSessions] = useState<Session[]>(() => load("tb_sessions", []));
   const [archivedDay, setArchivedDay] = useState(() => load("tb_archived", ""));
   const [active, setActive] = useState<{ task: Task; minutes: number } | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ msg: string; undo?: () => void } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const [view, setView] = useState<"focus" | "backlog" | "review">("focus");
+  const [view, setView] = useState<"focus" | "backlog" | "review" | "settings">("focus");
+  const [obStep, setObStep] = useState<number | null>(() =>
+    load("tb_onboarded", false) ? null : 0,
+  );
+  const [showRef, setShowRef] = useState(false);
   const [error, setError] = useState("");
+
+  const updatePrefs = (p: Partial<Prefs>) =>
+    setPrefs((cur) => {
+      const next = { ...cur, ...p };
+      save("tb_prefs", next);
+      return next;
+    });
+
+  const updateRoles = (r: RoleMap) => {
+    setRoles(r);
+    save("tb_roles", r);
+  };
+
+  const createSection = async (name: string): Promise<SectionInfo> => {
+    const s = (await api(token, "/sections", "POST", { name, project_id: projectId })) as SectionInfo;
+    setSectionList((l) => {
+      const next = [...l, s];
+      save("tb_section_list", next);
+      return next;
+    });
+    setSections((m) => {
+      const next = { ...m, [name.toLowerCase()]: s.id };
+      save("tb_sections", next);
+      return next;
+    });
+    return s;
+  };
 
   const refresh = useCallback(async () => {
     if (!token || !projectId) return;
@@ -163,14 +223,31 @@ export default function App() {
         api(token, `/sections?project_id=${projectId}`),
         api(token, `/tasks?project_id=${projectId}`),
       ]);
+      const list = arr<SectionInfo>(sec);
       const map: SectionMap = {};
-      for (const s of arr<{ id: string; name: string }>(sec)) map[s.name.toLowerCase()] = s.id;
+      for (const s of list) map[s.name.toLowerCase()] = s.id;
       save("tb_sections", map); // cached; next fetch re-resolves renames
+      save("tb_section_list", list);
       setSections(map);
+      setSectionList(list);
+      // auto-detect unmapped or stale role mappings by name
+      setRoles((prev) => {
+        const next = { ...prev };
+        for (const d of ROLE_DEF) {
+          if (next[d.role] && list.some((s) => s.id === next[d.role])) continue;
+          const hit = d.names.map((n) => map[n]).find(Boolean);
+          if (hit) next[d.role] = hit;
+          else delete next[d.role]; // stale id — triggers remap banner
+        }
+        save("tb_roles", next);
+        return next;
+      });
       setTasks(arr<Task>(ts));
       setError("");
     } catch (e) {
-      setError(e instanceof TypeError ? "Offline — changes will sync later" : String(e));
+      setError(
+        e instanceof TypeError ? "Couldn't reach Todoist — retrying in 30s" : String(e),
+      );
     }
   }, [token, projectId]);
 
@@ -215,10 +292,25 @@ export default function App() {
     }
   };
 
+  // ponytail: free Todoist accounts reject duration writes — detect once, then stop sending
+  const proFail = () => {
+    if (noDuration) return;
+    setNoDuration(true);
+    save("tb_no_duration", true);
+    showToast("Durations need Todoist Pro — timers still work locally");
+  };
+
   const addTask = async (raw: string, fallbackSection?: string) => {
     const p = parseAdd(raw, sections);
     if (!p.content) return;
     const sectionId = (p.sectionName && sections[p.sectionName.toLowerCase()]) || fallbackSection;
+    const body = (withDur: boolean) => ({
+      content: p.content,
+      project_id: projectId,
+      ...(sectionId ? { section_id: sectionId } : {}),
+      ...(withDur && p.duration != null ? { duration: p.duration, duration_unit: "minute" } : {}),
+      ...(p.priority ? { priority: p.priority } : {}),
+    });
     const tmp: Task = {
       id: `tmp-${Date.now()}`,
       content: p.content,
@@ -228,18 +320,17 @@ export default function App() {
     };
     setTasks((ts) => [...ts, tmp]);
     try {
-      await mutate(token, {
-        path: "/tasks",
-        method: "POST",
-        body: {
-          content: p.content,
-          project_id: projectId,
-          ...(sectionId ? { section_id: sectionId } : {}),
-          ...(p.duration != null ? { duration: p.duration, duration_unit: "minute" } : {}),
-          ...(p.priority ? { priority: p.priority } : {}),
-        },
-      });
-    } catch {
+      await mutate(token, { path: "/tasks", method: "POST", body: body(!noDuration) });
+    } catch (e) {
+      if (p.duration != null && !(e instanceof TypeError)) {
+        proFail();
+        try {
+          await mutate(token, { path: "/tasks", method: "POST", body: body(false) });
+          return;
+        } catch {
+          /* falls through to rollback */
+        }
+      }
       setTasks((ts) => ts.filter((t) => t.id !== tmp.id));
       showToast("Add failed — rolled back");
     }
@@ -251,11 +342,16 @@ export default function App() {
         ts.map((x) => (x.id === t.id ? { ...x, duration: { amount: minutes, unit: "minute" } } : x)),
       ),
     );
-    await mutate(token, {
-      path: `/tasks/${t.id}`,
-      method: "POST",
-      body: { duration: minutes, duration_unit: "minute" },
-    });
+    if (noDuration) return;
+    try {
+      await mutate(token, {
+        path: `/tasks/${t.id}`,
+        method: "POST",
+        body: { duration: minutes, duration_unit: "minute" },
+      });
+    } catch (e) {
+      if (!(e instanceof TypeError)) proFail();
+    }
   };
 
   // partial update, optimistic + rollback; rethrows so the editor can clear its indicator
@@ -311,8 +407,8 @@ export default function App() {
 
   const archiveAll = async () => {
     const prev = tasksRef.current;
-    const done = tasks.filter((t) => t.section_id === sections.done);
-    setTasks((ts) => ts.filter((t) => t.section_id !== sections.done));
+    const done = tasks.filter((t) => t.section_id === roles.done);
+    setTasks((ts) => ts.filter((t) => t.section_id !== roles.done));
     try {
       for (const t of done) await mutate(token, { path: `/tasks/${t.id}/close`, method: "POST" });
       save("tb_archived", todayStr());
@@ -325,7 +421,7 @@ export default function App() {
 
   if (!token || !projectId)
     return (
-      <Settings
+      <Connect
         token={token}
         onDone={(t, p) => {
           save("tb_token", t);
@@ -336,11 +432,33 @@ export default function App() {
       />
     );
 
+  const finishOnboarding = () => {
+    save("tb_onboarded", true);
+    setObStep(null);
+  };
+
+  if (obStep !== null)
+    return (
+      <Onboarding
+        step={obStep}
+        setStep={setObStep}
+        onDone={finishOnboarding}
+        mappingProps={{
+          sectionList,
+          roles,
+          bufferOn: prefs.bufferOn,
+          onCreate: createSection,
+          onSave: updateRoles,
+        }}
+      />
+    );
+
   if (active)
     return (
       <Timer
         task={active.task}
         minutes={active.minutes}
+        gentle={prefs.timerEnd === "gentle"}
         onExit={() => setActive(null)}
         onLog={logSession}
         onComplete={async () => {
@@ -352,12 +470,20 @@ export default function App() {
     );
 
   // ponytail: tasks without a section count as Backlog so nothing goes invisible
-  const focusTasks = sortTasks(tasks.filter((t) => t.section_id === sections.focus));
-  const bufferTasks = tasks.filter((t) => t.section_id === sections.buffer);
+  const focusTasks = sortTasks(tasks.filter((t) => t.section_id === roles.focus));
+  const bufferTasks = prefs.bufferOn ? tasks.filter((t) => t.section_id === roles.buffer) : [];
   const backlogTasks = sortTasks(
-    tasks.filter((t) => t.section_id == null || t.section_id === sections.backlog),
+    tasks.filter((t) => t.section_id == null || t.section_id === roles.backlog),
   );
-  const doneTasks = tasks.filter((t) => t.section_id === sections.done);
+  const doneTasks = tasks.filter((t) => t.section_id === roles.done);
+  // a mapped section deleted/renamed upstream leaves a stale id after refresh re-detect
+  const remapNeeded =
+    sectionList.length > 0 &&
+    ROLE_DEF.some(
+      (d) =>
+        (d.role !== "buffer" || prefs.bufferOn) &&
+        (!roles[d.role] || !sectionList.some((s) => s.id === roles[d.role])),
+    );
 
   return (
     <div className="min-h-screen">
@@ -382,14 +508,18 @@ export default function App() {
           </nav>
           <div className="flex items-center justify-end gap-2">
             <button
-              className={`${btn} text-zinc-600`}
-              title="Reset token & project"
-              onClick={() => {
-                localStorage.clear();
-                location.reload();
-              }}
+              className={`${btn} px-2 text-zinc-500`}
+              title="How it works"
+              onClick={() => setShowRef((s) => !s)}
             >
-              Reset
+              ?
+            </button>
+            <button
+              className={`${btn} px-2 text-zinc-500 ${view === "settings" ? "text-zinc-200" : ""}`}
+              title="Settings"
+              onClick={() => setView(view === "settings" ? "focus" : "settings")}
+            >
+              ⚙
             </button>
             <span
               className={`h-2 w-2 rounded-full ${error ? "bg-red-500" : "bg-zinc-600"}`}
@@ -400,7 +530,38 @@ export default function App() {
       </header>
       <main className="mx-auto max-w-[640px] px-4 pt-8 pb-24 md:pb-8">
         {error && <p className="mb-4 text-[13px] text-zinc-500">{error}</p>}
-        {view === "review" ? (
+        {remapNeeded && (
+          <div className="mb-4 flex items-center justify-between gap-4 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-3">
+            <p className="text-[13px] text-zinc-400">
+              A mapped section changed in Todoist — re-map your sections.
+            </p>
+            <button
+              className={`${btn} shrink-0 text-orange-500`}
+              onClick={() => setView("settings")}
+            >
+              Re-map
+            </button>
+          </div>
+        )}
+        {view === "settings" ? (
+          <SettingsPage
+            prefs={prefs}
+            onPrefs={updatePrefs}
+            mappingProps={{
+              sectionList,
+              roles,
+              bufferOn: prefs.bufferOn,
+              onCreate: createSection,
+              onSave: updateRoles,
+            }}
+            onViewGuide={() => setObStep(0)}
+            onTheory={() => setObStep(1)}
+            onReset={() => {
+              localStorage.clear();
+              location.reload();
+            }}
+          />
+        ) : view === "review" ? (
           <Review
             tasks={doneTasks}
             sessions={sessions}
@@ -410,27 +571,25 @@ export default function App() {
         ) : view === "backlog" ? (
           <section>
             {backlogTasks.length === 0 ? (
-              <p className="py-4 text-[13px] text-zinc-500">Backlog is empty.</p>
+              <p className="py-4 text-[13px] text-zinc-500">
+                Your parking lot for ideas. Dump anything here — it waits without interrupting you.
+              </p>
             ) : (
-              <ul className="space-y-0.5">
-                {backlogTasks.map((t) => (
-                  <TaskRow
-                    key={t.id}
-                    t={t}
-                    expanded={expandedId === t.id}
-                    onToggle={() => toggleRow(t.id)}
-                    onMove={sections.focus ? (x) => moveTo(x, sections.focus) : undefined}
-                    onUpdate={updateTask}
-                    onDuration={changeDuration}
-                    onDelete={deleteTask}
-                  />
-                ))}
-              </ul>
+              <BacklogList
+                tasks={backlogTasks}
+                expandedId={expandedId}
+                onToggle={toggleRow}
+                onMove={roles.focus ? (x) => moveTo(x, roles.focus!) : undefined}
+                onUpdate={updateTask}
+                onDuration={changeDuration}
+                onDelete={deleteTask}
+                durations={prefs.durations}
+              />
             )}
             <AddRow
               placeholder="＋ Add to Backlog…"
               sections={sections}
-              onAdd={(raw) => addTask(raw, sections.backlog)}
+              onAdd={(raw) => addTask(raw, roles.backlog)}
             />
           </section>
         ) : (
@@ -439,10 +598,15 @@ export default function App() {
             bufferTasks={bufferTasks}
             backlogCount={backlogTasks.length}
             sections={sections}
+            focusId={roles.focus}
+            bufferId={prefs.bufferOn ? roles.buffer : undefined}
+            cap={prefs.focusCap}
+            planBanner={prefs.planBanner}
+            durations={prefs.durations}
             expandedId={expandedId}
             onToggle={toggleRow}
-            onMove={(t) => moveTo(t, sections.focus)}
-            onDemote={sections.backlog ? (t) => moveTo(t, sections.backlog) : undefined}
+            onMove={(t) => roles.focus && moveTo(t, roles.focus)}
+            onDemote={roles.backlog ? (t) => moveTo(t, roles.backlog!) : undefined}
             onAdd={addTask}
             onUpdate={updateTask}
             onDuration={changeDuration}
@@ -452,14 +616,17 @@ export default function App() {
           />
         )}
       </main>
-      <div className="fixed inset-x-0 bottom-0 z-20 border-t border-zinc-800 bg-zinc-950 px-3 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] md:hidden">
-        <AddRow
-          placeholder="＋ Quick add to Buffer…"
-          alwaysOpen
-          sections={sections}
-          onAdd={(raw) => addTask(raw, sections.buffer)}
-        />
-      </div>
+      {prefs.bufferOn && (
+        <div className="fixed inset-x-0 bottom-0 z-20 border-t border-zinc-800 bg-zinc-950 px-3 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] md:hidden">
+          <AddRow
+            placeholder="＋ Quick add to Buffer…"
+            alwaysOpen
+            sections={sections}
+            onAdd={(raw) => addTask(raw, roles.buffer)}
+          />
+        </div>
+      )}
+      {showRef && <RefPanel onClose={() => setShowRef(false)} />}
       {toast && (
         <div className="fixed bottom-20 left-1/2 z-40 -translate-x-1/2 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-2 text-[13px] whitespace-nowrap md:bottom-6">
           {toast.msg}
@@ -480,7 +647,7 @@ export default function App() {
   );
 }
 
-function Settings({
+function Connect({
   token: initial,
   onDone,
 }: {
@@ -496,7 +663,7 @@ function Settings({
     try {
       setProjects(arr<Project>(await api(token, "/projects")));
     } catch {
-      setErr("Invalid token or network error");
+      setErr("Couldn't load projects — check the token and your connection, then retry");
     }
   };
 
@@ -544,6 +711,11 @@ function FocusView({
   bufferTasks,
   backlogCount,
   sections,
+  focusId,
+  bufferId,
+  cap,
+  planBanner,
+  durations,
   expandedId,
   onToggle,
   onMove,
@@ -559,6 +731,11 @@ function FocusView({
   bufferTasks: Task[];
   backlogCount: number;
   sections: SectionMap;
+  focusId?: string;
+  bufferId?: string;
+  cap: number;
+  planBanner: boolean;
+  durations: number[];
   expandedId: string | null;
   onToggle: (id: string) => void;
   onMove: (t: Task) => void;
@@ -571,13 +748,16 @@ function FocusView({
   onGoBacklog: () => void;
 }) {
   const [dismissed, setDismissed] = useState(() => load("tb_plan_dismissed", ""));
-  const showPlan = focusTasks.length === 0 && backlogCount > 0 && dismissed !== todayStr();
+  const showPlan =
+    planBanner && focusTasks.length === 0 && backlogCount > 0 && dismissed !== todayStr();
 
   return (
     <div className="space-y-6">
       {showPlan && (
         <div className="flex items-center justify-between gap-4 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-3">
-          <p className="text-[13px] text-zinc-400">Plan your day — pull up to 3 tasks into Focus</p>
+          <p className="text-[13px] text-zinc-400">
+            Plan your day — pull up to {cap} tasks into Focus
+          </p>
           <div className="flex shrink-0 gap-1">
             <button className={`${btn} text-orange-500`} onClick={onGoBacklog}>
               Pull from Backlog
@@ -595,15 +775,20 @@ function FocusView({
         </div>
       )}
 
-      {sections.buffer && (
+      {bufferId && (
         <section>
           <p className="mb-1 px-2 text-[13px] text-zinc-500">Buffer</p>
-          {bufferTasks.length > 0 && (
+          {bufferTasks.length === 0 ? (
+            <p className="px-2 py-2 text-[13px] text-zinc-600">
+              Adhoc tasks land here. Quick-capture them, timebox them short, move on.
+            </p>
+          ) : (
             <ul className="space-y-0.5">
               {bufferTasks.map((t) => (
                 <TaskRow
                   key={t.id}
                   t={t}
+                  durations={durations}
                   expanded={expandedId === t.id}
                   onToggle={() => onToggle(t.id)}
                   onStart={onStart}
@@ -618,14 +803,14 @@ function FocusView({
             placeholder="＋ Quick add to Buffer…"
             hotkey="b"
             sections={sections}
-            onAdd={(raw) => onAdd(raw, sections.buffer)}
+            onAdd={(raw) => onAdd(raw, bufferId)}
           />
         </section>
       )}
 
-      {focusTasks.length > 3 && (
+      {focusTasks.length > cap && (
         <p className="rounded-md border border-zinc-800 bg-zinc-900 px-4 py-3 text-[13px] text-zinc-400">
-          Too many priorities. Move something back to Backlog.
+          Too many priorities — Focus holds {cap}. Move something back to Backlog.
         </p>
       )}
 
@@ -636,7 +821,8 @@ function FocusView({
             className="block w-full py-8 text-center text-[13px] text-zinc-500"
             onClick={onGoBacklog}
           >
-            Focus is empty. Pull from Backlog →
+            Focus holds today's top {cap} tasks. During a timebox, nothing else exists.
+            <span className="mt-1 block text-orange-500">Pull from Backlog →</span>
           </button>
         ) : (
           <ul className="space-y-0.5">
@@ -645,6 +831,7 @@ function FocusView({
                 key={t.id}
                 t={t}
                 large
+                durations={durations}
                 expanded={expandedId === t.id}
                 onToggle={() => onToggle(t.id)}
                 onStart={onStart}
@@ -656,16 +843,64 @@ function FocusView({
             ))}
           </ul>
         )}
-        {sections.focus && (
+        {focusId && (
           <AddRow
             placeholder="＋ Add to Focus…"
             hotkey="n"
             sections={sections}
-            onAdd={(raw) => onAdd(raw, sections.focus)}
+            onAdd={(raw) => onAdd(raw, focusId)}
           />
         )}
       </section>
     </div>
+  );
+}
+
+// ponytail: cap-at-50 + "show all" beats a virtualization lib at this list size
+function BacklogList({
+  tasks,
+  expandedId,
+  onToggle,
+  onMove,
+  onUpdate,
+  onDuration,
+  onDelete,
+  durations,
+}: {
+  tasks: Task[];
+  expandedId: string | null;
+  onToggle: (id: string) => void;
+  onMove?: (t: Task) => void;
+  onUpdate: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
+  onDuration: (t: Task, minutes: number) => void;
+  onDelete: (t: Task) => void;
+  durations: number[];
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const visible = showAll ? tasks : tasks.slice(0, PAGE);
+  return (
+    <>
+      <ul className="space-y-0.5">
+        {visible.map((t) => (
+          <TaskRow
+            key={t.id}
+            t={t}
+            durations={durations}
+            expanded={expandedId === t.id}
+            onToggle={() => onToggle(t.id)}
+            onMove={onMove}
+            onUpdate={onUpdate}
+            onDuration={onDuration}
+            onDelete={onDelete}
+          />
+        ))}
+      </ul>
+      {!showAll && tasks.length > PAGE && (
+        <button className={`${btn} mt-1 w-full`} onClick={() => setShowAll(true)}>
+          Show all {tasks.length}…
+        </button>
+      )}
+    </>
   );
 }
 
@@ -681,6 +916,7 @@ function TaskRow({
   onUpdate,
   onDuration,
   onDelete,
+  durations,
 }: {
   t: Task;
   large?: boolean;
@@ -693,6 +929,7 @@ function TaskRow({
   onUpdate: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
   onDuration: (t: Task, minutes: number) => void;
   onDelete: (t: Task) => void;
+  durations: number[];
 }) {
   const rootRef = useRef<HTMLLIElement>(null);
 
@@ -756,6 +993,7 @@ function TaskRow({
           large={large}
           dur={dur}
           actions={actions}
+          durations={durations}
           onClose={onToggle}
           onUpdate={onUpdate}
           onDuration={onDuration}
@@ -783,6 +1021,7 @@ function RowEditor({
   large,
   dur,
   actions,
+  durations,
   onClose,
   onUpdate,
   onDuration,
@@ -793,6 +1032,7 @@ function RowEditor({
   large?: boolean;
   dur: ReactNode;
   actions: ReactNode;
+  durations: number[];
   onClose: () => void;
   onUpdate: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
   onDuration: (t: Task, minutes: number) => void;
@@ -893,7 +1133,7 @@ function RowEditor({
             }}
           />
           <div className="flex items-center gap-2">
-            <DurationChips t={t} onDuration={onDuration} />
+            <DurationChips t={t} durations={durations} onDuration={onDuration} />
             {onDemote && (
               <button className={btn} title="Move back to Backlog" onClick={() => onDemote(t)}>
                 ↓ Backlog
@@ -916,14 +1156,16 @@ function RowEditor({
 
 function DurationChips({
   t,
+  durations,
   onDuration,
 }: {
   t: Task;
+  durations: number[];
   onDuration: (t: Task, minutes: number) => void;
 }) {
   return (
     <div className="flex gap-1">
-      {QUICK.map((m) => (
+      {durations.map((m) => (
         <button
           key={m}
           className={`rounded-md border px-2 py-0.5 font-mono text-[11px] tabular-nums transition-colors duration-150 ${
@@ -1082,7 +1324,10 @@ function Review({
       {archived ? (
         <p className="py-16 text-center text-[20px] font-semibold">Day complete ✓</p>
       ) : tasks.length === 0 ? (
-        <p className="text-[13px] text-zinc-500">Nothing in Done yet.</p>
+        <p className="text-[13px] text-zinc-500">
+          Come back tonight: planned vs actual time, side by side. Most people underestimate by 50%
+          — are you the exception?
+        </p>
       ) : (
         <>
           <table className="w-full text-left">
@@ -1132,12 +1377,14 @@ function Review({
 function Timer({
   task,
   minutes,
+  gentle = false,
   onExit,
   onLog,
   onComplete,
 }: {
   task: Task;
   minutes: number;
+  gentle?: boolean;
   onExit: () => void;
   onLog: (s: Session) => void;
   onComplete: () => void;
@@ -1161,19 +1408,23 @@ function Timer({
       document.title = `${fmt(rem)} - ${task.content}`;
       if (rem <= 0 && !alarmedRef.current) {
         alarmedRef.current = true;
-        alarm();
         if (Notification.permission === "granted")
           new Notification("Time's up!", { body: task.content });
-        document.body.classList.add("flash");
-        setTimeout(() => document.body.classList.remove("flash"), 4000);
-        setTimesUp(true);
+        if (!gentle) {
+          alarm();
+          document.body.classList.add("flash");
+          setTimeout(() => document.body.classList.remove("flash"), 4000);
+          setTimesUp(true);
+        } else {
+          document.title = `0:00 - ${task.content}`;
+        }
       }
     }, 250);
     return () => {
       clearInterval(iv);
       document.title = "Timebox Focus";
     };
-  }, [paused, task.content]);
+  }, [paused, task.content, gentle]);
 
   const extend = (m: number) => {
     endRef.current += m * 60_000;
@@ -1336,6 +1587,379 @@ function Timer({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+type MappingProps = {
+  sectionList: SectionInfo[];
+  roles: RoleMap;
+  bufferOn: boolean;
+  onCreate: (name: string) => Promise<SectionInfo>;
+  onSave: (r: RoleMap) => void;
+};
+
+function MappingScreen({
+  sectionList,
+  roles,
+  bufferOn,
+  onCreate,
+  onSave,
+  onDone,
+}: MappingProps & { onDone?: () => void }) {
+  const [draft, setDraft] = useState<RoleMap>(roles);
+  const [busy, setBusy] = useState(false);
+  const defs = ROLE_DEF.filter((d) => d.role !== "buffer" || bufferOn);
+  const picked = defs.map((d) => draft[d.role]).filter((x): x is string => !!x);
+  const dup = picked.length !== new Set(picked).size;
+  const missing = defs.filter((d) => !draft[d.role]);
+
+  const create = async (role: Role, name: string) => {
+    setBusy(true);
+    try {
+      const s = await onCreate(name);
+      setDraft((d) => ({ ...d, [role]: s.id }));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      {defs.map((d) => (
+        <div key={d.role} className="flex items-center gap-3">
+          <span className="w-16 shrink-0 text-[13px] text-zinc-400">{d.label}</span>
+          <select
+            className={`${input} disabled:opacity-40`}
+            disabled={busy}
+            value={draft[d.role] ?? ""}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === "__create") create(d.role, d.label);
+              else setDraft((cur) => ({ ...cur, [d.role]: v || undefined }));
+            }}
+          >
+            <option value="">— not mapped —</option>
+            {sectionList.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+            <option value="__create">＋ Create “{d.label}” section</option>
+          </select>
+        </div>
+      ))}
+      {dup && (
+        <p className="text-[13px] text-red-400">Two roles can't share a section — pick another.</p>
+      )}
+      {missing.length > 0 && (
+        <button
+          className={`${btn} text-orange-500 disabled:opacity-40`}
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              for (const d of missing) {
+                if (draft[d.role]) continue;
+                const s = await onCreate(d.label);
+                setDraft((cur) => ({ ...cur, [d.role]: s.id }));
+              }
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          Auto-create missing sections ({missing.map((d) => d.label).join(", ")})
+        </button>
+      )}
+      <div>
+        <button
+          className={`${btn} bg-zinc-800 text-zinc-100 disabled:opacity-40`}
+          disabled={dup || busy}
+          onClick={() => {
+            onSave(draft);
+            onDone?.();
+          }}
+        >
+          Save mapping
+        </button>
+      </div>
+    </div>
+  );
+}
+
+const THEORY: [string, string][] = [
+  ["Backlog", "Ideas park here. They wait."],
+  ["Focus", "Today's top 3. Nothing else exists during a timebox."],
+  ["Done", "Finished tasks rest here until your evening review."],
+  ["Review", "Compare planned vs actual. Calibrate tomorrow."],
+];
+
+// ponytail: "animated" = tailwind pulse on the arrows, no animation lib
+function TheoryDiagram() {
+  return (
+    <div className="flex flex-col items-center gap-1">
+      {THEORY.map(([name, desc], i) => (
+        <div key={name} className="flex flex-col items-center gap-1">
+          {i > 0 && <span className="animate-pulse text-zinc-600">↓</span>}
+          <div className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-4 py-3 text-center">
+            <p className="text-[15px] font-semibold">{name}</p>
+            <p className="mt-0.5 text-[13px] text-zinc-500">{desc}</p>
+          </div>
+        </div>
+      ))}
+      <span className="mt-1 text-[12px] text-zinc-600">…and back to Backlog tomorrow.</span>
+    </div>
+  );
+}
+
+function Onboarding({
+  step,
+  setStep,
+  onDone,
+  mappingProps,
+}: {
+  step: number;
+  setStep: (n: number | null) => void;
+  onDone: () => void;
+  mappingProps: MappingProps;
+}) {
+  const [trial, setTrial] = useState(false);
+  const next = () => setStep(step + 1);
+  const skip = (
+    <button className={`${btn} absolute top-4 right-4`} onClick={onDone}>
+      Skip
+    </button>
+  );
+
+  if (trial)
+    return (
+      <Timer
+        task={{ id: "demo", content: "Try a 5-minute timebox", priority: 1 }}
+        minutes={5}
+        onExit={() => {
+          setTrial(false);
+          setStep(4);
+        }}
+        onLog={() => {}} // demo runs don't touch review stats
+        onComplete={() => {
+          setTrial(false);
+          setStep(4);
+        }}
+      />
+    );
+
+  return (
+    <div className="relative flex min-h-screen items-center justify-center px-4">
+      {skip}
+      <div className="w-full max-w-sm space-y-6">
+        {step === 0 && (
+          <>
+            <div className="text-center text-[40px]">⏳</div>
+            <h1 className="text-center text-[22px] font-semibold">
+              Your list grows forever.
+            </h1>
+            <p className="text-center text-[15px] text-zinc-400">
+              Timeboxing turns tasks into appointments with yourself.
+            </p>
+            <button className={`${btn} mx-auto block bg-zinc-800 text-zinc-100`} onClick={next}>
+              How it works →
+            </button>
+          </>
+        )}
+        {step === 1 && (
+          <>
+            <TheoryDiagram />
+            <button className={`${btn} mx-auto block bg-zinc-800 text-zinc-100`} onClick={next}>
+              Set up sections →
+            </button>
+          </>
+        )}
+        {step === 2 && (
+          <>
+            <h2 className="text-center text-[18px] font-semibold">Map your sections</h2>
+            <p className="text-center text-[13px] text-zinc-500">
+              Point each role at a section in your Todoist project.
+            </p>
+            <MappingScreen {...mappingProps} onDone={next} />
+          </>
+        )}
+        {step === 3 && (
+          <>
+            <h2 className="text-center text-[18px] font-semibold">Try it now</h2>
+            <p className="text-center text-[15px] text-zinc-400">
+              One demo task. Five minutes. Nothing else exists.
+            </p>
+            <button
+              className={`${btn} mx-auto block bg-zinc-800 text-orange-500`}
+              onClick={() => setTrial(true)}
+            >
+              ▶ Start a 5-minute timebox
+            </button>
+          </>
+        )}
+        {step === 4 && (
+          <>
+            <div className="text-center text-[40px]">🎉</div>
+            <h2 className="text-center text-[22px] font-semibold">That's a timebox.</h2>
+            <p className="text-center text-[15px] text-zinc-400">
+              Planned vs actual shows up in tonight's Review.
+            </p>
+            <button className={`${btn} mx-auto block bg-zinc-800 text-zinc-100`} onClick={onDone}>
+              Start using Timebox
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RefPanel({ onClose }: { onClose: () => void }) {
+  return (
+    <aside className="fixed inset-y-0 right-0 z-30 w-72 overflow-y-auto border-l border-zinc-800 bg-zinc-950 p-4">
+      <div className="mb-4 flex items-center justify-between">
+        <h2 className="text-[15px] font-semibold">How it works</h2>
+        <button className={btn} onClick={onClose}>
+          ✕
+        </button>
+      </div>
+      <TheoryDiagram />
+      <ul className="mt-6 space-y-3 text-[13px] text-zinc-400">
+        <li>
+          <strong className="text-zinc-200">Hard stop.</strong> When the timer ends, you stop.
+          Overruns are data, not failure.
+        </li>
+        <li>
+          <strong className="text-zinc-200">One thing at a time.</strong> During a timebox, nothing
+          else exists.
+        </li>
+        <li>
+          <strong className="text-zinc-200">Review daily.</strong> Planned vs actual, every evening.
+          Calibration is the whole game.
+        </li>
+      </ul>
+    </aside>
+  );
+}
+
+function SettingsPage({
+  prefs,
+  onPrefs,
+  mappingProps,
+  onViewGuide,
+  onTheory,
+  onReset,
+}: {
+  prefs: Prefs;
+  onPrefs: (p: Partial<Prefs>) => void;
+  mappingProps: MappingProps;
+  onViewGuide: () => void;
+  onTheory: () => void;
+  onReset: () => void;
+}) {
+  const h = "mb-2 text-[13px] font-medium text-zinc-500";
+  const row = "flex items-center justify-between gap-4 py-2";
+  const toggle = (on: boolean) =>
+    `relative h-6 w-10 shrink-0 rounded-full transition-colors ${on ? "bg-orange-500" : "bg-zinc-700"}`;
+  return (
+    <div className="max-w-md space-y-8">
+      <section>
+        <h2 className={h}>Section roles</h2>
+        <MappingScreen {...mappingProps} />
+      </section>
+      <section>
+        <h2 className={h}>Focus task cap</h2>
+        <div className="flex gap-1">
+          {[1, 2, 3, 4, 5].map((n) => (
+            <button
+              key={n}
+              className={`rounded-md border px-3 py-1 font-mono text-[13px] ${
+                prefs.focusCap === n
+                  ? "border-zinc-600 text-zinc-200"
+                  : "border-zinc-800 text-zinc-500 hover:bg-zinc-800"
+              }`}
+              onClick={() => onPrefs({ focusCap: n })}
+            >
+              {n}
+            </button>
+          ))}
+        </div>
+      </section>
+      <section>
+        <h2 className={h}>Duration presets (minutes, comma-separated)</h2>
+        <input
+          className={input}
+          defaultValue={prefs.durations.join(", ")}
+          onBlur={(e) => {
+            const ds = e.target.value
+              .split(",")
+              .map((s) => parseInt(s.trim(), 10))
+              .filter((n) => n > 0 && n <= 480);
+            if (ds.length) onPrefs({ durations: [...new Set(ds)].sort((a, b) => a - b) });
+          }}
+        />
+      </section>
+      <section>
+        <h2 className={h}>Behavior</h2>
+        <div className={row}>
+          <span className="text-[14px]">Buffer section</span>
+          <button
+            className={toggle(prefs.bufferOn)}
+            onClick={() => onPrefs({ bufferOn: !prefs.bufferOn })}
+          >
+            <span
+              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${prefs.bufferOn ? "left-4.5" : "left-0.5"}`}
+            />
+          </button>
+        </div>
+        <div className={row}>
+          <span className="text-[14px]">Morning ritual banner</span>
+          <button
+            className={toggle(prefs.planBanner)}
+            onClick={() => onPrefs({ planBanner: !prefs.planBanner })}
+          >
+            <span
+              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${prefs.planBanner ? "left-4.5" : "left-0.5"}`}
+            />
+          </button>
+        </div>
+        <div className={row}>
+          <span className="text-[14px]">Timer end</span>
+          <div className="flex gap-1">
+            {(["hard", "gentle"] as const).map((m) => (
+              <button
+                key={m}
+                className={`rounded-md border px-3 py-1 text-[13px] capitalize ${
+                  prefs.timerEnd === m
+                    ? "border-zinc-600 text-zinc-200"
+                    : "border-zinc-800 text-zinc-500 hover:bg-zinc-800"
+                }`}
+                onClick={() => onPrefs({ timerEnd: m })}
+              >
+                {m === "hard" ? "Hard stop" : "Gentle"}
+              </button>
+            ))}
+          </div>
+        </div>
+      </section>
+      <section>
+        <h2 className={h}>Help</h2>
+        <div className="flex gap-4">
+          <button className={`${btn} px-0 text-orange-500`} onClick={onViewGuide}>
+            View guide again
+          </button>
+          <button className={`${btn} px-0 text-orange-500`} onClick={onTheory}>
+            How it works
+          </button>
+        </div>
+      </section>
+      <section>
+        <h2 className={h}>Danger</h2>
+        <button className={`${btn} px-0 text-red-400`} onClick={onReset}>
+          Reset token &amp; all local data
+        </button>
+      </section>
     </div>
   );
 }
