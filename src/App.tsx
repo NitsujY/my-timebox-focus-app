@@ -20,6 +20,7 @@ type Prefs = {
   timerEnd: "hard" | "gentle";
   planBanner: boolean;
   completeAction: "done" | "close";
+  celebrate: boolean;
   defaultMinutes: number;
 };
 const DEFAULT_PREFS: Prefs = {
@@ -29,6 +30,7 @@ const DEFAULT_PREFS: Prefs = {
   timerEnd: "hard",
   planBanner: true,
   completeAction: "done",
+  celebrate: true,
   defaultMinutes: 5,
 };
 
@@ -182,6 +184,7 @@ export default function App() {
   const [sessions, setSessions] = useState<Session[]>(() => load("tb_sessions", []));
   const [archivedDay, setArchivedDay] = useState(() => load("tb_archived", ""));
   const [active, setActive] = useState<{ task: Task; minutes: number } | null>(null);
+  const [celebrating, setCelebrating] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ msg: string; undo?: () => void } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -471,6 +474,9 @@ export default function App() {
       />
     );
 
+  if (celebrating && active)
+    return <Celebration task={active.task} onDone={() => { setCelebrating(false); setActive(null); }} />;
+
   if (active)
     return (
       <Timer
@@ -479,9 +485,10 @@ export default function App() {
         gentle={prefs.timerEnd === "gentle"}
         onExit={() => setActive(null)}
         onLog={logSession}
-        onComplete={async () => {
-          await completeTask(active.task);
-          setActive(null);
+        onComplete={() => {
+          completeTask(active.task); // ponytail: fire-and-forget — timer exits instantly; failure toast still surfaces
+          if (prefs.celebrate) setCelebrating(true);
+          else setActive(null);
         }}
       />
     );
@@ -1420,6 +1427,23 @@ function Review({
   );
 }
 
+function Celebration({ task, onDone }: { task: Task; onDone: () => void }) {
+  useEffect(() => {
+    const t = setTimeout(onDone, 1500);
+    return () => clearTimeout(t);
+  }, [onDone]);
+  return (
+    <div
+      className="flex min-h-screen cursor-pointer flex-col items-center justify-center gap-4 px-4"
+      onClick={onDone}
+    >
+      <p className="celebrate-pop text-6xl text-orange-500">✓</p>
+      <p className="text-center text-[20px] font-semibold">Done!</p>
+      <p className="max-w-md text-center text-[15px] text-zinc-400">{task.content}</p>
+    </div>
+  );
+}
+
 // ponytail: tap anywhere toggles pause; buttons stopPropagation
 function Timer({
   task,
@@ -2021,6 +2045,17 @@ function SettingsPage({
               </button>
             ))}
           </div>
+        </div>
+        <div className={row}>
+          <span className="text-[14px]">Celebrate on complete</span>
+          <button
+            className={toggle(prefs.celebrate)}
+            onClick={() => onPrefs({ celebrate: !prefs.celebrate })}
+          >
+            <span
+              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${prefs.celebrate ? "left-4.5" : "left-0.5"}`}
+            />
+          </button>
         </div>
         <div className={row}>
           <span className="text-[14px]">Timer end</span>
