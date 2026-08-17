@@ -1622,6 +1622,13 @@ function MappingScreen({
   onDone,
 }: MappingProps & { onDone?: () => void }) {
   const [draft, setDraft] = useState<RoleMap>(roles);
+  // ponytail: sync re-detected roles (project switch) without clobbering edits on no-op refreshes
+  const prevRoles = useRef(roles);
+  useEffect(() => {
+    if (JSON.stringify(prevRoles.current) === JSON.stringify(roles)) return;
+    prevRoles.current = roles;
+    setDraft(roles);
+  }, [roles]);
   const [busy, setBusy] = useState(false);
   const defs = ROLE_DEF.filter((d) => d.role !== "buffer" || bufferOn);
   const picked = defs.map((d) => draft[d.role]).filter((x): x is string => !!x);
@@ -2017,10 +2024,24 @@ function ProjectSelect({
   onProject: (id: string) => void;
 }) {
   const [projects, setProjects] = useState<Project[] | null>(null);
+  const [focusCount, setFocusCount] = useState<Record<string, number>>({});
   const [err, setErr] = useState("");
   useEffect(() => {
-    api(token, "/projects")
-      .then((r) => setProjects(arr<Project>(r)))
+    Promise.all([api(token, "/projects"), api(token, "/sections"), api(token, "/tasks")])
+      .then(([pr, sec, ts]) => {
+        setProjects(arr<Project>(pr));
+        // ponytail: "focus" = section named like a focus role; 2 extra fetches instead of N per-project
+        const focusSections = new Set(
+          arr<SectionInfo & { project_id: string }>(sec)
+            .filter((s) => ROLE_DEF[0].names.includes(s.name.toLowerCase()))
+            .map((s) => s.id),
+        );
+        const counts: Record<string, number> = {};
+        for (const t of arr<Task & { project_id: string }>(ts))
+          if (t.section_id && focusSections.has(t.section_id))
+            counts[t.project_id] = (counts[t.project_id] ?? 0) + 1;
+        setFocusCount(counts);
+      })
       .catch(() => setErr("Couldn't load projects"));
   }, [token]);
   if (err) return <p className="text-[13px] text-zinc-500">{err}</p>;
@@ -2034,6 +2055,7 @@ function ProjectSelect({
       {projects.map((p) => (
         <option key={p.id} value={p.id}>
           {p.name}
+          {focusCount[p.id] ? ` (${focusCount[p.id]} focus)` : ""}
         </option>
       ))}
     </select>
