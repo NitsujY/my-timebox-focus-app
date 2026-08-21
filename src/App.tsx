@@ -25,7 +25,7 @@ type Prefs = {
 };
 const DEFAULT_PREFS: Prefs = {
   focusCap: 3,
-  durations: [15, 25, 50, 90],
+  durations: [5, 10, 15, 25, 50, 90],
   bufferOn: true,
   timerEnd: "hard",
   planBanner: true,
@@ -1314,7 +1314,8 @@ function AddRow({
           if (!alwaysOpen) setOpen(false);
         }}
       />
-      {v.trim() && (
+      {v.trim() &&
+        (parsed.duration != null || parsed.sectionName || parsed.priority != null) && (
         <div className="mt-1 flex flex-wrap gap-1 font-mono text-[11px] text-zinc-500">
           <span className="rounded border border-zinc-800 px-1.5 py-0.5">
             {parsed.content || "…"}
@@ -1587,6 +1588,11 @@ function Timer({
         >
           {fmt(left)}
         </p>
+        {paused && (
+          <span className="absolute -bottom-[4vmin] left-1/2 -translate-x-1/2 text-[6vmin]" aria-label="Paused">
+            ⏸
+          </span>
+        )}
       </div>
       <div className="flex w-full max-w-xs flex-col gap-2 px-6 sm:w-auto sm:max-w-none sm:flex-row">
         <button
