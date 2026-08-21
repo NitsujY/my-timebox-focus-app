@@ -52,8 +52,15 @@ type Session = {
   actual_minutes: number;
   completed: boolean;
   timestamp: number;
+  synced?: boolean; // comment posted/queued to Todoist
 };
 type Mutation = { path: string; method: string; body?: object };
+// completed-tasks API item (free tier: ~3 months back)
+type CompletedItem = { id: string; content: string; completed_at: string };
+
+// comment text doubles as cross-device backup record (date included for backfills)
+const sessionComment = (s: Session) =>
+  `⏱ ${new Date(s.timestamp).toLocaleDateString(undefined, { month: "numeric", day: "numeric" })} · planned ${s.planned_minutes}m · actual ${s.actual_minutes}m · ${s.completed ? "✓ completed" : "abandoned"}`;
 
 const load = <T,>(k: string, d: T): T => {
   try {
@@ -188,7 +195,9 @@ export default function App() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ msg: string; undo?: () => void } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const [view, setView] = useState<"focus" | "backlog" | "review" | "settings">("focus");
+  const [view, setView] = useState<"focus" | "backlog" | "review" | "analysis" | "settings">(
+    "focus",
+  );
   const [obStep, setObStep] = useState<number | null>(() =>
     load("tb_onboarded", false) ? null : 0,
   );
@@ -269,10 +278,35 @@ export default function App() {
     };
   }, [refresh]);
 
+  const postComment = (s: Session) => {
+    if (s.task_id === "demo" || s.task_id.startsWith("tmp-")) return false;
+    mutate(token, {
+      path: "/comments",
+      method: "POST",
+      body: { task_id: s.task_id, content: sessionComment(s) },
+    }).catch(() => {});
+    return true;
+  };
+
   const logSession = (s: Session) => {
-    const next = [...sessions, s];
+    // ponytail: comment doubles as cross-device backup — fire-and-forget, queues offline
+    const next = [...sessions, { ...s, synced: postComment(s) }];
     setSessions(next);
     save("tb_sessions", next);
+  };
+
+  // one-time backfill for sessions logged before comment sync existed
+  const syncComments = () => {
+    const pending = sessions.filter(
+      (s) => !s.synced && s.task_id !== "demo" && !s.task_id.startsWith("tmp-"),
+    );
+    for (const s of pending) postComment(s);
+    const next = sessions.map((s) => ({ ...s, synced: true }));
+    setSessions(next);
+    save("tb_sessions", next);
+    showToast(
+      pending.length ? `Syncing ${pending.length} logs to Todoist comments` : "All logs already synced",
+    );
   };
 
   const showToast = (msg: string, undo?: () => void) => {
@@ -515,7 +549,7 @@ export default function App() {
         <div className="mx-auto grid max-w-[640px] grid-cols-[1fr_auto_1fr] items-center px-4 py-3">
           <span className="text-[15px] font-semibold">Timebox</span>
           <nav className="flex gap-1">
-            {(["focus", "backlog", "review"] as const).map((v) => (
+            {(["focus", "backlog", "review", "analysis"] as const).map((v) => (
               <button
                 key={v}
                 className={`${btn} capitalize ${view === v ? "bg-zinc-800 text-zinc-100" : ""}`}
@@ -586,11 +620,19 @@ export default function App() {
             }}
             onViewGuide={() => setObStep(0)}
             onTheory={() => setObStep(1)}
+            unsynced={
+              sessions.filter(
+                (s) => !s.synced && s.task_id !== "demo" && !s.task_id.startsWith("tmp-"),
+              ).length
+            }
+            onSyncComments={syncComments}
             onReset={() => {
               localStorage.clear();
               location.reload();
             }}
           />
+        ) : view === "analysis" ? (
+          <Analysis sessions={sessions} token={token} />
         ) : view === "review" ? (
           <Review
             tasks={doneTasks}
@@ -1359,6 +1401,11 @@ function Review({
     const n = ts.filter((s) => s.task_id === id).reduce((a, s) => a + s.actual_minutes, 0);
     return n || null;
   };
+  // planned falls back to the timer's start time when the task has no estimate
+  const plannedFor = (id: string) => {
+    const n = ts.filter((s) => s.task_id === id).reduce((a, s) => a + s.planned_minutes, 0);
+    return n || null;
+  };
 
   const stats: [string, string][] = [
     [`${focused}m`, "focused today"],
@@ -1397,7 +1444,7 @@ function Review({
             <tbody>
               {tasks.map((t) => {
                 const a = actualFor(t.id);
-                const p = t.duration?.amount ?? null;
+                const p = t.duration?.amount ?? plannedFor(t.id);
                 const d = a != null && p != null ? a - p : null;
                 return (
                   <tr key={t.id} className="border-b border-zinc-800/60">
@@ -1424,6 +1471,240 @@ function Review({
           </button>
         </>
       )}
+    </div>
+  );
+}
+
+// ponytail: analysis reads existing stores — local sessions + completed API, zero extra writes
+function Analysis({ sessions, token }: { sessions: Session[]; token: string }) {
+  const [range, setRange] = useState(() => load("tb_analysis_range", 30));
+  const [apiDone, setApiDone] = useState<CompletedItem[] | null>(null);
+  useEffect(() => {
+    setApiDone(null);
+    api(
+      token,
+      `/tasks/completed/by_completion_date?since=${new Date(Date.now() - range * 86400_000).toISOString()}&until=${new Date().toISOString()}&limit=200`,
+    )
+      .then((d) => setApiDone((d as { items?: CompletedItem[] }).items ?? []))
+      .catch(() => setApiDone([]));
+  }, [token, range]);
+
+  const recent = sessions.filter((s) => s.timestamp >= Date.now() - range * 86400_000);
+  const days: { key: string; label: string; focused: number; planned: number }[] = [];
+  for (let i = range - 1; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 86400_000);
+    const key = d.toDateString();
+    const ds = recent.filter((s) => new Date(s.timestamp).toDateString() === key);
+    days.push({
+      key,
+      label: `${d.getMonth() + 1}/${d.getDate()}`,
+      focused: ds.reduce((a, s) => a + s.actual_minutes, 0),
+      planned: ds.reduce((a, s) => a + s.planned_minutes, 0),
+    });
+  }
+  const focused = days.reduce((a, d) => a + d.focused, 0);
+  const planned = days.reduce((a, d) => a + d.planned, 0);
+  const accuracy = planned ? Math.round((focused / planned) * 100) : 0;
+  const daysActive = days.filter((d) => d.focused > 0).length;
+  // week-vs-week compares across all sessions so it still works on the 7d view
+  const weekAgo = Date.now() - 7 * 86400_000;
+  const thisWeek = sessions
+    .filter((s) => s.timestamp >= weekAgo)
+    .reduce((a, s) => a + s.actual_minutes, 0);
+  const lastWeek = sessions
+    .filter((s) => s.timestamp >= weekAgo - 7 * 86400_000 && s.timestamp < weekAgo)
+    .reduce((a, s) => a + s.actual_minutes, 0);
+  const delta = thisWeek - lastWeek;
+
+  const byTask: Record<string, { p: number; a: number }> = {};
+  for (const s of recent) {
+    const e = (byTask[s.task_name] ??= { p: 0, a: 0 });
+    e.p += s.planned_minutes;
+    e.a += s.actual_minutes;
+  }
+  const overruns = Object.entries(byTask)
+    .map(([name, v]) => ({ name, ...v, d: v.a - v.p }))
+    .filter((t) => t.d > 0)
+    .sort((a, b) => b.d - a.d)
+    .slice(0, 5);
+
+  const hours = new Array<number>(24).fill(0);
+  for (const s of recent) hours[new Date(s.timestamp).getHours()] += s.actual_minutes;
+  const maxH = Math.max(1, ...hours);
+  const maxF = Math.max(1, ...days.map((d) => d.focused));
+
+  // tasks completed in Todoist with no matching timer session that day
+  const sessionKeys = new Set(
+    recent.map((s) => `${new Date(s.timestamp).toDateString()}|${s.task_name}`),
+  );
+  const manual = (apiDone ?? []).filter(
+    (c) => !sessionKeys.has(`${new Date(c.completed_at).toDateString()}|${c.content}`),
+  );
+
+  // daily accuracy (actual/planned %) line — the dashed 100% line = perfect estimate
+  const accPts = days
+    .map((d, i) => ({ i, acc: d.planned ? (d.focused / d.planned) * 100 : null }))
+    .filter((p): p is { i: number; acc: number } => p.acc != null);
+  const accLine = accPts
+    .map(
+      (p, j) =>
+        `${j === 0 ? "M" : "L"}${((p.i / (range - 1)) * 100).toFixed(1)},${(40 - (Math.min(150, p.acc) / 150) * 40).toFixed(1)}`,
+    )
+    .join(" ");
+  const refY = (40 - (100 / 150) * 40).toFixed(1);
+
+  const h = "mb-2 text-[13px] font-medium text-zinc-500";
+  return (
+    <div className="space-y-8">
+      <div className="flex justify-center gap-1">
+        {[7, 30, 90].map((d) => (
+          <button
+            key={d}
+            className={`rounded-md border px-3 py-1 font-mono text-[13px] ${
+              range === d
+                ? "border-zinc-600 text-zinc-200"
+                : "border-zinc-800 text-zinc-500 hover:bg-zinc-800"
+            }`}
+            onClick={() => {
+              setRange(d);
+              save("tb_analysis_range", d);
+            }}
+          >
+            {d}d
+          </button>
+        ))}
+      </div>
+      <div className="grid grid-cols-3 gap-4 text-center">
+        {(
+          [
+            [`${Math.floor(focused / 60)}h ${focused % 60}m`, `focused (${range} days)`],
+            [String(daysActive), "days active"],
+            [`${accuracy}%`, "planned vs actual"],
+          ] as [string, string][]
+        ).map(([v, l]) => (
+          <div key={l}>
+            <p className="font-mono text-[28px] font-semibold tabular-nums">{v}</p>
+            <p className="text-[13px] text-zinc-500">{l}</p>
+          </div>
+        ))}
+      </div>
+
+      <p className="text-center text-[13px] text-zinc-500">
+        This week <span className="font-mono tabular-nums text-zinc-300">{thisWeek}m</span> vs last
+        week <span className="font-mono tabular-nums text-zinc-300">{lastWeek}m</span>{" "}
+        <span className={delta >= 0 ? "text-orange-500" : "text-zinc-500"}>
+          ({delta >= 0 ? "+" : ""}
+          {delta}m)
+        </span>
+      </p>
+
+      <section>
+        <h2 className={h}>Focused minutes per day</h2>
+        <div className="flex h-28 items-end gap-[3px]">
+          {days.map((d) => (
+            <div
+              key={d.key}
+              className={`flex-1 rounded-sm ${d.focused ? "bg-orange-500" : "bg-zinc-800"}`}
+              style={{ height: `${Math.max(3, (d.focused / maxF) * 100)}%` }}
+              title={`${d.label}: ${d.focused}m`}
+            />
+          ))}
+        </div>
+        <div className="mt-1 flex justify-between text-[11px] text-zinc-600">
+          <span>{days[0]?.label}</span>
+          <span>{days[days.length - 1]?.label}</span>
+        </div>
+      </section>
+
+      {accPts.length >= 2 && (
+        <section>
+          <h2 className={h}>Estimate accuracy trend (100% = perfect)</h2>
+          <svg viewBox="0 0 100 40" preserveAspectRatio="none" className="h-24 w-full">
+            <line
+              x1="0"
+              y1={refY}
+              x2="100"
+              y2={refY}
+              stroke="#3f3f46"
+              strokeWidth="0.3"
+              strokeDasharray="1.5 1.5"
+            />
+            <path d={accLine} fill="none" stroke="#f97316" strokeWidth="0.8" />
+          </svg>
+        </section>
+      )}
+
+      <section>
+        <h2 className={h}>Worst estimates (biggest overruns)</h2>
+        {overruns.length === 0 ? (
+          <p className="text-[13px] text-zinc-500">No overruns in the last {range} days. 🎯</p>
+        ) : (
+          <table className="w-full text-left">
+            <tbody>
+              {overruns.map((t) => (
+                <tr key={t.name} className="border-b border-zinc-800/60">
+                  <td className="py-2 pr-2 text-[14px]">{t.name}</td>
+                  <td className="py-2 text-right font-mono text-[13px] tabular-nums text-zinc-500">
+                    {t.p}m → {t.a}m
+                  </td>
+                  <td className="py-2 text-right font-mono text-[13px] tabular-nums text-orange-500">
+                    +{t.d}m
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      <section>
+        <h2 className={h}>When you focus (hour of day)</h2>
+        <div className="flex h-20 items-end gap-[2px]">
+          {hours.map((m, i) => (
+            <div
+              key={i}
+              className={`flex-1 rounded-sm ${m ? "bg-zinc-400" : "bg-zinc-800"}`}
+              style={{ height: `${Math.max(3, (m / maxH) * 100)}%` }}
+              title={`${i}:00 — ${m}m`}
+            />
+          ))}
+        </div>
+        <div className="mt-1 flex justify-between text-[11px] text-zinc-600">
+          <span>0:00</span>
+          <span>6:00</span>
+          <span>12:00</span>
+          <span>18:00</span>
+          <span>24:00</span>
+        </div>
+      </section>
+
+      <section>
+        <h2 className={h}>Completed without a timer (from Todoist)</h2>
+        {apiDone === null ? (
+          <p className="text-[13px] text-zinc-500">Loading…</p>
+        ) : manual.length === 0 ? (
+          <p className="text-[13px] text-zinc-500">Everything completed was timeboxed. ✓</p>
+        ) : (
+          <>
+            <p className="mb-2 text-[13px] text-zinc-500">
+              {manual.length} task{manual.length === 1 ? "" : "s"} completed outside a timebox:
+            </p>
+            <ul className="space-y-1">
+              {manual.slice(0, 10).map((c) => (
+                <li key={c.id} className="flex justify-between gap-2 text-[14px]">
+                  <span className="truncate">{c.content}</span>
+                  <span className="shrink-0 font-mono text-[13px] text-zinc-500">
+                    {new Date(c.completed_at).toLocaleDateString(undefined, {
+                      month: "numeric",
+                      day: "numeric",
+                    })}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </section>
     </div>
   );
 }
@@ -1523,12 +1804,14 @@ function Timer({
   // keep endTime honest across pause: shift it forward by paused duration
   const pauseStarted = useRef(0);
   useEffect(() => {
-    if (paused) pauseStarted.current = Date.now();
-    else if (pauseStarted.current) {
+    if (paused) {
+      document.title = `⏸ paused - ${task.content}`;
+      pauseStarted.current = Date.now();
+    } else if (pauseStarted.current) {
       endRef.current += Date.now() - pauseStarted.current;
       pauseStarted.current = 0;
     }
-  }, [paused]);
+  }, [paused, task.content]);
 
   const frac = Math.max(0, left / totalRef.current);
   const C = 2 * Math.PI * 48;
@@ -1564,7 +1847,11 @@ function Timer({
       >
         ✕
       </button>
-      <h2 className="max-w-3xl text-center text-[20px] text-zinc-400">{task.content}</h2>
+      <h2
+        className={`max-w-3xl text-center text-[20px] ${paused ? "text-zinc-600" : "text-zinc-400"}`}
+      >
+        {task.content}
+      </h2>
       <div className="relative flex h-[64vmin] w-[64vmin] items-center justify-center">
         <svg viewBox="0 0 100 100" className="pointer-events-none absolute inset-0 h-full w-full -rotate-90">
           <circle cx="50" cy="50" r="48" fill="none" stroke="#27272a" strokeWidth="0.75" />
@@ -1573,7 +1860,7 @@ function Timer({
             cy="50"
             r="48"
             fill="none"
-            stroke="#f97316"
+            stroke={paused ? "#3f3f46" : "#f97316"}
             strokeWidth="0.75"
             strokeLinecap="round"
             strokeDasharray={C}
@@ -1583,14 +1870,17 @@ function Timer({
         </svg>
         <p
           className={`relative font-mono text-[14vmin] leading-none font-bold tabular-nums ${
-            frac <= 0.1 ? "text-orange-500" : "text-zinc-100"
+            paused ? "text-zinc-600" : frac <= 0.1 ? "text-orange-500" : "text-zinc-100"
           }`}
         >
           {fmt(left)}
         </p>
         {paused && (
-          <span className="absolute -bottom-[4vmin] left-1/2 -translate-x-1/2 text-[6vmin]" aria-label="Paused">
-            ⏸
+          <span
+            className="absolute -bottom-[6vmin] left-1/2 -translate-x-1/2 animate-pulse rounded-md border border-zinc-600 bg-zinc-800 px-4 py-1.5 text-[13px] font-medium tracking-wide whitespace-nowrap text-zinc-200 uppercase"
+            aria-label="Paused"
+          >
+            ⏸ Paused — tap anywhere to resume
           </span>
         )}
       </div>
@@ -1939,6 +2229,8 @@ function SettingsPage({
   token,
   projectId,
   onProject,
+  unsynced,
+  onSyncComments,
 }: {
   prefs: Prefs;
   onPrefs: (p: Partial<Prefs>) => void;
@@ -1949,6 +2241,8 @@ function SettingsPage({
   token: string;
   projectId: string;
   onProject: (id: string) => void;
+  unsynced: number;
+  onSyncComments: () => void;
 }) {
   const h = "mb-2 text-[13px] font-medium text-zinc-500";
   const row = "flex items-center justify-between gap-4 py-2";
@@ -2080,6 +2374,19 @@ function SettingsPage({
               </button>
             ))}
           </div>
+        </div>
+      </section>
+      <section>
+        <h2 className={h}>Todoist sync</h2>
+        <div className={row}>
+          <span className="text-[14px]">Timer logs → task comments</span>
+          <button
+            className={`${btn} text-orange-500 disabled:opacity-40`}
+            disabled={unsynced === 0}
+            onClick={onSyncComments}
+          >
+            {unsynced ? `Sync ${unsynced}` : "All synced ✓"}
+          </button>
         </div>
       </section>
       <section>
