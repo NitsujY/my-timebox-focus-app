@@ -856,36 +856,48 @@ function FocusView({
 
       {bufferId && (
         <section>
-          <p className="mb-1 px-2 text-[13px] text-zinc-500">Buffer</p>
           {bufferTasks.length === 0 ? (
-            <p className="px-2 py-2 text-[13px] text-zinc-600">
-              Adhoc tasks land here. Quick-capture them, timebox them short, move on.
-            </p>
+            <div className="flex min-h-11 items-center gap-2 px-2">
+              <p className="shrink-0 text-[13px] text-zinc-500">Buffer</p>
+              <p className="hidden min-w-0 flex-1 truncate text-[13px] text-zinc-600 sm:block">
+                Adhoc tasks land here. Quick-capture them, timebox them short, move on.
+              </p>
+              <AddRow
+                inline
+                placeholder="＋ Quick add…"
+                hotkey="b"
+                sections={sections}
+                onAdd={(raw) => onAdd(raw, bufferId)}
+              />
+            </div>
           ) : (
-            <ul className="space-y-0.5">
-              {bufferTasks.map((t) => (
-                <TaskRow
-                  key={t.id}
-                  t={t}
-                  durations={durations}
-                  defaultMinutes={defaultMinutes}
-                  expanded={expandedId === t.id}
-                  onToggle={() => onToggle(t.id)}
-                  onStart={onStart}
-                  onComplete={() => onComplete(t)}
-                  onUpdate={onUpdate}
-                  onDuration={onDuration}
-                  onDelete={onDelete}
-                />
-              ))}
-            </ul>
+            <>
+              <p className="mb-1 px-2 text-[13px] text-zinc-500">Buffer</p>
+              <ul className="space-y-0.5">
+                {bufferTasks.map((t) => (
+                  <TaskRow
+                    key={t.id}
+                    t={t}
+                    durations={durations}
+                    defaultMinutes={defaultMinutes}
+                    expanded={expandedId === t.id}
+                    onToggle={() => onToggle(t.id)}
+                    onStart={onStart}
+                    onComplete={() => onComplete(t)}
+                    onUpdate={onUpdate}
+                    onDuration={onDuration}
+                    onDelete={onDelete}
+                  />
+                ))}
+              </ul>
+              <AddRow
+                placeholder="＋ Quick add to Buffer…"
+                hotkey="b"
+                sections={sections}
+                onAdd={(raw) => onAdd(raw, bufferId)}
+              />
+            </>
           )}
-          <AddRow
-            placeholder="＋ Quick add to Buffer…"
-            hotkey="b"
-            sections={sections}
-            onAdd={(raw) => onAdd(raw, bufferId)}
-          />
         </section>
       )}
 
@@ -1282,12 +1294,14 @@ function AddRow({
   placeholder,
   hotkey,
   alwaysOpen,
+  inline,
   sections,
   onAdd,
 }: {
   placeholder: string;
   hotkey?: string;
   alwaysOpen?: boolean;
+  inline?: boolean;
   sections: SectionMap;
   onAdd: (raw: string) => void;
 }) {
@@ -1329,14 +1343,14 @@ function AddRow({
   if (!open)
     return (
       <button
-        className="min-h-11 w-full rounded-md px-2 text-left text-[13px] text-zinc-600 transition-colors duration-150 hover:bg-zinc-900"
+        className={`${inline ? "min-h-11 shrink-0" : "min-h-11 w-full"} rounded-md px-2 text-left text-[13px] text-zinc-600 transition-colors duration-150 hover:bg-zinc-900`}
         onClick={() => setOpen(true)}
       >
         {placeholder}
       </button>
     );
   return (
-    <div className="py-1">
+    <div className={inline ? "min-w-0 flex-1 py-1" : "py-1"}>
       <input
         ref={inputRef}
         className={input}
