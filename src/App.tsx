@@ -592,7 +592,7 @@ export default function App() {
           </div>
         </div>
       </header>
-      <main className="mx-auto max-w-[640px] px-4 pt-8 pb-24 md:pb-8">
+      <main className="mx-auto max-w-[640px] px-4 pt-8 pb-8">
         {error && <p className="mb-4 text-[13px] text-zinc-500">{error}</p>}
         {remapNeeded && (
           <div className="mb-4 flex items-center justify-between gap-4 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-3">
@@ -697,16 +697,6 @@ export default function App() {
           />
         )}
       </main>
-      {prefs.bufferOn && (
-        <div className="fixed inset-x-0 bottom-0 z-20 border-t border-zinc-800 bg-zinc-950 px-3 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] md:hidden">
-          <AddRow
-            placeholder="＋ Quick add to Buffer…"
-            alwaysOpen
-            sections={sections}
-            onAdd={(raw) => addTask(raw, roles.buffer)}
-          />
-        </div>
-      )}
       {showRef && <RefPanel onClose={() => setShowRef(false)} />}
       {toast && (
         <div className="fixed bottom-20 left-1/2 z-40 -translate-x-1/2 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-2 text-[13px] whitespace-nowrap md:bottom-6">
@@ -884,9 +874,6 @@ function FocusView({
           {bufferTasks.length === 0 ? (
             <div className="flex min-h-11 items-center gap-2 px-2">
               <p className="shrink-0 text-[13px] text-zinc-500">Buffer</p>
-              <p className="hidden min-w-0 flex-1 truncate text-[13px] text-zinc-600 sm:block">
-                Adhoc tasks land here. Quick-capture them, timebox them short, move on.
-              </p>
               <AddRow
                 inline
                 placeholder="＋ Quick add…"
