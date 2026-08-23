@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { handleOAuthCallback, load, refreshToken, save, startOAuth } from "./auth";
 
 const API = "https://api.todoist.com/api/v1";
 const PAGE = 50; // ponytail: render cap for long lists, "show all" button instead of virtualization
@@ -62,15 +63,6 @@ type CompletedItem = { id: string; content: string; completed_at: string };
 const sessionComment = (s: Session) =>
   `⏱ ${new Date(s.timestamp).toLocaleDateString(undefined, { month: "numeric", day: "numeric" })} · planned ${s.planned_minutes}m · actual ${s.actual_minutes}m · ${s.completed ? "✓ completed" : "abandoned"}`;
 
-const load = <T,>(k: string, d: T): T => {
-  try {
-    const v = localStorage.getItem(k);
-    return v ? (JSON.parse(v) as T) : d;
-  } catch {
-    return d;
-  }
-};
-const save = (k: string, v: unknown) => localStorage.setItem(k, JSON.stringify(v));
 const arr = <T,>(d: unknown): T[] =>
   Array.isArray(d) ? d : ((d as { results?: T[] }).results ?? []);
 const todayStr = () => new Date().toDateString();
@@ -83,14 +75,18 @@ const input =
 
 // ponytail: failed mutations queue in localStorage, flushed on next poll/online
 async function api(token: string, path: string, method = "GET", body?: object) {
-  const res = await fetch(API + path, {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      ...(body ? { "Content-Type": "application/json" } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  const call = (t: string) =>
+    fetch(API + path, {
+      method,
+      headers: {
+        Authorization: `Bearer ${t}`,
+        ...(body ? { "Content-Type": "application/json" } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  let res = await call(load("tb_token", token)); // storage may hold a fresher token than state
+  if (res.status === 401 && load("tb_refresh", ""))
+    res = await call(await refreshToken()); // OAuth token expired — refresh & retry once
   if (!res.ok) throw new Error(`${res.status} ${path}`);
   return res.status === 204 ? null : res.json();
 }
@@ -203,6 +199,14 @@ export default function App() {
   );
   const [showRef, setShowRef] = useState(false);
   const [error, setError] = useState("");
+  const [oauthErr, setOauthErr] = useState("");
+
+  // complete the OAuth redirect (PKCE) before anything else needs the token
+  useEffect(() => {
+    handleOAuthCallback()
+      .then((t) => t && setToken(t))
+      .catch((e) => setOauthErr(e instanceof Error ? e.message : String(e)));
+  }, []);
 
   const updatePrefs = (p: Partial<Prefs>) =>
     setPrefs((cur) => {
@@ -477,7 +481,9 @@ export default function App() {
   if (!token || !projectId)
     return (
       <Connect
+        key={token} // remount when OAuth lands so the fresh token becomes `initial`
         token={token}
+        error={oauthErr}
         onDone={(t, p) => {
           save("tb_token", t);
           save("tb_project", p);
@@ -546,13 +552,13 @@ export default function App() {
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/90 backdrop-blur">
-        <div className="mx-auto grid max-w-[640px] grid-cols-[1fr_auto_1fr] items-center px-4 py-3">
-          <span className="text-[15px] font-semibold">Timebox</span>
-          <nav className="flex gap-1">
+        <div className="mx-auto grid max-w-[640px] grid-cols-[auto_1fr_auto] items-center px-4 py-3 sm:grid-cols-[1fr_auto_1fr]">
+          <span className="hidden text-[15px] font-semibold sm:block">Timebox</span>
+          <nav className="flex justify-center gap-1">
             {(["focus", "backlog", "review", "analysis"] as const).map((v) => (
               <button
                 key={v}
-                className={`${btn} capitalize ${view === v ? "bg-zinc-800 text-zinc-100" : ""}`}
+                className={`${btn} px-2 capitalize sm:px-3 ${view === v ? "bg-zinc-800 text-zinc-100" : ""}`}
                 onClick={() => setView(v)}
               >
                 {v}
@@ -724,14 +730,16 @@ export default function App() {
 
 function Connect({
   token: initial,
+  error: oauthError,
   onDone,
 }: {
   token: string;
+  error?: string;
   onDone: (token: string, projectId: string) => void;
 }) {
   const [token, setToken] = useState(initial);
   const [projects, setProjects] = useState<Project[] | null>(null);
-  const [err, setErr] = useState("");
+  const [err, setErr] = useState(oauthError ?? "");
 
   const fetchProjects = async () => {
     setErr("");
@@ -742,10 +750,27 @@ function Connect({
     }
   };
 
+  // OAuth redirects back here with a token already set — jump straight to project pick
+  useEffect(() => {
+    if (initial) fetchProjects();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <div className="flex min-h-screen items-center justify-center">
       <div className="w-full max-w-sm space-y-4 px-4">
         <h1 className="text-[20px] font-semibold">Connect Todoist</h1>
+        <button
+          className="w-full rounded-md bg-orange-600 px-3 py-2 text-[15px] font-medium text-white transition-colors duration-150 hover:bg-orange-500"
+          onClick={startOAuth}
+        >
+          Connect with Todoist
+        </button>
+        <div className="flex items-center gap-3 text-[12px] text-zinc-600">
+          <span className="h-px flex-1 bg-zinc-800" />
+          or paste an API token
+          <span className="h-px flex-1 bg-zinc-800" />
+        </div>
         <input
           className={input}
           type="password"
@@ -1235,7 +1260,7 @@ function RowEditor({
               debRef.current = setTimeout(flush, 500);
             }}
           />
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <DurationChips t={t} durations={durations} onDuration={onDuration} />
             {onDemote && (
               <button className={btn} title="Move back to Backlog" onClick={() => onDemote(t)}>

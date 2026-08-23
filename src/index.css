@@ -8,6 +8,7 @@ body {
   font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
   background: #09090b;
   color: #f4f4f5;
+  overflow-x: clip;
 }
 
 @keyframes grow {

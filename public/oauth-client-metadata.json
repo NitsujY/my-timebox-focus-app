@@ -1,0 +1,9 @@
+{
+  "client_id": "https://YOUR-DEPLOYED-DOMAIN/oauth-client-metadata.json",
+  "client_name": "Timebox Focus",
+  "redirect_uris": ["https://YOUR-DEPLOYED-DOMAIN/"],
+  "token_endpoint_auth_method": "none",
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "scope": "data:read_write"
+}

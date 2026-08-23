@@ -9,13 +9,14 @@ npm install
 npm run dev
 ```
 
-## Get a Todoist API token
+## Connect Todoist
 
-1. Go to https://todoist.com/app/settings/integrations/developer
-2. Copy your **API token**.
-3. On first launch, paste it into the app and pick the project you want to timebox.
+Two ways to connect — both end at a bearer token in your browser's `localStorage` (it never leaves your machine except to call `api.todoist.com`):
 
-The token is stored in your browser's `localStorage` only — it never leaves your machine except to call `api.todoist.com`.
+- **Connect with Todoist (OAuth, recommended)** — click the button on first launch and approve. Tokens auto-refresh hourly via PKCE; no secret is stored. Requires the app to be served over HTTPS (any static host works).
+- **API token (power users / local dev)** — go to https://todoist.com/app/settings/integrations/developer, copy your **API token**, paste it, and pick the project you want to timebox. OAuth can't run on localhost (Todoist must fetch the client metadata doc over HTTPS), so use this for `npm run dev`.
+
+**Before deploying:** edit `public/oauth-client-metadata.json` and replace `YOUR-DEPLOYED-DOMAIN` with your real domain — `client_id` must be the exact URL where that file is served (Todoist's zero-registration client-metadata flow).
 
 ## Project convention: sections are the workflow
 
