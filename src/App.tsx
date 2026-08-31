@@ -91,7 +91,13 @@ async function api(token: string, path: string, method = "GET", body?: object) {
   return res.status === 204 ? null : res.json();
 }
 
+// ponytail: refresh skips its task overwrite while writes are in flight,
+// otherwise a 30s poll mid-POST clobbers the optimistic complete (task snaps back)
+let pendingWrites = 0;
+let lastWriteAt = 0; // grace window covers Todoist read-after-write lag
+
 async function mutate(token: string, m: Mutation) {
+  pendingWrites++;
   try {
     await api(token, m.path, m.method, m.body);
   } catch (e) {
@@ -100,6 +106,9 @@ async function mutate(token: string, m: Mutation) {
       q.push(m);
       save("tb_queue", q);
     } else throw e;
+  } finally {
+    pendingWrites--;
+    lastWriteAt = Date.now();
   }
 }
 
@@ -262,7 +271,7 @@ export default function App() {
         save("tb_roles", next);
         return next;
       });
-      setTasks(arr<Task>(ts));
+      if (!pendingWrites && Date.now() - lastWriteAt > 2000) setTasks(arr<Task>(ts));
       setError("");
     } catch (e) {
       setError(
@@ -514,12 +523,36 @@ export default function App() {
       />
     );
 
+  const toastEl = toast && (
+    <div className="fixed bottom-20 left-1/2 z-40 -translate-x-1/2 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-2 text-[13px] whitespace-nowrap md:bottom-6">
+      {toast.msg}
+      {toast.undo && (
+        <button
+          className="ml-2 text-orange-500"
+          onClick={() => {
+            toast.undo?.();
+            setToast(null);
+          }}
+        >
+          Undo
+        </button>
+      )}
+    </div>
+  );
+
   if (celebrating && active)
-    return <Celebration task={active.task} onDone={() => { setCelebrating(false); setActive(null); }} />;
+    return (
+      <>
+        {toastEl}
+        <Celebration task={active.task} onDone={() => { setCelebrating(false); setActive(null); }} />
+      </>
+    );
 
   if (active)
     return (
-      <Timer
+      <>
+        {toastEl}
+        <Timer
         task={active.task}
         minutes={active.minutes}
         gentle={prefs.timerEnd === "gentle"}
@@ -531,6 +564,7 @@ export default function App() {
           else setActive(null);
         }}
       />
+      </>
     );
 
   // ponytail: tasks without a section count as Backlog so nothing goes invisible
@@ -698,22 +732,7 @@ export default function App() {
         )}
       </main>
       {showRef && <RefPanel onClose={() => setShowRef(false)} />}
-      {toast && (
-        <div className="fixed bottom-20 left-1/2 z-40 -translate-x-1/2 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-2 text-[13px] whitespace-nowrap md:bottom-6">
-          {toast.msg}
-          {toast.undo && (
-            <button
-              className="ml-2 text-orange-500"
-              onClick={() => {
-                toast.undo?.();
-                setToast(null);
-              }}
-            >
-              Undo
-            </button>
-          )}
-        </div>
-      )}
+      {toastEl}
     </div>
   );
 }
@@ -1777,8 +1796,11 @@ function Timer({
   const alarmedRef = useRef(false);
 
   // ponytail: endTime timestamp, not decrementing counter — survives drift
+  // ponytail: Notification is undefined on mobile browsers (older iOS Safari, some Android WebViews) — guard or the whole effect throws and the countdown never starts
+  const canNotify = typeof Notification !== "undefined";
+
   useEffect(() => {
-    if (Notification.permission === "default") Notification.requestPermission();
+    if (canNotify && Notification.permission === "default") Notification.requestPermission();
     const iv = setInterval(() => {
       if (paused) return;
       const rem = Math.max(0, (endRef.current - Date.now()) / 1000);
@@ -1787,7 +1809,7 @@ function Timer({
       document.title = `${fmt(rem)} - ${task.content}`;
       if (rem <= 0 && !alarmedRef.current) {
         alarmedRef.current = true;
-        if (Notification.permission === "granted") {
+        if (canNotify && Notification.permission === "granted") {
           const n = new Notification("Time's up!", { body: task.content });
           n.onclick = () => window.focus(); // ponytail: browsers only allow window.focus() from a user gesture like this
         }
