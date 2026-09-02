@@ -328,6 +328,31 @@ export default function App() {
     toastTimer.current = setTimeout(() => setToast(null), 3000);
   };
 
+  // Break nudge: accumulate timer-run seconds, toast at 45 min, reset after a 15 min gap
+  const WORK_LIMIT = 45 * 60;
+  const BREAK_GAP = 15 * 60_000;
+  const workRef = useRef(load("tb_work_sec", 0));
+  const nudgedRef = useRef(false);
+  const onWorkTick = useCallback((sec: number) => {
+    workRef.current += sec;
+    save("tb_work_sec", Math.round(workRef.current));
+    if (workRef.current >= WORK_LIMIT && !nudgedRef.current) {
+      nudgedRef.current = true;
+      showToast("45 min of focus — take a 15 min break 🍵");
+    }
+  }, []);
+  useEffect(() => {
+    if (active) {
+      if (Date.now() - load("tb_last_stop", 0) >= BREAK_GAP) {
+        workRef.current = 0;
+        save("tb_work_sec", 0);
+        nudgedRef.current = false;
+      }
+    } else {
+      save("tb_last_stop", Date.now());
+    }
+  }, [active]);
+
   const toggleRow = (id: string) => setExpandedId((cur) => (cur === id ? null : id));
 
   // optimistic move with rollback on API failure (offline queues instead)
@@ -558,6 +583,7 @@ export default function App() {
         gentle={prefs.timerEnd === "gentle"}
         onExit={() => setActive(null)}
         onLog={logSession}
+        onTick={onWorkTick}
         onComplete={() => {
           completeTask(active.task); // ponytail: fire-and-forget — timer exits instantly; failure toast still surfaces
           if (prefs.celebrate) setCelebrating(true);
@@ -1779,6 +1805,7 @@ function Timer({
   onExit,
   onLog,
   onComplete,
+  onTick,
 }: {
   task: Task;
   minutes: number;
@@ -1786,6 +1813,7 @@ function Timer({
   onExit: () => void;
   onLog: (s: Session) => void;
   onComplete: () => void;
+  onTick?: (sec: number) => void;
 }) {
   const [left, setLeft] = useState(minutes * 60);
   const [paused, setPaused] = useState(false);
@@ -1794,6 +1822,9 @@ function Timer({
   const elapsedRef = useRef(0); // seconds actually run
   const totalRef = useRef(minutes * 60);
   const alarmedRef = useRef(false);
+  // ponytail: ref so the 4Hz interval doesn't restart when the parent's callback identity changes
+  const onTickRef = useRef(onTick);
+  onTickRef.current = onTick;
 
   // ponytail: endTime timestamp, not decrementing counter — survives drift
   // ponytail: Notification is undefined on mobile browsers (older iOS Safari, some Android WebViews) — guard or the whole effect throws and the countdown never starts
@@ -1805,6 +1836,7 @@ function Timer({
       if (paused) return;
       const rem = Math.max(0, (endRef.current - Date.now()) / 1000);
       elapsedRef.current += 0.25;
+      onTickRef.current?.(0.25);
       setLeft(rem);
       document.title = `${fmt(rem)} - ${task.content}`;
       if (rem <= 0 && !alarmedRef.current) {
@@ -1969,7 +2001,7 @@ function Timer({
             onExit();
           }}
         >
-          Abandon ✗
+          Not done — log & stop
         </button>
       </div>
 
