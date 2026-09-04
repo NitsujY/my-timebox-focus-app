@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { handleOAuthCallback, load, refreshToken, save, startOAuth } from "./auth";
 
 const API = "https://api.todoist.com/api/v1";
-const PAGE = 50; // ponytail: render cap for long lists, "show all" button instead of virtualization
+const PAGE = 50;
 
 type Role = "focus" | "buffer" | "backlog" | "done";
 type RoleMap = Partial<Record<Role, string>>; // role -> todoist_section_id
@@ -73,7 +73,6 @@ const btn =
 const input =
   "w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-[15px] outline-none placeholder:text-zinc-600 focus:border-zinc-700";
 
-// ponytail: failed mutations queue in localStorage, flushed on next poll/online
 async function api(token: string, path: string, method = "GET", body?: object) {
   const call = (t: string) =>
     fetch(API + path, {
@@ -91,8 +90,6 @@ async function api(token: string, path: string, method = "GET", body?: object) {
   return res.status === 204 ? null : res.json();
 }
 
-// ponytail: refresh skips its task overwrite while writes are in flight,
-// otherwise a 30s poll mid-POST clobbers the optimistic complete (task snaps back)
 let pendingWrites = 0;
 let lastWriteAt = 0; // grace window covers Todoist read-after-write lag
 
@@ -131,7 +128,6 @@ function fmt(sec: number) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-// ponytail: alarm = raw oscillator, no audio file
 function alarm() {
   const ctx = new AudioContext();
   const osc = ctx.createOscillator();
@@ -302,7 +298,6 @@ export default function App() {
   };
 
   const logSession = (s: Session) => {
-    // ponytail: comment doubles as cross-device backup — fire-and-forget, queues offline
     const next = [...sessions, { ...s, synced: postComment(s) }];
     setSessions(next);
     save("tb_sessions", next);
@@ -371,7 +366,6 @@ export default function App() {
     }
   };
 
-  // ponytail: free Todoist accounts reject duration writes — detect once, then stop sending
   const proFail = () => {
     if (noDuration) return;
     setNoDuration(true);
@@ -484,7 +478,6 @@ export default function App() {
     });
   };
 
-  // ponytail: move, not close — Done section feeds estimation/review; evening archive closes them
   const completeTask = async (t: Task) => {
     if (prefs.completeAction === "done" && roles.done) {
       await moveTo(t, roles.done);
@@ -585,7 +578,7 @@ export default function App() {
         onLog={logSession}
         onTick={onWorkTick}
         onComplete={() => {
-          completeTask(active.task); // ponytail: fire-and-forget — timer exits instantly; failure toast still surfaces
+          completeTask(active.task);
           if (prefs.celebrate) setCelebrating(true);
           else setActive(null);
         }}
@@ -593,7 +586,6 @@ export default function App() {
       </>
     );
 
-  // ponytail: tasks without a section count as Backlog so nothing goes invisible
   const focusTasks = sortTasks(tasks.filter((t) => t.section_id === roles.focus));
   const bufferTasks = prefs.bufferOn ? tasks.filter((t) => t.section_id === roles.buffer) : [];
   const backlogTasks = sortTasks(
@@ -1008,7 +1000,6 @@ function FocusView({
   );
 }
 
-// ponytail: cap-at-50 + "show all" beats a virtualization lib at this list size
 function BacklogList({
   tasks,
   expandedId,
@@ -1232,7 +1223,6 @@ function RowEditor({
     if (descLive.current !== (tLive.current.description ?? ""))
       persist({ description: descLive.current });
   };
-  // ponytail: unmount = collapse/switch row — auto-save happens here, always
   useEffect(() => () => flush(), []);
 
   // auto-grow textarea
@@ -1546,7 +1536,6 @@ function Review({
   );
 }
 
-// ponytail: analysis reads existing stores — local sessions + completed API, zero extra writes
 function Analysis({ sessions, token }: { sessions: Session[]; token: string }) {
   const [range, setRange] = useState(() => load("tb_analysis_range", 30));
   const [apiDone, setApiDone] = useState<CompletedItem[] | null>(null);
@@ -1797,7 +1786,6 @@ function Celebration({ task, onDone }: { task: Task; onDone: () => void }) {
   );
 }
 
-// ponytail: tap anywhere toggles pause; buttons stopPropagation
 function Timer({
   task,
   minutes,
@@ -1818,16 +1806,14 @@ function Timer({
   const [left, setLeft] = useState(minutes * 60);
   const [paused, setPaused] = useState(false);
   const [timesUp, setTimesUp] = useState(false);
+  const [waited, setWaited] = useState(0); // minutes sat in the time-up dialog
   const endRef = useRef(Date.now() + minutes * 60_000);
   const elapsedRef = useRef(0); // seconds actually run
   const totalRef = useRef(minutes * 60);
   const alarmedRef = useRef(false);
-  // ponytail: ref so the 4Hz interval doesn't restart when the parent's callback identity changes
   const onTickRef = useRef(onTick);
   onTickRef.current = onTick;
 
-  // ponytail: endTime timestamp, not decrementing counter — survives drift
-  // ponytail: Notification is undefined on mobile browsers (older iOS Safari, some Android WebViews) — guard or the whole effect throws and the countdown never starts
   const canNotify = typeof Notification !== "undefined";
 
   useEffect(() => {
@@ -1835,6 +1821,7 @@ function Timer({
     const iv = setInterval(() => {
       if (paused) return;
       const rem = Math.max(0, (endRef.current - Date.now()) / 1000);
+      if (alarmedRef.current) setWaited(Math.max(1, Math.ceil((Date.now() - endRef.current) / 60000)));
       elapsedRef.current += 0.25;
       onTickRef.current?.(0.25);
       setLeft(rem);
@@ -1843,7 +1830,7 @@ function Timer({
         alarmedRef.current = true;
         if (canNotify && Notification.permission === "granted") {
           const n = new Notification("Time's up!", { body: task.content });
-          n.onclick = () => window.focus(); // ponytail: browsers only allow window.focus() from a user gesture like this
+          n.onclick = () => window.focus();
         }
         if (!gentle) {
           alarm();
@@ -1862,10 +1849,11 @@ function Timer({
   }, [paused, task.content, gentle]);
 
   const extend = (m: number) => {
-    endRef.current += m * 60_000;
+    endRef.current = Math.max(endRef.current, Date.now()) + m * 60_000;
     totalRef.current += m * 60;
     alarmedRef.current = false;
     setTimesUp(false);
+    setWaited(0);
     setLeft((endRef.current - Date.now()) / 1000);
   };
 
@@ -2021,9 +2009,16 @@ function Timer({
             >
               Mark complete
             </button>
-            <button className={`${tbtn} block w-full`} onClick={() => extend(5)}>
-              Extend +5 min
-            </button>
+            <div className="flex gap-2">
+              <button className={`${tbtn} flex-1`} onClick={() => extend(5)}>
+                +5 min
+              </button>
+              {waited > 5 && (
+                <button className={`${tbtn} flex-1`} onClick={() => extend(waited)}>
+                  +{waited} min (waited)
+                </button>
+              )}
+            </div>
             <button
               className={`${tbtn} block w-full`}
               onClick={() => {
@@ -2057,7 +2052,6 @@ function MappingScreen({
   onDone,
 }: MappingProps & { onDone?: () => void }) {
   const [draft, setDraft] = useState<RoleMap>(roles);
-  // ponytail: sync re-detected roles (project switch) without clobbering edits on no-op refreshes
   const prevRoles = useRef(roles);
   useEffect(() => {
     if (JSON.stringify(prevRoles.current) === JSON.stringify(roles)) return;
@@ -2151,7 +2145,6 @@ const THEORY: [string, string][] = [
   ["Review", "Compare planned vs actual. Calibrate tomorrow."],
 ];
 
-// ponytail: "animated" = tailwind pulse on the arrows, no animation lib
 function TheoryDiagram() {
   return (
     <div className="flex flex-col items-center gap-1">
@@ -2490,7 +2483,6 @@ function SettingsPage({
   );
 }
 
-// ponytail: native <select>, roles auto re-detect on project switch via refresh()
 function ProjectSelect({
   token,
   projectId,
@@ -2507,7 +2499,6 @@ function ProjectSelect({
     Promise.all([api(token, "/projects"), api(token, "/sections"), api(token, "/tasks")])
       .then(([pr, sec, ts]) => {
         setProjects(arr<Project>(pr));
-        // ponytail: "focus" = section named like a focus role; 2 extra fetches instead of N per-project
         const focusSections = new Set(
           arr<SectionInfo & { project_id: string }>(sec)
             .filter((s) => ROLE_DEF[0].names.includes(s.name.toLowerCase()))

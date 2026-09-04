@@ -102,7 +102,6 @@ export function refreshToken(): Promise<string> {
       throw new Error("Todoist session expired — reconnect");
     }
     const d = await res.json();
-    // ponytail: within Todoist's 60s grace window the retry omits refresh_token — keep the current one
     saveTokens({ access_token: d.access_token, refresh_token: d.refresh_token ?? rt });
     return d.access_token as string;
   })().finally(() => {
