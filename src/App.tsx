@@ -225,6 +225,11 @@ export default function App() {
     save("tb_roles", r);
   };
 
+  const switchProject = (id: string) => {
+    save("tb_project", id);
+    setProjectId(id); // refresh() re-fetches tasks/sections and re-detects roles
+  };
+
   const createSection = async (name: string): Promise<SectionInfo> => {
     const s = (await api(token, "/sections", "POST", { name, project_id: projectId })) as SectionInfo;
     setSectionList((l) => {
@@ -643,6 +648,8 @@ export default function App() {
             />
           </div>
         </div>
+        {/* project switcher row: free plan has ≤5 projects, so all of them fit as chips */}
+        <ProjectChips token={token} projectId={projectId} onProject={switchProject} />
       </header>
       <main className="mx-auto max-w-[640px] px-4 pt-8 pb-8">
         {error && <p className="mb-4 text-[13px] text-zinc-500">{error}</p>}
@@ -665,10 +672,7 @@ export default function App() {
             onPrefs={updatePrefs}
             token={token}
             projectId={projectId}
-            onProject={(id) => {
-              save("tb_project", id);
-              setProjectId(id); // refresh() re-fetches tasks/sections and re-detects roles
-            }}
+            onProject={switchProject}
             mappingProps={{
               sectionList,
               roles,
@@ -771,7 +775,14 @@ function Connect({
   const fetchProjects = async () => {
     setErr("");
     try {
-      setProjects(arr<Project>(await api(token, "/projects")));
+      const ps = arr<Project & { is_inbox_project?: boolean; inbox_project?: boolean }>(
+        await api(token, "/projects"),
+      );
+      // auto-pick the first project besides Inbox — no manual selection needed
+      // (fall back to Inbox itself if it's the only project)
+      const pick = ps.find((p) => !p.is_inbox_project && !p.inbox_project && p.name !== "Inbox") ?? ps[0];
+      if (pick) onDone(token, pick.id);
+      else setProjects(ps); // no projects at all — show the (empty) list
     } catch {
       setErr("Couldn't load projects — check the token and your connection, then retry");
     }
@@ -1786,6 +1797,9 @@ function Celebration({ task, onDone }: { task: Task; onDone: () => void }) {
   );
 }
 
+// an unanswered "time's up" rings again after this long, then auto-stops (seconds)
+const AUTO_STOP_SEC = 5 * 60;
+
 function Timer({
   task,
   minutes,
@@ -1807,12 +1821,16 @@ function Timer({
   const [paused, setPaused] = useState(false);
   const [timesUp, setTimesUp] = useState(false);
   const [waited, setWaited] = useState(0); // minutes sat in the time-up dialog
+  const [over, setOver] = useState(0); // seconds past the planned end
   const endRef = useRef(Date.now() + minutes * 60_000);
   const elapsedRef = useRef(0); // seconds actually run
   const totalRef = useRef(minutes * 60);
   const alarmedRef = useRef(false);
+  const autoStoppedRef = useRef(false);
   const onTickRef = useRef(onTick);
   onTickRef.current = onTick;
+  // assigned below logAndExit so the interval can trigger the walk-away auto-stop
+  const stopRef = useRef<() => void>(() => {});
 
   const canNotify = typeof Notification !== "undefined";
 
@@ -1820,12 +1838,15 @@ function Timer({
     if (canNotify && Notification.permission === "default") Notification.requestPermission();
     const iv = setInterval(() => {
       if (paused) return;
-      const rem = Math.max(0, (endRef.current - Date.now()) / 1000);
-      if (alarmedRef.current) setWaited(Math.max(1, Math.ceil((Date.now() - endRef.current) / 60000)));
+      const now = Date.now();
+      const rem = Math.max(0, (endRef.current - now) / 1000);
+      const ov = Math.max(0, (now - endRef.current) / 1000); // overrun past planned end
+      if (alarmedRef.current) setWaited(Math.max(1, Math.ceil((now - endRef.current) / 60000)));
       elapsedRef.current += 0.25;
       onTickRef.current?.(0.25);
       setLeft(rem);
-      document.title = `${fmt(rem)} - ${task.content}`;
+      setOver(ov);
+      document.title = ov > 0 ? `+${fmt(ov)} - ${task.content}` : `${fmt(rem)} - ${task.content}`;
       if (rem <= 0 && !alarmedRef.current) {
         alarmedRef.current = true;
         if (canNotify && Notification.permission === "granted") {
@@ -1837,9 +1858,13 @@ function Timer({
           document.body.classList.add("flash");
           setTimeout(() => document.body.classList.remove("flash"), 4000);
           setTimesUp(true);
-        } else {
-          document.title = `0:00 - ${task.content}`;
         }
+      }
+      // unanswered time-up = user probably walked away: ring once more, then log & stop
+      if (ov >= AUTO_STOP_SEC && !autoStoppedRef.current) {
+        autoStoppedRef.current = true;
+        if (!gentle) alarm();
+        stopRef.current();
       }
     }, 250);
     return () => {
@@ -1852,8 +1877,10 @@ function Timer({
     endRef.current = Math.max(endRef.current, Date.now()) + m * 60_000;
     totalRef.current += m * 60;
     alarmedRef.current = false;
+    autoStoppedRef.current = false;
     setTimesUp(false);
     setWaited(0);
+    setOver(0);
     setLeft((endRef.current - Date.now()) / 1000);
   };
 
@@ -1893,6 +1920,10 @@ function Timer({
       completed,
       timestamp: Date.now(),
     });
+  };
+  stopRef.current = () => {
+    logAndExit(false); // auto-stop logs as abandoned; overrun is still counted in actual_minutes
+    onExit();
   };
 
   const tbtn =
@@ -1941,7 +1972,7 @@ function Timer({
             paused ? "text-zinc-600" : frac <= 0.1 ? "text-orange-500" : "text-zinc-100"
           }`}
         >
-          {fmt(left)}
+          {over > 0 ? `+${fmt(over)}` : fmt(left)}
         </p>
         {paused && (
           <span
@@ -1999,7 +2030,12 @@ function Timer({
           onClick={tap}
         >
           <div className="w-full max-w-xs space-y-2 rounded-md border border-zinc-800 bg-zinc-900 p-6">
-            <h3 className="mb-4 text-[20px] font-semibold">Time's up!</h3>
+            <div className="mb-4">
+              <h3 className="text-[20px] font-semibold">Time's up!</h3>
+              <p className="mt-1 font-mono text-[13px] tabular-nums text-orange-500">
+                +{fmt(over)} over — auto-stops at +{fmt(AUTO_STOP_SEC)}
+              </p>
+            </div>
             <button
               className={`${tbtn} block w-full text-orange-500`}
               onClick={() => {
@@ -2527,5 +2563,57 @@ function ProjectSelect({
         </option>
       ))}
     </select>
+  );
+}
+
+// project switcher row: all non-Inbox projects as chips (free plan allows only 5, so they all fit;
+// paid plans get a horizontal scroll past that). One tap to switch, active project highlighted.
+function ProjectChips({
+  token,
+  projectId,
+  onProject,
+}: {
+  token: string;
+  projectId: string;
+  onProject: (id: string) => void;
+}) {
+  const [projects, setProjects] = useState<(Project & { is_favorite?: boolean })[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    api(token, "/projects")
+      .then((d) => {
+        if (!cancelled) setProjects(arr<Project & { is_favorite?: boolean }>(d));
+      })
+      .catch(() => {}); // offline etc. — chips are optional chrome
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  // non-Inbox projects; favorites float to the front for quicker reach
+  const chips = projects
+    .filter((p) => p.name !== "Inbox")
+    .sort((a, b) => Number(b.is_favorite ?? false) - Number(a.is_favorite ?? false));
+  if (chips.length < 2) return null; // nothing useful to switch between
+  return (
+    <div className="border-t border-zinc-800/60 bg-zinc-900/30">
+      <div className="mx-auto flex max-w-[640px] items-center gap-1 overflow-x-auto px-4 py-1.5">
+        <span className="mr-1 shrink-0 text-[11px] tracking-wide text-zinc-600 uppercase">
+          List
+        </span>
+        {chips.map((p) => (
+          <button
+            key={p.id}
+            title={`Switch to ${p.name}`}
+            className={`${btn} max-w-36 shrink-0 truncate px-2 py-1 text-[12px] ${
+              p.id === projectId ? "bg-zinc-800 text-zinc-100" : "text-zinc-500"
+            }`}
+            onClick={() => p.id !== projectId && onProject(p.id)}
+          >
+            {p.name}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }

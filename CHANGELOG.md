@@ -1,5 +1,12 @@
 # Changelog
 
+## v8 — Fast switching & overrun visibility
+
+- **Auto-pick project on connect**: the first project besides Inbox is chosen automatically after OAuth/token entry — no manual selection screen.
+- **Project chips in the header**: one-tap switching between Todoist favorite projects (`is_favorite`); falls back to the 3 most-recently-used projects when no favorites are set.
+- **Overrun clock**: past the planned end, the timer counts up (`+M:SS`) in orange on the clock, in the time-up dialog, and in the browser tab title. Overrun counts toward `actual_minutes`.
+- **Walk-away auto-stop**: a time-up left unanswered for 5 minutes rings the alarm once more, then logs the session (as abandoned) and stops the timer.
+
 ## v7 — Public-ready
 
 - **Section role mapping**: internal logic uses roles (`focus`/`buffer`/`backlog`/`done`) mapped to Todoist section IDs per user (`tb_roles`). No hardcoded section names.
