@@ -2369,21 +2369,24 @@ function SettingsPage({
       </section>
       <section>
         <h2 className={h}>Focus task cap</h2>
-        <div className="flex gap-1">
-          {[1, 2, 3, 4, 5].map((n) => (
-            <button
-              key={n}
-              className={`rounded-md border px-3 py-1 font-mono text-[13px] ${
-                prefs.focusCap === n
-                  ? "border-zinc-600 text-zinc-200"
-                  : "border-zinc-800 text-zinc-500 hover:bg-zinc-800"
-              }`}
-              onClick={() => onPrefs({ focusCap: n })}
-            >
-              {n}
-            </button>
-          ))}
-        </div>
+        <input
+          className={input}
+          type="number"
+          inputMode="numeric"
+          min={1}
+          step={1}
+          defaultValue={prefs.focusCap}
+          onBlur={(e) => {
+            const n = parseInt(e.target.value, 10);
+            const valid = Number.isFinite(n) && n >= 1;
+            const cap = valid ? n : 3;
+            if (!valid) e.target.value = String(cap);
+            if (cap !== prefs.focusCap) onPrefs({ focusCap: cap });
+          }}
+        />
+        <p className="mt-1 text-[12px] text-zinc-600">
+          Any positive number. Defaults to 3 if left empty or invalid.
+        </p>
       </section>
       <section>
         <h2 className={h}>Duration presets (minutes, comma-separated)</h2>
