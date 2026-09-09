@@ -28,8 +28,8 @@ other; Todoist is the shared source of truth.
    `←` + duration chips (5/10/15/25/50/90, task's planned duration
    pre-selected). `←` deselects.
 2. **Timer** — tap the selected task again. Progress ring + MM:SS, task
-   title, `+5 min` and `✓ Log & exit` buttons. Tap background = pause/resume
-   (time turns orange). At 0:00 ring goes solid orange.
+   title, `+5 min`, `Done` and `Log & exit` buttons. Tap background =
+   pause/resume (time turns orange). At 0:00 ring goes solid orange.
 3. Back is always an on-screen `←` / button — the device has no keyboard.
 
 Theme mirrors the web app: bg `#09090b`, cards `#18181b`, borders `#27272a`,
@@ -40,14 +40,11 @@ readable at arm's length on a 3.5" panel.
 
 - Section name `Focus` (case-insensitive) = today's tasks
 - Duration chips: 5, 10, 15, 25, 50, 90 minutes
-- Task's Todoist `duration` pre-fills the chip selection
-
-## Open decision
-
-**Log & exit semantics**: complete the Todoist task
-(`POST /api/v1/tasks/{id}/close`) and/or write a local session log?
-Default for v1: close the task, no local log (the web app's Review tab owns
-stats; add an SD/flash log later if wanted).
+- Task's Todoist `duration` pre-fills the chip selection; default 5 min
+- Timer exits mirror the web app: `Done` closes the Todoist task
+  (`POST /api/v1/tasks/{id}/close`), `Log & exit` leaves it open.
+  No local session log (the web app's Review tab owns stats; add an
+  SD/flash log later if wanted).
 
 ## v1 scope cuts
 

@@ -17,7 +17,6 @@ static Arduino_GFX *gfx = new Arduino_ST7796(bus, GFX_NOT_DEFINED /*RST via TCA9
 // PSRAM back buffer, flushed once per frame — kills flicker (same trick as dash_35).
 static Arduino_Canvas *cv = nullptr;
 static void flush() { if (cv) cv->flush(); }
-static WiFiClientSecure tls;
 
 // theme, mirrors web app
 #define C565(r, g, b) (uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3))
@@ -47,7 +46,7 @@ static Proj projects[5];
 static int projectCount = 0;
 
 static int sel = -1;
-static int minutes = 25;
+static int minutes = 5;  // default matches web (prefs.defaultMinutes)
 static const int DURATIONS[] = {5, 10, 15, 25, 50, 90};
 
 enum Screen { SCR_LIST, SCR_TIMER, SCR_PROJECTS };
@@ -68,6 +67,9 @@ static int lastMinuteShown = -1, shownSpan = -1;
 #define BAR_H     36
 #define BACK_X    12
 #define BACK_W    40
+// project rows: compact so all 5 fit between label and bar (5*36=180 <= 268-88)
+#define PROJ_H    32
+#define PROJ_GAP  4
 #define CHIP_X0   64
 #define CHIP_W    54
 #define CHIP_GAP  8
@@ -76,11 +78,13 @@ static int lastMinuteShown = -1, shownSpan = -1;
 #define RING_CY   118
 #define RING_R    88
 #define RING_IR   74
-#define PLUS_X    128
+#define PLUS_X    92
 #define BTN_Y     262
-#define PLUS_W    90
-#define LOG_X     228
-#define LOG_W     124
+#define PLUS_W    84
+#define DONE_X    184
+#define DONE_W    64
+#define LOG_X     256
+#define LOG_W     132
 #define BTN_H     38
 #define MAX_MIN   99  // ponytail: font-7 MM:SS stays 2-digit; +5 caps here
 
@@ -122,10 +126,24 @@ static bool readTouch(int16_t &x, int16_t &y) {
 
 // ---- Todoist API v1 ----
 static int apiGet(const String& path, JsonDocument& doc, JsonDocument& filter) {
-  for (int attempt = 0; attempt < 2; attempt++) {  // ponytail: ESP32 TLS is flaky, retry once
+  for (int attempt = 0; attempt < 4; attempt++) {  // ponytail: ESP32 TLS is flaky, retry
+    // ponytail: 2.4GHz evening congestion drops the link mid-handshake — force a
+    // fresh association between attempts instead of trusting WiFi.status().
+    if (attempt) {
+      WiFi.disconnect();
+      WiFi.begin(WIFI_SSID, WIFI_PASS);
+      WiFi.setSleep(false);
+      uint32_t t = millis();
+      while (WiFi.status() != WL_CONNECTED && millis() - t < 10000) delay(200);
+      if (WiFi.status() != WL_CONNECTED) continue;
+    }
+    // ponytail: fresh client per attempt — a failed handshake wedges the session
+    // and every retry on a shared client then times out (seen on serial: -1 then -11).
+    WiFiClientSecure tls;
+    tls.setInsecure();
     HTTPClient http;
     if (!http.begin(tls, "https://api.todoist.com" + path)) return -1;
-    http.setTimeout(15000);
+    http.setTimeout(8000);
     http.addHeader("Authorization", "Bearer " TODOIST_TOKEN);
     int code = http.GET();
     Serial.printf("[API] GET %s -> %d\n", path.c_str(), code);
@@ -198,13 +216,23 @@ static bool fetchProjects() {
   return true;
 }
 
-static void closeTask(const String& id) {
-  HTTPClient http;
-  if (http.begin(tls, "https://api.todoist.com/api/v1/tasks/" + id + "/close")) {
-    http.addHeader("Authorization", "Bearer " TODOIST_TOKEN);
-    http.POST("");  // ponytail: fire-and-forget; a failed close is visible in Todoist
+// ponytail: close runs on a bg task — TLS handshake can block for seconds and
+// froze the UI when done synchronously. Failure is visible in Todoist.
+static void closeTaskBg(void* p) {
+  String id = *(String*)p;
+  delete (String*)p;
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClientSecure c;  // own client, never races the poll's shared tls
+    c.setInsecure();
+    HTTPClient http;
+    if (http.begin(c, "https://api.todoist.com/api/v1/tasks/" + id + "/close")) {
+      http.addHeader("Authorization", "Bearer " TODOIST_TOKEN);
+      http.setTimeout(8000);
+      http.POST("");
+    }
+    http.end();
   }
-  http.end();
+  vTaskDelete(NULL);
 }
 
 // ---- drawing ----
@@ -215,8 +243,8 @@ static void drawClock() {
   lastMinuteShown = tm.tm_min;
   char buf[12];
   strftime(buf, sizeof(buf), "%H:%M", &tm);
-  gfx->fillRect(0, 8, 300, 64, C_BG);
-  text(buf, 18, 16, 8, C_TEXT, C_BG);
+  gfx->fillRect(0, 8, 240, 56, C_BG);
+  text(buf, 18, 20, 4, C_TEXT, C_BG);
   strftime(buf, sizeof(buf), "%a %b %d", &tm);
   gfx->fillRect(320, 30, 142, 20, C_BG);
   text(buf, 462 - (int)strlen(buf) * 12, 33, 2, C_MUTED, C_BG);
@@ -234,9 +262,9 @@ static void drawTaskRow(int i) {
   if (s) gfx->fillRoundRect(bx, by, 22, 22, 6, C_ACCENT);
   else   gfx->drawRoundRect(bx, by, 22, 22, 6, C_DIM);
   String title = tasks[i].content;
-  while (title.length() && title.length() * 18 > 310) title.remove(title.length() - 1);  // size-3 char = 18px
+  while (title.length() && title.length() * 12 > 310) title.remove(title.length() - 1);  // size-2 char = 12px
   if (title != tasks[i].content) { title.remove(title.length() - 3); title += "..."; }
-  text(title, bx + 36, y + TASK_H / 2 - 10, 3, fg, C_CARD);
+  text(title, bx + 36, y + TASK_H / 2 - 8, 2, fg, C_CARD);
   if (tasks[i].durMin > 0) {
     char d[8];
     sprintf(d, "%dm", tasks[i].durMin);
@@ -247,7 +275,7 @@ static void drawTaskRow(int i) {
 static void drawBar() {
   gfx->fillRect(0, BAR_Y - 6, 480, 320 - BAR_Y + 6, C_BG);
   if (sel < 0) {
-    text("tap a task to focus", 240, BAR_Y + BAR_H / 2 - 7, 2, C_DIM, C_BG, true);
+    text("tap a task to focus, clock = projects", 240, BAR_Y + BAR_H / 2 - 7, 2, C_DIM, C_BG, true);
     return;
   }
   gfx->drawRoundRect(BACK_X, BAR_Y, BACK_W, BAR_H, 8, C_BORDER);
@@ -314,8 +342,11 @@ static void drawTimer() {
   gfx->fillRoundRect(PLUS_X, BTN_Y, PLUS_W, BTN_H, 10, C_CARD);
   gfx->drawRoundRect(PLUS_X, BTN_Y, PLUS_W, BTN_H, 10, C_BORDER);
   text("+5 min", PLUS_X + PLUS_W / 2, BTN_Y + BTN_H / 2 - 7, 2, C_TEXT, C_CARD, true);
-  gfx->fillRoundRect(LOG_X, BTN_Y, LOG_W, BTN_H, 10, C_ACCENT);
-  text("Log & exit", LOG_X + LOG_W / 2, BTN_Y + BTN_H / 2 - 7, 2, C_BG, C_ACCENT, true);
+  gfx->fillRoundRect(DONE_X, BTN_Y, DONE_W, BTN_H, 10, C_ACCENT);
+  text("Done", DONE_X + DONE_W / 2, BTN_Y + BTN_H / 2 - 7, 2, C_BG, C_ACCENT, true);
+  gfx->fillRoundRect(LOG_X, BTN_Y, LOG_W, BTN_H, 10, C_CARD);
+  gfx->drawRoundRect(LOG_X, BTN_Y, LOG_W, BTN_H, 10, C_BORDER);
+  text("Log & exit", LOG_X + LOG_W / 2, BTN_Y + BTN_H / 2 - 7, 2, C_TEXT, C_CARD, true);
   text("tap background = pause/resume", 240, 306, 1, C_DIM, C_BG, true);
   flush();
 }
@@ -324,11 +355,13 @@ static void drawProjects() {
   gfx->fillScreen(C_BG);
   text("PICK A PROJECT", 18, LABEL_Y, 2, C_MUTED, C_BG);
   for (int i = 0; i < projectCount; i++) {
-    int y = TASK_Y0 + i * (TASK_H + TASK_GAP);
+    int y = TASK_Y0 + i * (PROJ_H + PROJ_GAP);
     bool cur = projects[i].id == projectId;
-    gfx->fillRoundRect(TASK_X, y, TASK_W, TASK_H, 10, C_CARD);
-    gfx->drawRoundRect(TASK_X, y, TASK_W, TASK_H, 10, cur ? C_ACCENT : C_BORDER);
-    text(projects[i].name, TASK_X + 14, y + TASK_H / 2 - 10, 3, C_TEXT, C_CARD);
+    gfx->fillRoundRect(TASK_X, y, TASK_W, PROJ_H, 8, C_CARD);
+    gfx->drawRoundRect(TASK_X, y, TASK_W, PROJ_H, 8, cur ? C_ACCENT : C_BORDER);
+    String name = projects[i].name;
+    while (name.length() && name.length() * 12 > 420) name.remove(name.length() - 1);
+    text(name, TASK_X + 14, y + PROJ_H / 2 - 8, 2, C_TEXT, C_CARD);
   }
   gfx->drawRoundRect(BACK_X, BAR_Y, BACK_W, BAR_H, 8, C_BORDER);
   text("<-", BACK_X + BACK_W / 2, BAR_Y + BAR_H / 2 - 7, 2, C_MUTED, C_BG, true);
@@ -339,7 +372,13 @@ static void drawProjects() {
 static void syncAndRefresh() {
   String selId = sel >= 0 ? tasks[sel].id : "";
   bool ok = syncTasks();
+  Serial.printf("[API] rssi=%d heap=%u sync=%s\n", WiFi.RSSI(), ESP.getFreeHeap(), ok ? "ok" : "FAIL");
   lastSync = millis();
+  // ponytail: appliance self-heal — if the 2.4GHz link degrades, retries outlast
+  // the failure less often than a reboot does.
+  static int syncFails = 0;
+  if (ok) syncFails = 0;
+  else if (++syncFails >= 3) ESP.restart();
   if (!ok && taskCount == 0) {
     gfx->fillScreen(C_BG);
     lastMinuteShown = -1;
@@ -360,10 +399,16 @@ static void startTimer() {
 }
 
 static void exitTimer(bool closeIt) {
-  if (closeIt && sel >= 0) closeTask(tasks[sel].id);
+  if (closeIt && sel >= 0) {
+    xTaskCreate(closeTaskBg, "close", 12288, new String(tasks[sel].id), 1, NULL);
+    // ponytail: drop locally and return instantly; the 60s poll reconciles with Todoist
+    for (int i = sel; i + 1 < taskCount; i++) tasks[i] = tasks[i + 1];
+    if (taskCount) taskCount--;
+  }
   sel = -1;
   screen = SCR_LIST;
-  syncAndRefresh();
+  lastSync = millis();
+  drawList();
 }
 
 static void handleListTap(int x, int y) {
@@ -382,7 +427,7 @@ static void handleListTap(int x, int y) {
     if (inRect(x, y, TASK_X, TASK_Y0 + i * (TASK_H + TASK_GAP), TASK_W, TASK_H)) {
       if (sel == i) { startTimer(); return; }
       sel = i;
-      minutes = tasks[i].durMin > 0 ? tasks[i].durMin : 25;
+      minutes = tasks[i].durMin > 0 ? tasks[i].durMin : 5;
       drawList();
       return;
     }
@@ -400,8 +445,10 @@ static void handleTimerTap(int x, int y) {
   if (inRect(x, y, PLUS_X, BTN_Y, PLUS_W, BTN_H)) {
     if (totalS + 300 <= MAX_MIN * 60L) { totalS += 300; leftS += 300; }
     updateRing();
+  } else if (inRect(x, y, DONE_X, BTN_Y, DONE_W, BTN_H)) {
+    exitTimer(true);   // web "Complete": close the Todoist task
   } else if (inRect(x, y, LOG_X, BTN_Y, LOG_W, BTN_H)) {
-    exitTimer(true);
+    exitTimer(false);  // web "Not done — log & stop": keep the task open
   } else {
     paused = !paused;
     lastSec = millis();
@@ -416,7 +463,7 @@ static void handleProjectsTap(int x, int y) {
     return;
   }
   for (int i = 0; i < projectCount; i++)
-    if (inRect(x, y, TASK_X, TASK_Y0 + i * (TASK_H + TASK_GAP), TASK_W, TASK_H)) {
+    if (inRect(x, y, TASK_X, TASK_Y0 + i * (PROJ_H + PROJ_GAP), TASK_W, PROJ_H)) {
       if (projects[i].id != projectId) {
         projectId = projects[i].id;
         prefs.putString("project_id", projectId);
@@ -458,8 +505,10 @@ void setup() {
   gfx->fillScreen(C_BG);
   text("connecting WiFi...", 240, 152, 2, C_MUTED, C_BG, true);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.setSleep(false);  // ponytail: DTIM power-save drops buffered packets during
+                         // the slow TLS handshake — classic cause of flaky HTTPS
   while (WiFi.status() != WL_CONNECTED) delay(250);
-  tls.setInsecure();  // ponytail: pin api.todoist.com root CA before leaving your desk (DESIGN.md)
+  // ponytail: TLS is setInsecure per request — pin api.todoist.com root CA before leaving your desk (DESIGN.md)
   prefs.begin("timebox", false);
   projectId = prefs.getString("project_id", TODOIST_PROJECT_ID);
   configTzTime(TZ_POSIX, "pool.ntp.org", "time.nist.gov");
