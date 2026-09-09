@@ -5,17 +5,31 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
-#include <TFT_eSPI.h>
+#include <Arduino_GFX_Library.h>
 #include <Preferences.h>
 #include <Wire.h>
 #include "config.h"
 #include "secrets.h"
 
-TFT_eSPI tft;
+// pins from esp32-drive-orbit dash_35 (dashboard_display.cpp)
+static Arduino_DataBus *bus = new Arduino_ESP32SPI(27 /*DC*/, 5 /*CS*/, 18 /*SCK*/, 23 /*MOSI*/, 19 /*MISO*/);
+static Arduino_GFX *gfx = new Arduino_ST7796(bus, GFX_NOT_DEFINED /*RST via TCA9554*/, 0, true /*ips*/);
 static WiFiClientSecure tls;
 
 // theme, mirrors web app
-static uint16_t C_BG, C_CARD, C_BORDER, C_ACCENT, C_TEXT, C_MUTED, C_DIM, C_CHIP_TX;
+#define C565(r, g, b) (uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3))
+static const uint16_t C_BG = C565(9, 9, 11),      C_CARD = C565(24, 24, 27),
+                      C_BORDER = C565(39, 39, 42), C_ACCENT = C565(249, 115, 22),
+                      C_TEXT = C565(244, 244, 245), C_MUTED = C565(113, 113, 122),
+                      C_DIM = C565(82, 82, 91),    C_CHIP_TX = C565(161, 161, 170);
+
+// Adafruit-font text helper: size s chars are 6*s wide, 8*s tall. center=true → x is center.
+static void text(const String& s, int x, int y, uint8_t size, uint16_t fg, uint16_t bg, bool center = false) {
+  gfx->setTextSize(size);
+  gfx->setTextColor(fg, bg);
+  gfx->setCursor(center ? x - (int)s.length() * 6 * size / 2 : x, y);
+  gfx->print(s);
+}
 
 struct Task { String id, content; int durMin; };
 static Task tasks[3];
@@ -187,142 +201,120 @@ static void drawClock() {
   if (!getLocalTime(&tm, 0) || tm.tm_year < 124) return;  // NTP not synced yet
   if (tm.tm_min == lastMinuteShown) return;
   lastMinuteShown = tm.tm_min;
-  char buf[8];
+  char buf[12];
   strftime(buf, sizeof(buf), "%H:%M", &tm);
-  tft.fillRect(0, 8, 300, 60, C_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(C_TEXT, C_BG);
-  tft.drawString(buf, 18, 16, 7);
+  gfx->fillRect(0, 8, 300, 64, C_BG);
+  text(buf, 18, 16, 8, C_TEXT, C_BG);
   strftime(buf, sizeof(buf), "%a %b %d", &tm);
-  tft.setTextDatum(TR_DATUM);
-  tft.setTextColor(C_MUTED, C_BG);
-  tft.drawString(buf, 462, 40, 2);
+  gfx->fillRect(320, 30, 142, 20, C_BG);
+  text(buf, 462 - (int)strlen(buf) * 12, 33, 2, C_MUTED, C_BG);
 }
 
 static void drawTaskRow(int i) {
   int y = TASK_Y0 + i * (TASK_H + TASK_GAP);
   bool s = i == sel, dim = sel >= 0 && !s;
   uint16_t fg = dim ? C_MUTED : C_TEXT;
-  tft.fillRoundRect(TASK_X, y, TASK_W, TASK_H, 10, C_CARD);
-  tft.drawRoundRect(TASK_X, y, TASK_W, TASK_H, 10, s ? C_ACCENT : C_BORDER);
-  if (s) tft.drawRoundRect(TASK_X + 1, y + 1, TASK_W - 2, TASK_H - 2, 9, C_ACCENT);
+  gfx->fillRoundRect(TASK_X, y, TASK_W, TASK_H, 10, C_CARD);
+  gfx->drawRoundRect(TASK_X, y, TASK_W, TASK_H, 10, s ? C_ACCENT : C_BORDER);
+  if (s) gfx->drawRoundRect(TASK_X + 1, y + 1, TASK_W - 2, TASK_H - 2, 9, C_ACCENT);
   int bx = TASK_X + 14, by = y + (TASK_H - 22) / 2;
-  if (s) tft.fillRoundRect(bx, by, 22, 22, 6, C_ACCENT);
-  else   tft.drawRoundRect(bx, by, 22, 22, 6, C_DIM);
+  if (s) gfx->fillRoundRect(bx, by, 22, 22, 6, C_ACCENT);
+  else   gfx->drawRoundRect(bx, by, 22, 22, 6, C_DIM);
   String title = tasks[i].content;
-  while (title.length() && tft.textWidth(title, 4) > 310) title.remove(title.length() - 1);
+  while (title.length() && title.length() * 18 > 310) title.remove(title.length() - 1);  // size-3 char = 18px
   if (title != tasks[i].content) { title.remove(title.length() - 3); title += "..."; }
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(fg, C_CARD);
-  tft.drawString(title, bx + 36, y + TASK_H / 2 + 1, 4);
+  text(title, bx + 36, y + TASK_H / 2 - 10, 3, fg, C_CARD);
   if (tasks[i].durMin > 0) {
     char d[8];
     sprintf(d, "%dm", tasks[i].durMin);
-    tft.setTextDatum(MR_DATUM);
-    tft.setTextColor(C_MUTED, C_CARD);
-    tft.drawString(d, TASK_X + TASK_W - 14, y + TASK_H / 2 + 1, 2);
+    text(d, TASK_X + TASK_W - 14 - (int)strlen(d) * 12, y + TASK_H / 2 - 7, 2, C_MUTED, C_CARD);
   }
 }
 
 static void drawBar() {
-  tft.fillRect(0, BAR_Y - 6, 480, 320 - BAR_Y + 6, C_BG);
-  tft.setTextDatum(MC_DATUM);
+  gfx->fillRect(0, BAR_Y - 6, 480, 320 - BAR_Y + 6, C_BG);
   if (sel < 0) {
-    tft.setTextColor(C_DIM, C_BG);
-    tft.drawString("tap a task to focus", 240, BAR_Y + BAR_H / 2, 2);
+    text("tap a task to focus", 240, BAR_Y + BAR_H / 2 - 7, 2, C_DIM, C_BG, true);
     return;
   }
-  tft.drawRoundRect(BACK_X, BAR_Y, BACK_W, BAR_H, 8, C_BORDER);
-  tft.setTextColor(C_MUTED, C_BG);
-  tft.drawString("<-", BACK_X + BACK_W / 2, BAR_Y + BAR_H / 2, 2);
+  gfx->drawRoundRect(BACK_X, BAR_Y, BACK_W, BAR_H, 8, C_BORDER);
+  text("<-", BACK_X + BACK_W / 2, BAR_Y + BAR_H / 2 - 7, 2, C_MUTED, C_BG, true);
   for (int i = 0; i < 6; i++) {
     int x = CHIP_X0 + i * (CHIP_W + CHIP_GAP);
     bool on = DURATIONS[i] == minutes;
-    tft.fillRoundRect(x, BAR_Y, CHIP_W, BAR_H, 18, on ? C_ACCENT : C_CARD);
-    tft.drawRoundRect(x, BAR_Y, CHIP_W, BAR_H, 18, on ? C_ACCENT : C_BORDER);
-    tft.setTextColor(on ? C_BG : C_CHIP_TX, on ? C_ACCENT : C_CARD);
-    tft.drawString(String(DURATIONS[i]) + "m", x + CHIP_W / 2, BAR_Y + BAR_H / 2, 2);
+    gfx->fillRoundRect(x, BAR_Y, CHIP_W, BAR_H, 18, on ? C_ACCENT : C_CARD);
+    gfx->drawRoundRect(x, BAR_Y, CHIP_W, BAR_H, 18, on ? C_ACCENT : C_BORDER);
+    text(String(DURATIONS[i]) + "m", x + CHIP_W / 2, BAR_Y + BAR_H / 2 - 7, 2,
+         on ? C_BG : C_CHIP_TX, on ? C_ACCENT : C_CARD, true);
   }
 }
 
 static void drawList() {
-  tft.fillScreen(C_BG);
+  gfx->fillScreen(C_BG);
   lastMinuteShown = -1;
   drawClock();
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(C_MUTED, C_BG);
-  tft.drawString("FOCUS - PICK A TASK", 18, LABEL_Y, 2);
-  if (taskCount == 0) {
-    tft.setTextDatum(MC_DATUM);
-    tft.drawString("no tasks in Focus section", 240, 170, 2);
-  }
+  text("FOCUS - PICK A TASK", 18, LABEL_Y, 2, C_MUTED, C_BG);
+  if (taskCount == 0)
+    text("no tasks in Focus section", 240, 163, 2, C_MUTED, C_BG, true);
   for (int i = 0; i < taskCount; i++) drawTaskRow(i);
   drawBar();
 }
 
-// drawArc: 0 deg at 6 o'clock, clockwise — ring fills from top (180 deg).
+// ring fills clockwise from top; wedge = dots along radius midpoint (RING_R+RING_IR)/2.
+// ponytail: chunky dotted ring instead of a smooth arc — no arc primitive in Arduino_GFX.
+static void ringWedge(int fromDeg, int toDeg, uint16_t color) {
+  for (int a = fromDeg; a < toDeg; a += 2) {
+    float rad = (a - 90) * 0.0174533f;
+    gfx->fillCircle(RING_CX + (int)(81 * cosf(rad)), RING_CY + (int)(81 * sinf(rad)), 7, color);
+  }
+}
+
 static void drawRemain() {
   char buf[8];
   sprintf(buf, "%02ld:%02ld", leftS / 60, leftS % 60);
-  tft.fillRect(RING_CX - 72, RING_CY - 30, 144, 60, C_BG);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(paused ? C_ACCENT : C_TEXT, C_BG);
-  tft.drawString(buf, RING_CX, RING_CY, 7);
+  gfx->fillRect(RING_CX - 76, RING_CY - 20, 152, 40, C_BG);
+  text(buf, RING_CX, RING_CY - 18, 5, paused ? C_ACCENT : C_TEXT, C_BG, true);
 }
 
 static void updateRing() {
   int span = leftS <= 0 ? 360 : (int)((1.0f - (float)leftS / totalS) * 360);
   if (span < shownSpan) {  // +5 pressed: erase back to track
-    tft.drawArc(RING_CX, RING_CY, RING_R, RING_IR, 0, 360, C_CARD, C_CARD);
-    shownSpan = 0;
+    ringWedge(span, shownSpan, C_CARD);
+  } else if (span > shownSpan) {
+    ringWedge(shownSpan < 0 ? 0 : shownSpan, span, C_ACCENT);
   }
-  if (span != shownSpan) {
-    uint32_t end = (180 + span) % 360;
-    if (span == 360) tft.drawArc(RING_CX, RING_CY, RING_R, RING_IR, 0, 360, C_ACCENT, C_ACCENT);
-    else tft.drawArc(RING_CX, RING_CY, RING_R, RING_IR, 180, end, C_ACCENT, C_ACCENT);
-    shownSpan = span;
-  }
+  shownSpan = span;
   drawRemain();
 }
 
 static void drawTimer() {
-  tft.fillScreen(C_BG);
-  shownSpan = -1;
+  gfx->fillScreen(C_BG);
+  shownSpan = 0;
+  ringWedge(0, 360, C_CARD);  // track
   updateRing();
   String title = sel >= 0 ? tasks[sel].content : "";
-  while (title.length() && tft.textWidth(title, 2) > 400) title.remove(title.length() - 1);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(C_CHIP_TX, C_BG);
-  tft.drawString(title, 240, 232, 2);
-  tft.fillRoundRect(PLUS_X, BTN_Y, PLUS_W, BTN_H, 10, C_CARD);
-  tft.drawRoundRect(PLUS_X, BTN_Y, PLUS_W, BTN_H, 10, C_BORDER);
-  tft.setTextColor(C_TEXT, C_CARD);
-  tft.drawString("+5 min", PLUS_X + PLUS_W / 2, BTN_Y + BTN_H / 2, 2);
-  tft.fillRoundRect(LOG_X, BTN_Y, LOG_W, BTN_H, 10, C_ACCENT);
-  tft.setTextColor(C_BG, C_ACCENT);
-  tft.drawString("Log & exit", LOG_X + LOG_W / 2, BTN_Y + BTN_H / 2, 2);
-  tft.setTextColor(C_DIM, C_BG);
-  tft.drawString("tap background = pause/resume", 240, 310, 2);
+  while (title.length() && title.length() * 12 > 400) title.remove(title.length() - 1);
+  text(title, 240, 225, 2, C_CHIP_TX, C_BG, true);
+  gfx->fillRoundRect(PLUS_X, BTN_Y, PLUS_W, BTN_H, 10, C_CARD);
+  gfx->drawRoundRect(PLUS_X, BTN_Y, PLUS_W, BTN_H, 10, C_BORDER);
+  text("+5 min", PLUS_X + PLUS_W / 2, BTN_Y + BTN_H / 2 - 7, 2, C_TEXT, C_CARD, true);
+  gfx->fillRoundRect(LOG_X, BTN_Y, LOG_W, BTN_H, 10, C_ACCENT);
+  text("Log & exit", LOG_X + LOG_W / 2, BTN_Y + BTN_H / 2 - 7, 2, C_BG, C_ACCENT, true);
+  text("tap background = pause/resume", 240, 306, 1, C_DIM, C_BG, true);
 }
 
 static void drawProjects() {
-  tft.fillScreen(C_BG);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(C_MUTED, C_BG);
-  tft.drawString("PICK A PROJECT", 18, LABEL_Y, 2);
+  gfx->fillScreen(C_BG);
+  text("PICK A PROJECT", 18, LABEL_Y, 2, C_MUTED, C_BG);
   for (int i = 0; i < projectCount; i++) {
     int y = TASK_Y0 + i * (TASK_H + TASK_GAP);
     bool cur = projects[i].id == projectId;
-    tft.fillRoundRect(TASK_X, y, TASK_W, TASK_H, 10, C_CARD);
-    tft.drawRoundRect(TASK_X, y, TASK_W, TASK_H, 10, cur ? C_ACCENT : C_BORDER);
-    tft.setTextDatum(ML_DATUM);
-    tft.setTextColor(C_TEXT, C_CARD);
-    tft.drawString(projects[i].name, TASK_X + 14, y + TASK_H / 2 + 1, 4);
+    gfx->fillRoundRect(TASK_X, y, TASK_W, TASK_H, 10, C_CARD);
+    gfx->drawRoundRect(TASK_X, y, TASK_W, TASK_H, 10, cur ? C_ACCENT : C_BORDER);
+    text(projects[i].name, TASK_X + 14, y + TASK_H / 2 - 10, 3, C_TEXT, C_CARD);
   }
-  tft.drawRoundRect(BACK_X, BAR_Y, BACK_W, BAR_H, 8, C_BORDER);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(C_MUTED, C_BG);
-  tft.drawString("<-", BACK_X + BACK_W / 2, BAR_Y + BAR_H / 2, 2);
+  gfx->drawRoundRect(BACK_X, BAR_Y, BACK_W, BAR_H, 8, C_BORDER);
+  text("<-", BACK_X + BACK_W / 2, BAR_Y + BAR_H / 2 - 7, 2, C_MUTED, C_BG, true);
 }
 
 // ---- state changes ----
@@ -331,12 +323,10 @@ static void syncAndRefresh() {
   bool ok = syncTasks();
   lastSync = millis();
   if (!ok && taskCount == 0) {
-    tft.fillScreen(C_BG);
+    gfx->fillScreen(C_BG);
     lastMinuteShown = -1;
     drawClock();
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(C_MUTED, C_BG);
-    tft.drawString("sync failed — check WiFi/token/Focus section", 240, 170, 2);
+    text("sync failed — check WiFi/token/Focus section", 240, 163, 2, C_MUTED, C_BG, true);
     return;
   }
   if (sel >= 0 && (sel >= taskCount || tasks[sel].id != selId)) sel = -1;
@@ -431,34 +421,24 @@ static void lcdReset() {
 // ---- Arduino ----
 void setup() {
   Serial.begin(115200);
-  C_BG = tft.color565(9, 9, 11);       C_CARD = tft.color565(24, 24, 27);
-  C_BORDER = tft.color565(39, 39, 42); C_ACCENT = tft.color565(249, 115, 22);
-  C_TEXT = tft.color565(244, 244, 245); C_MUTED = tft.color565(113, 113, 122);
-  C_DIM = tft.color565(82, 82, 91);    C_CHIP_TX = tft.color565(161, 161, 170);
   lcdReset();
-  // touch chip held in reset by expander? release all pins high and rescan
+  // touch chip is held in reset by the expander at power-on — release all pins high
   Wire.beginTransmission(0x20); Wire.write(0x03); Wire.write(0x00); Wire.endTransmission();
   Wire.beginTransmission(0x20); Wire.write(0x01); Wire.write(0xFF); Wire.endTransmission();
   delay(50);
-  Serial.print("I2C scan:");
-  for (uint8_t a = 0x08; a < 0x78; a++) {
-    Wire.beginTransmission(a);
-    if (Wire.endTransmission() == 0) Serial.printf(" 0x%02X", a);
-  }
-  Serial.println();
-  tft.init();
-  tft.setRotation(1);
-  tft.fillScreen(C_BG);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(C_MUTED, C_BG);
-  tft.drawString("connecting WiFi...", 240, 160, 2);
+  if (!gfx->begin(40000000)) Serial.println("[LCD] panel begin failed");
+  gfx->setRotation(1);
+  pinMode(25, OUTPUT);       // backlight (dash_35 kBacklightPin)
+  digitalWrite(25, HIGH);
+  gfx->fillScreen(C_BG);
+  text("connecting WiFi...", 240, 152, 2, C_MUTED, C_BG, true);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   while (WiFi.status() != WL_CONNECTED) delay(250);
   tls.setInsecure();  // ponytail: pin api.todoist.com root CA before leaving your desk (DESIGN.md)
   prefs.begin("timebox", false);
   projectId = prefs.getString("project_id", TODOIST_PROJECT_ID);
   configTzTime(TZ_POSIX, "pool.ntp.org", "time.nist.gov");
-  tft.drawString("syncing...", 240, 184, 2);
+  text("syncing...", 240, 176, 2, C_MUTED, C_BG, true);
   screen = SCR_LIST;
   syncAndRefresh();
 }
