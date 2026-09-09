@@ -14,6 +14,9 @@
 // pins from esp32-drive-orbit dash_35 (dashboard_display.cpp)
 static Arduino_DataBus *bus = new Arduino_ESP32SPI(27 /*DC*/, 5 /*CS*/, 18 /*SCK*/, 23 /*MOSI*/, 19 /*MISO*/);
 static Arduino_GFX *gfx = new Arduino_ST7796(bus, GFX_NOT_DEFINED /*RST via TCA9554*/, 0, true /*ips*/);
+// PSRAM back buffer, flushed once per frame — kills flicker (same trick as dash_35).
+static Arduino_Canvas *cv = nullptr;
+static void flush() { if (cv) cv->flush(); }
 static WiFiClientSecure tls;
 
 // theme, mirrors web app
@@ -119,16 +122,20 @@ static bool readTouch(int16_t &x, int16_t &y) {
 
 // ---- Todoist API v1 ----
 static int apiGet(const String& path, JsonDocument& doc, JsonDocument& filter) {
-  HTTPClient http;
-  if (!http.begin(tls, "https://api.todoist.com" + path)) return -1;
-  http.addHeader("Authorization", "Bearer " TODOIST_TOKEN);
-  int code = http.GET();
-  Serial.printf("[API] GET %s -> %d\n", path.c_str(), code);
-  if (code == 200 && deserializeJson(doc, http.getStream(),
-                                     DeserializationOption::Filter(filter)))
-    code = -2;
-  http.end();
-  return code;
+  for (int attempt = 0; attempt < 2; attempt++) {  // ponytail: ESP32 TLS is flaky, retry once
+    HTTPClient http;
+    if (!http.begin(tls, "https://api.todoist.com" + path)) return -1;
+    http.setTimeout(15000);
+    http.addHeader("Authorization", "Bearer " TODOIST_TOKEN);
+    int code = http.GET();
+    Serial.printf("[API] GET %s -> %d\n", path.c_str(), code);
+    if (code == 200 && deserializeJson(doc, http.getStream(),
+                                       DeserializationOption::Filter(filter)))
+      code = -2;
+    http.end();
+    if (code == 200) return code;
+  }
+  return -1;
 }
 
 // ponytail: ignores next_cursor pagination — first page is plenty for a Focus list.
@@ -155,7 +162,11 @@ static bool syncTasks() {
   if (apiGet("/api/v1/tasks?project_id=" + projectId, doc, filter) != 200)
     return false;
   taskCount = 0;
+  Serial.printf("[API] section=%s, tasks=%d\n", focusSectionId.c_str(),
+                (int)doc["results"].size());
   for (JsonObject t : doc["results"].as<JsonArray>()) {
+    Serial.printf("[API] task sec=%s '%s'\n", t["section_id"].as<const char*>(),
+                  t["content"].as<const char*>());
     if (focusSectionId != t["section_id"].as<const char*>()) continue;
     if (taskCount == 3) break;
     tasks[taskCount].id = t["id"].as<String>();
@@ -209,6 +220,7 @@ static void drawClock() {
   strftime(buf, sizeof(buf), "%a %b %d", &tm);
   gfx->fillRect(320, 30, 142, 20, C_BG);
   text(buf, 462 - (int)strlen(buf) * 12, 33, 2, C_MUTED, C_BG);
+  flush();
 }
 
 static void drawTaskRow(int i) {
@@ -248,6 +260,7 @@ static void drawBar() {
     text(String(DURATIONS[i]) + "m", x + CHIP_W / 2, BAR_Y + BAR_H / 2 - 7, 2,
          on ? C_BG : C_CHIP_TX, on ? C_ACCENT : C_CARD, true);
   }
+  flush();
 }
 
 static void drawList() {
@@ -259,6 +272,7 @@ static void drawList() {
     text("no tasks in Focus section", 240, 163, 2, C_MUTED, C_BG, true);
   for (int i = 0; i < taskCount; i++) drawTaskRow(i);
   drawBar();
+  flush();
 }
 
 // ring fills clockwise from top; wedge = dots along radius midpoint (RING_R+RING_IR)/2.
@@ -286,6 +300,7 @@ static void updateRing() {
   }
   shownSpan = span;
   drawRemain();
+  flush();
 }
 
 static void drawTimer() {
@@ -302,6 +317,7 @@ static void drawTimer() {
   gfx->fillRoundRect(LOG_X, BTN_Y, LOG_W, BTN_H, 10, C_ACCENT);
   text("Log & exit", LOG_X + LOG_W / 2, BTN_Y + BTN_H / 2 - 7, 2, C_BG, C_ACCENT, true);
   text("tap background = pause/resume", 240, 306, 1, C_DIM, C_BG, true);
+  flush();
 }
 
 static void drawProjects() {
@@ -316,6 +332,7 @@ static void drawProjects() {
   }
   gfx->drawRoundRect(BACK_X, BAR_Y, BACK_W, BAR_H, 8, C_BORDER);
   text("<-", BACK_X + BACK_W / 2, BAR_Y + BAR_H / 2 - 7, 2, C_MUTED, C_BG, true);
+  flush();
 }
 
 // ---- state changes ----
@@ -431,6 +448,9 @@ void setup() {
   gfx->setRotation(1);
   pinMode(25, OUTPUT);       // backlight (dash_35 kBacklightPin)
   digitalWrite(25, HIGH);
+  cv = new Arduino_Canvas(480, 320, gfx);
+  if (cv->begin(GFX_SKIP_OUTPUT_BEGIN)) gfx = cv;
+  else { delete cv; cv = nullptr; }  // ponytail: no PSRAM → direct draws, some flicker
   gfx->fillScreen(C_BG);
   text("connecting WiFi...", 240, 152, 2, C_MUTED, C_BG, true);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
