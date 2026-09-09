@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ESP 480×320 UI preview</title>
+<style>
+  /* Exact ILI9488 resolution. Zoom browser until the frame is ~3.5" wide on screen
+     to judge physical readability. Theme mirrors the web app: zinc dark + orange-500. */
+  body { background: #222; display: grid; place-items: center; min-height: 100vh; margin: 0; }
+  #screen { width: 480px; height: 320px; background: #09090b; color: #f4f4f5;
+            font-family: Inter, system-ui, sans-serif; display: flex; flex-direction: column;
+            box-shadow: 0 0 0 2px #444; overflow: hidden; }
+  #top { display: flex; align-items: baseline; justify-content: space-between;
+         padding: 12px 18px 4px; }
+  #clock { font-size: 56px; font-weight: 700; letter-spacing: 2px; font-variant-numeric: tabular-nums; }
+  #date { font-size: 16px; color: #71717a; }
+  #label { font-size: 13px; letter-spacing: 3px; color: #71717a; padding: 4px 18px 4px; }
+  #tasks { flex: 1; display: flex; flex-direction: column; gap: 8px; padding: 0 12px 8px; }
+  .task { flex: 1; display: flex; align-items: center; gap: 12px; background: #18181b;
+          border: 2px solid #27272a; border-radius: 10px; padding: 0 14px; cursor: pointer;
+          user-select: none; min-height: 0; }
+  .task.sel { border-color: #f97316; }
+  .task.dim { opacity: 0.3; }
+  .box { width: 22px; height: 22px; border: 2px solid #52525b; border-radius: 6px; flex: none; }
+  .task.sel .box { background: #f97316; border-color: #f97316; }
+  .title { font-size: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dur { margin-left: auto; font-size: 15px; color: #71717a; flex: none; }
+  .chip { background: #27272a; color: #a1a1aa; border: 1px solid #3f3f46; border-radius: 999px;
+          font-size: 14px; padding: 6px 10px; cursor: pointer; user-select: none; }
+  .chip.on { background: #f97316; border-color: #f97316; color: #09090b; font-weight: 600; }
+  #hint { font-size: 12px; color: #52525b; text-align: center; padding-bottom: 6px; }
+  /* chips bar replaces the hint when a task is selected; ← is the on-screen back */
+  #chipsbar { display: none; align-items: center; gap: 6px; padding: 0 12px 8px; }
+  .back { background: none; border: 1px solid #3f3f46; border-radius: 8px; color: #a1a1aa;
+          font-size: 16px; padding: 4px 10px; cursor: pointer; flex: none; }
+  /* timer action buttons (no Esc key on device) */
+  #tBtns { display: flex; gap: 10px; margin-top: 10px; }
+  .tbtn { background: #27272a; color: #f4f4f5; border: 1px solid #3f3f46; border-radius: 10px;
+          font-size: 15px; padding: 8px 16px; cursor: pointer; }
+  .tbtn.primary { background: #f97316; border-color: #f97316; color: #09090b; font-weight: 600; }
+  /* ---- timer screen ---- */
+  #timer { display: none; flex-direction: column; align-items: center; justify-content: center;
+           width: 480px; height: 320px; background: #09090b; color: #f4f4f5;
+           font-family: Inter, system-ui, sans-serif; cursor: pointer; user-select: none;
+           box-shadow: 0 0 0 2px #444; }
+  #ring { width: 190px; height: 190px; border-radius: 50%; display: grid; place-items: center;
+          background: conic-gradient(#f97316 0deg, #27272a 0deg); }
+  #ringInner { width: 166px; height: 166px; border-radius: 50%; background: #09090b;
+               display: grid; place-items: center; }
+  #remain { font-size: 56px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  #remain.paused { color: #f97316; }
+  #tTitle { font-size: 16px; color: #a1a1aa; max-width: 400px; margin-top: 14px;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #tHint { font-size: 12px; color: #52525b; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div id="screen">
+  <div id="top">
+    <div id="clock">--:--</div>
+    <div id="date"></div>
+  </div>
+  <div id="label">FOCUS — pick a task</div>
+  <div id="tasks"></div>
+  <div id="chipsbar"></div>
+  <div id="hint">tap a task to focus · 480×320</div>
+</div>
+<div id="timer">
+  <div id="ring"><div id="ringInner"><div id="remain">25:00</div></div></div>
+  <div id="tTitle"></div>
+  <div id="tBtns">
+    <button class="tbtn" id="tPlus">+5 min</button>
+    <button class="tbtn primary" id="tLog">✓ Log &amp; exit</button>
+  </div>
+  <div id="tHint">tap background = pause/resume</div>
+</div>
+<script>
+  // ponytail: mock data — firmware will replace this with Todoist /api/v1/tasks (section = Focus)
+  const tasks = [
+    { title: "Write launch announcement", dur: "25m" },
+    { title: "Review PR #42", dur: "15m" },
+    { title: "Fix VPN config on laptop", dur: "25m" },
+  ];
+
+  // same duration chips as the web app
+  const DURATIONS = [5, 10, 15, 25, 50, 90];
+
+  const el = document.getElementById("tasks");
+  const chipsbar = document.getElementById("chipsbar");
+  const hint = document.getElementById("hint");
+  let selIdx = -1, minutes = 25;
+
+  tasks.forEach((t, i) => {
+    const row = document.createElement("div");
+    row.className = "task";
+    row.innerHTML = `<div class="box"></div><div class="title">${t.title}</div><div class="dur">${t.dur}</div>`;
+    row.onclick = () => {
+      if (selIdx === i) return startTimer(t);   // tap selected task again = start
+      selIdx = i;
+      minutes = parseInt(t.dur);   // pre-fill with task's planned duration
+      [...el.children].forEach((r, j) => {
+        r.classList.toggle("sel", j === i);
+        r.classList.toggle("dim", j !== i);
+      });
+      renderChips();
+    };
+    el.appendChild(row);
+  });
+
+  function renderChips() {
+    hint.style.display = "none";
+    chipsbar.style.display = "flex";
+    chipsbar.innerHTML = "";
+    const back = document.createElement("button");
+    back.className = "back";
+    back.textContent = "←";
+    back.onclick = clearSel;
+    chipsbar.appendChild(back);
+    DURATIONS.forEach(m => {
+      const c = document.createElement("div");
+      c.className = "chip" + (m === minutes ? " on" : "");
+      c.textContent = m + "m";
+      c.onclick = () => { minutes = m; renderChips(); };
+      chipsbar.appendChild(c);
+    });
+  }
+
+  function clearSel() {
+    selIdx = -1;
+    [...el.children].forEach(r => r.classList.remove("sel", "dim"));
+    chipsbar.style.display = "none";
+    hint.style.display = "";
+  }
+
+  // ---- timer ----
+  let total = 0, left = 0, paused = false;
+  const main = document.getElementById("screen"),
+        timerEl = document.getElementById("timer"),
+        remain = document.getElementById("remain"),
+        ring = document.getElementById("ring");
+
+  function startTimer(t) {
+    total = left = minutes * 60;
+    paused = false;
+    document.getElementById("tTitle").textContent = t.title;
+    main.style.display = "none";
+    timerEl.style.display = "flex";
+    render();
+  }
+
+  function exitTimer() {
+    timerEl.style.display = "none";
+    main.style.display = "flex";
+    clearSel();
+  }
+
+  document.getElementById("tPlus").onclick = e => {
+    e.stopPropagation();
+    total += 300; left += 300;
+    render();
+  };
+  document.getElementById("tLog").onclick = e => {
+    e.stopPropagation();
+    // ponytail: mock — firmware will POST a session log / complete the Todoist task here
+    exitTimer();
+  };
+
+  function render() {
+    const m = Math.floor(left / 60), s = left % 60;
+    remain.textContent = m + ":" + String(s).padStart(2, "0");
+    remain.classList.toggle("paused", paused);
+    ring.style.background =
+      `conic-gradient(#f97316 ${(1 - left / total) * 360}deg, #27272a 0deg)`;
+  }
+
+  timerEl.onclick = () => { paused = !paused; render(); };
+  document.onkeydown = e => {   // keyboard only for browser preview; device uses ← buttons
+    if (e.key !== "Escape") return;
+    if (timerEl.style.display === "flex") exitTimer();
+    else clearSel();
+  };
+
+  setInterval(() => {
+    if (timerEl.style.display !== "flex" || paused) return;
+    if (left > 0) { left--; render(); }
+    else { remain.textContent = "0:00"; ring.style.background = "#f97316"; }  // ponytail: solid orange instead of buzzer
+  }, 1000);
+
+  function tick() {
+    const d = new Date();
+    document.getElementById("clock").textContent =
+      String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+    document.getElementById("date").textContent =
+      d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  }
+  tick();
+  setInterval(tick, 1000);
+</script>
+</body>
+</html>

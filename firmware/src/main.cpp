@@ -1,0 +1,401 @@
+// ESP32 Timebox Companion — see DESIGN.md. List screen (clock + Focus tasks)
+// and timer screen (ring + MM:SS). Todoist REST API v1 direct; no backend.
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <TFT_eSPI.h>
+#include <Wire.h>
+#include "config.h"
+#include "secrets.h"
+
+TFT_eSPI tft;
+static WiFiClientSecure tls;
+
+// theme, mirrors web app
+static uint16_t C_BG, C_CARD, C_BORDER, C_ACCENT, C_TEXT, C_MUTED, C_DIM, C_CHIP_TX;
+
+struct Task { String id, content; int durMin; };
+static Task tasks[3];
+static int taskCount = 0;
+static String focusSectionId;
+
+static int sel = -1;
+static int minutes = 25;
+static const int DURATIONS[] = {5, 10, 15, 25, 50, 90};
+
+enum Screen { SCR_LIST, SCR_TIMER };
+static Screen screen = SCR_LIST;
+static long totalS = 0, leftS = 0;
+static bool paused = false;
+static uint32_t lastSec = 0, lastSync = 0;
+static int lastMinuteShown = -1, shownSpan = -1;
+
+// ---- layout (480x320 landscape) ----
+#define LABEL_Y   74
+#define TASK_X    12
+#define TASK_W    456
+#define TASK_H    52
+#define TASK_Y0   88
+#define TASK_GAP  8
+#define BAR_Y     268
+#define BAR_H     36
+#define BACK_X    12
+#define BACK_W    40
+#define CHIP_X0   64
+#define CHIP_W    54
+#define CHIP_GAP  8
+// timer
+#define RING_CX   240
+#define RING_CY   118
+#define RING_R    88
+#define RING_IR   74
+#define PLUS_X    128
+#define BTN_Y     262
+#define PLUS_W    90
+#define LOG_X     228
+#define LOG_W     124
+#define BTN_H     38
+#define MAX_MIN   99  // ponytail: font-7 MM:SS stays 2-digit; +5 caps here
+
+static bool inRect(int x, int y, int rx, int ry, int rw, int rh) {
+  return x >= rx && x < rx + rw && y >= ry && y < ry + rh;
+}
+
+// ---- touch: FT6336 single-point ----
+static bool readTouch(int16_t &x, int16_t &y) {
+  Wire.beginTransmission(FT_ADDR);
+  Wire.write(0x02);  // TD_STATUS
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom((uint8_t)FT_ADDR, (uint8_t)5) != 5) return false;
+  uint8_t n = Wire.read() & 0x0F;
+  uint8_t xh = Wire.read(), xl = Wire.read(), yh = Wire.read(), yl = Wire.read();
+  if (n == 0) return false;
+  x = ((xh & 0x0F) << 8) | xl;
+  y = ((yh & 0x0F) << 8) | yl;
+#if TOUCH_SWAP_XY
+  int16_t t = x; x = y; y = t;
+#endif
+  x = map(x, 0, TOUCH_RAW_H, 0, 480);  // post-swap: raw x range is portrait height
+  y = map(y, 0, TOUCH_RAW_W, 0, 320);
+#if TOUCH_INV_X
+  x = 479 - x;
+#endif
+#if TOUCH_INV_Y
+  y = 319 - y;
+#endif
+  return true;
+}
+
+// ---- Todoist API v1 ----
+static int apiGet(const String& path, JsonDocument& doc, JsonDocument& filter) {
+  HTTPClient http;
+  if (!http.begin(tls, "https://api.todoist.com" + path)) return -1;
+  http.addHeader("Authorization", "Bearer " TODOIST_TOKEN);
+  int code = http.GET();
+  if (code == 200 && deserializeJson(doc, http.getStream(),
+                                     DeserializationOption::Filter(filter)))
+    code = -2;
+  http.end();
+  return code;
+}
+
+// ponytail: ignores next_cursor pagination — first page is plenty for a Focus list.
+static bool syncTasks() {
+  JsonDocument doc, filter;
+  if (focusSectionId.isEmpty()) {
+    filter["results"][0]["id"] = true;
+    filter["results"][0]["name"] = true;
+    if (apiGet("/api/v1/sections?project_id=" TODOIST_PROJECT_ID, doc, filter) != 200)
+      return false;
+    for (JsonObject s : doc["results"].as<JsonArray>())
+      if (String(s["name"].as<const char*>()).equalsIgnoreCase("Focus")) {
+        focusSectionId = s["id"].as<String>();
+        break;
+      }
+    if (focusSectionId.isEmpty()) return false;
+  }
+  filter.clear();
+  filter["results"][0]["id"] = true;
+  filter["results"][0]["content"] = true;
+  filter["results"][0]["section_id"] = true;
+  filter["results"][0]["duration"]["amount"] = true;
+  filter["results"][0]["duration"]["unit"] = true;
+  if (apiGet("/api/v1/tasks?project_id=" TODOIST_PROJECT_ID, doc, filter) != 200)
+    return false;
+  taskCount = 0;
+  for (JsonObject t : doc["results"].as<JsonArray>()) {
+    if (focusSectionId != t["section_id"].as<const char*>()) continue;
+    if (taskCount == 3) break;
+    tasks[taskCount].id = t["id"].as<String>();
+    tasks[taskCount].content = t["content"].as<String>();
+    int d = -1;
+    if (!t["duration"].isNull()) {
+      int amt = t["duration"]["amount"];
+      const char* unit = t["duration"]["unit"] | "";
+      d = unit[0] == 'd' ? amt * 1440 : amt;  // day or minute
+    }
+    tasks[taskCount].durMin = d;
+    taskCount++;
+  }
+  return true;
+}
+
+static void closeTask(const String& id) {
+  HTTPClient http;
+  if (http.begin(tls, "https://api.todoist.com/api/v1/tasks/" + id + "/close")) {
+    http.addHeader("Authorization", "Bearer " TODOIST_TOKEN);
+    http.POST("");  // ponytail: fire-and-forget; a failed close is visible in Todoist
+  }
+  http.end();
+}
+
+// ---- drawing ----
+static void drawClock() {
+  struct tm tm;
+  if (!getLocalTime(&tm, 0) || tm.tm_year < 124) return;  // NTP not synced yet
+  if (tm.tm_min == lastMinuteShown) return;
+  lastMinuteShown = tm.tm_min;
+  char buf[8];
+  strftime(buf, sizeof(buf), "%H:%M", &tm);
+  tft.fillRect(0, 8, 300, 60, C_BG);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(C_TEXT, C_BG);
+  tft.drawString(buf, 18, 16, 7);
+  strftime(buf, sizeof(buf), "%a %b %d", &tm);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(C_MUTED, C_BG);
+  tft.drawString(buf, 462, 40, 2);
+}
+
+static void drawTaskRow(int i) {
+  int y = TASK_Y0 + i * (TASK_H + TASK_GAP);
+  bool s = i == sel, dim = sel >= 0 && !s;
+  uint16_t fg = dim ? C_MUTED : C_TEXT;
+  tft.fillRoundRect(TASK_X, y, TASK_W, TASK_H, 10, C_CARD);
+  tft.drawRoundRect(TASK_X, y, TASK_W, TASK_H, 10, s ? C_ACCENT : C_BORDER);
+  if (s) tft.drawRoundRect(TASK_X + 1, y + 1, TASK_W - 2, TASK_H - 2, 9, C_ACCENT);
+  int bx = TASK_X + 14, by = y + (TASK_H - 22) / 2;
+  if (s) tft.fillRoundRect(bx, by, 22, 22, 6, C_ACCENT);
+  else   tft.drawRoundRect(bx, by, 22, 22, 6, C_DIM);
+  String title = tasks[i].content;
+  while (title.length() && tft.textWidth(title, 4) > 310) title.remove(title.length() - 1);
+  if (title != tasks[i].content) { title.remove(title.length() - 3); title += "..."; }
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(fg, C_CARD);
+  tft.drawString(title, bx + 36, y + TASK_H / 2 + 1, 4);
+  if (tasks[i].durMin > 0) {
+    char d[8];
+    sprintf(d, "%dm", tasks[i].durMin);
+    tft.setTextDatum(MR_DATUM);
+    tft.setTextColor(C_MUTED, C_CARD);
+    tft.drawString(d, TASK_X + TASK_W - 14, y + TASK_H / 2 + 1, 2);
+  }
+}
+
+static void drawBar() {
+  tft.fillRect(0, BAR_Y - 6, 480, 320 - BAR_Y + 6, C_BG);
+  tft.setTextDatum(MC_DATUM);
+  if (sel < 0) {
+    tft.setTextColor(C_DIM, C_BG);
+    tft.drawString("tap a task to focus", 240, BAR_Y + BAR_H / 2, 2);
+    return;
+  }
+  tft.drawRoundRect(BACK_X, BAR_Y, BACK_W, BAR_H, 8, C_BORDER);
+  tft.setTextColor(C_MUTED, C_BG);
+  tft.drawString("<-", BACK_X + BACK_W / 2, BAR_Y + BAR_H / 2, 2);
+  for (int i = 0; i < 6; i++) {
+    int x = CHIP_X0 + i * (CHIP_W + CHIP_GAP);
+    bool on = DURATIONS[i] == minutes;
+    tft.fillRoundRect(x, BAR_Y, CHIP_W, BAR_H, 18, on ? C_ACCENT : C_CARD);
+    tft.drawRoundRect(x, BAR_Y, CHIP_W, BAR_H, 18, on ? C_ACCENT : C_BORDER);
+    tft.setTextColor(on ? C_BG : C_CHIP_TX, on ? C_ACCENT : C_CARD);
+    tft.drawString(String(DURATIONS[i]) + "m", x + CHIP_W / 2, BAR_Y + BAR_H / 2, 2);
+  }
+}
+
+static void drawList() {
+  tft.fillScreen(C_BG);
+  lastMinuteShown = -1;
+  drawClock();
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(C_MUTED, C_BG);
+  tft.drawString("FOCUS - PICK A TASK", 18, LABEL_Y, 2);
+  if (taskCount == 0) {
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString("no tasks in Focus section", 240, 170, 2);
+  }
+  for (int i = 0; i < taskCount; i++) drawTaskRow(i);
+  drawBar();
+}
+
+// drawArc: 0 deg at 6 o'clock, clockwise — ring fills from top (180 deg).
+static void drawRemain() {
+  char buf[8];
+  sprintf(buf, "%02ld:%02ld", leftS / 60, leftS % 60);
+  tft.fillRect(RING_CX - 72, RING_CY - 30, 144, 60, C_BG);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(paused ? C_ACCENT : C_TEXT, C_BG);
+  tft.drawString(buf, RING_CX, RING_CY, 7);
+}
+
+static void updateRing() {
+  int span = leftS <= 0 ? 360 : (int)((1.0f - (float)leftS / totalS) * 360);
+  if (span < shownSpan) {  // +5 pressed: erase back to track
+    tft.drawArc(RING_CX, RING_CY, RING_R, RING_IR, 0, 360, C_CARD, C_CARD);
+    shownSpan = 0;
+  }
+  if (span != shownSpan) {
+    uint32_t end = (180 + span) % 360;
+    if (span == 360) tft.drawArc(RING_CX, RING_CY, RING_R, RING_IR, 0, 360, C_ACCENT, C_ACCENT);
+    else tft.drawArc(RING_CX, RING_CY, RING_R, RING_IR, 180, end, C_ACCENT, C_ACCENT);
+    shownSpan = span;
+  }
+  drawRemain();
+}
+
+static void drawTimer() {
+  tft.fillScreen(C_BG);
+  shownSpan = -1;
+  updateRing();
+  String title = sel >= 0 ? tasks[sel].content : "";
+  while (title.length() && tft.textWidth(title, 2) > 400) title.remove(title.length() - 1);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(C_CHIP_TX, C_BG);
+  tft.drawString(title, 240, 232, 2);
+  tft.fillRoundRect(PLUS_X, BTN_Y, PLUS_W, BTN_H, 10, C_CARD);
+  tft.drawRoundRect(PLUS_X, BTN_Y, PLUS_W, BTN_H, 10, C_BORDER);
+  tft.setTextColor(C_TEXT, C_CARD);
+  tft.drawString("+5 min", PLUS_X + PLUS_W / 2, BTN_Y + BTN_H / 2, 2);
+  tft.fillRoundRect(LOG_X, BTN_Y, LOG_W, BTN_H, 10, C_ACCENT);
+  tft.setTextColor(C_BG, C_ACCENT);
+  tft.drawString("Log & exit", LOG_X + LOG_W / 2, BTN_Y + BTN_H / 2, 2);
+  tft.setTextColor(C_DIM, C_BG);
+  tft.drawString("tap background = pause/resume", 240, 310, 2);
+}
+
+// ---- state changes ----
+static void syncAndRefresh() {
+  String selId = sel >= 0 ? tasks[sel].id : "";
+  bool ok = syncTasks();
+  lastSync = millis();
+  if (!ok && taskCount == 0) {
+    tft.fillScreen(C_BG);
+    lastMinuteShown = -1;
+    drawClock();
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(C_MUTED, C_BG);
+    tft.drawString("sync failed — check WiFi/token/Focus section", 240, 170, 2);
+    return;
+  }
+  if (sel >= 0 && (sel >= taskCount || tasks[sel].id != selId)) sel = -1;
+  drawList();
+}
+
+static void startTimer() {
+  totalS = leftS = (long)minutes * 60;
+  paused = false;
+  screen = SCR_TIMER;
+  lastSec = millis();
+  drawTimer();
+}
+
+static void exitTimer(bool closeIt) {
+  if (closeIt && sel >= 0) closeTask(tasks[sel].id);
+  sel = -1;
+  screen = SCR_LIST;
+  syncAndRefresh();
+}
+
+static void handleListTap(int x, int y) {
+  for (int i = 0; i < taskCount; i++)
+    if (inRect(x, y, TASK_X, TASK_Y0 + i * (TASK_H + TASK_GAP), TASK_W, TASK_H)) {
+      if (sel == i) { startTimer(); return; }
+      sel = i;
+      minutes = tasks[i].durMin > 0 ? tasks[i].durMin : 25;
+      drawList();
+      return;
+    }
+  if (sel < 0) return;
+  if (inRect(x, y, BACK_X, BAR_Y, BACK_W, BAR_H)) { sel = -1; drawList(); return; }
+  for (int i = 0; i < 6; i++)
+    if (inRect(x, y, CHIP_X0 + i * (CHIP_W + CHIP_GAP), BAR_Y, CHIP_W, BAR_H)) {
+      minutes = DURATIONS[i];
+      drawBar();
+      return;
+    }
+}
+
+static void handleTimerTap(int x, int y) {
+  if (inRect(x, y, PLUS_X, BTN_Y, PLUS_W, BTN_H)) {
+    if (totalS + 300 <= MAX_MIN * 60L) { totalS += 300; leftS += 300; }
+    updateRing();
+  } else if (inRect(x, y, LOG_X, BTN_Y, LOG_W, BTN_H)) {
+    exitTimer(true);
+  } else {
+    paused = !paused;
+    lastSec = millis();
+    updateRing();
+  }
+}
+
+// LCD reset line is on TCA9554 IO expander pin 1 (vendor demo lcd_reset()).
+static void lcdReset() {
+  Wire.begin(PIN_SDA, PIN_SCL);
+  // ponytail: assumes power-on defaults (all inputs, outputs 0xFF) — fine here.
+  Wire.beginTransmission(0x20); Wire.write(0x03); Wire.write(0xFD); Wire.endTransmission();  // pin1 output
+  for (uint8_t v : {0xFF, 0xFD, 0xFF}) {
+    Wire.beginTransmission(0x20); Wire.write(0x01); Wire.write(v); Wire.endTransmission();
+    delay(v == 0xFF ? 200 : 10);
+  }
+}
+
+// ---- Arduino ----
+void setup() {
+  Serial.begin(115200);
+  C_BG = tft.color565(9, 9, 11);       C_CARD = tft.color565(24, 24, 27);
+  C_BORDER = tft.color565(39, 39, 42); C_ACCENT = tft.color565(249, 115, 22);
+  C_TEXT = tft.color565(244, 244, 245); C_MUTED = tft.color565(113, 113, 122);
+  C_DIM = tft.color565(82, 82, 91);    C_CHIP_TX = tft.color565(161, 161, 170);
+  lcdReset();
+  tft.init();
+  tft.setRotation(1);
+  tft.fillScreen(C_BG);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(C_MUTED, C_BG);
+  tft.drawString("connecting WiFi...", 240, 160, 2);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  while (WiFi.status() != WL_CONNECTED) delay(250);
+  tls.setInsecure();  // ponytail: pin api.todoist.com root CA before leaving your desk (DESIGN.md)
+  configTzTime(TZ_POSIX, "pool.ntp.org", "time.nist.gov");
+  tft.drawString("syncing...", 240, 184, 2);
+  screen = SCR_LIST;
+  syncAndRefresh();
+}
+
+void loop() {
+  int16_t tx, ty;
+  static bool wasDown = false;
+  bool down = readTouch(tx, ty);
+  if (down && !wasDown) {
+    if (screen == SCR_LIST) handleListTap(tx, ty);
+    else handleTimerTap(tx, ty);
+  }
+  wasDown = down;
+
+  if (screen == SCR_LIST) {
+    drawClock();
+    if (millis() - lastSync > SYNC_INTERVAL_MS) syncAndRefresh();
+  } else if (!paused && leftS > 0) {
+    uint32_t now = millis();
+    uint32_t elapsed = (now - lastSec) / 1000;
+    if (elapsed) {
+      lastSec += elapsed * 1000;
+      leftS -= elapsed;
+      if (leftS < 0) leftS = 0;
+      updateRing();
+    }
+  }
+  delay(20);
+}
