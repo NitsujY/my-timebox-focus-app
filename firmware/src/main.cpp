@@ -367,11 +367,15 @@ static void exitTimer(bool closeIt) {
 }
 
 static void handleListTap(int x, int y) {
-  if (inRect(x, y, 300, 0, 180, 64)) {  // tap date = project picker
+  // top bar always, bottom hint bar when nothing selected = project picker.
+  // ponytail: generous zones, robust to unverified touch mirroring on this panel.
+  bool pickerZone = inRect(x, y, 0, 0, 480, 64) ||
+                    (sel < 0 && inRect(x, y, 0, BAR_Y, 480, 320 - BAR_Y));
+  if (pickerZone) {
     if (fetchProjects() && projectCount > 0) {
       screen = SCR_PROJECTS;
       drawProjects();
-    }
+    } else Serial.println("[API] fetchProjects failed or empty");
     return;
   }
   for (int i = 0; i < taskCount; i++)
@@ -469,6 +473,7 @@ void loop() {
   static bool wasDown = false;
   bool down = readTouch(tx, ty);
   if (down && !wasDown) {
+    Serial.printf("[TOUCH] tap at %d,%d (screen %d)\n", tx, ty, screen);
     if (screen == SCR_LIST) handleListTap(tx, ty);
     else if (screen == SCR_TIMER) handleTimerTap(tx, ty);
     else handleProjectsTap(tx, ty);

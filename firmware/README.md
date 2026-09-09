@@ -29,9 +29,9 @@ TCA9554 at power-on — `setup()` releases all expander pins high to wake it.
 
 ## Switching projects
 
-Tap the date (top-right) on the list screen → pick a project. The choice is
-saved to flash and survives reboots; `TODOIST_PROJECT_ID` in `secrets.h` is
-just the first-boot default.
+Tap the top bar (clock/date) on the list screen → pick a project. The choice
+is saved to flash and survives reboots; `TODOIST_PROJECT_ID` in `secrets.h`
+is just the first-boot default.
 
 ## After first boot
 
