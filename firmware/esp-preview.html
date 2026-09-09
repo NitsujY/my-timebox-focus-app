@@ -12,6 +12,7 @@
             box-shadow: 0 0 0 2px #444; overflow: hidden; }
   #top { display: flex; align-items: baseline; justify-content: space-between;
          padding: 12px 18px 4px; }
+  #date { cursor: pointer; }  /* tap date = project picker */
   #clock { font-size: 56px; font-weight: 700; letter-spacing: 2px; font-variant-numeric: tabular-nums; }
   #date { font-size: 16px; color: #71717a; }
   #label { font-size: 13px; letter-spacing: 3px; color: #71717a; padding: 4px 18px 4px; }
@@ -52,6 +53,15 @@
   #tTitle { font-size: 16px; color: #a1a1aa; max-width: 400px; margin-top: 14px;
             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #tHint { font-size: 12px; color: #52525b; margin-top: 8px; }
+  /* ---- project picker (tap date on list screen) ---- */
+  #picker { display: none; flex-direction: column; width: 480px; height: 320px;
+            background: #09090b; color: #f4f4f5; font-family: Inter, system-ui, sans-serif;
+            box-shadow: 0 0 0 2px #444; }
+  #projList { flex: 1; display: flex; flex-direction: column; gap: 8px; padding: 0 12px 8px; }
+  .proj { flex: 1; display: flex; align-items: center; background: #18181b;
+          border: 2px solid #27272a; border-radius: 10px; padding: 0 14px;
+          font-size: 20px; cursor: pointer; user-select: none; min-height: 0; }
+  .proj.cur { border-color: #f97316; }
 </style>
 </head>
 <body>
@@ -74,6 +84,13 @@
   </div>
   <div id="tHint">tap background = pause/resume</div>
 </div>
+<div id="picker">
+  <div id="label">PICK A PROJECT</div>
+  <div id="projList"></div>
+  <div id="chipsbar2" style="display:flex;align-items:center;gap:6px;padding:0 12px 8px;">
+    <button class="back" id="pBack">←</button>
+  </div>
+</div>
 <script>
   // ponytail: mock data — firmware will replace this with Todoist /api/v1/tasks (section = Focus)
   const tasks = [
@@ -84,6 +101,33 @@
 
   // same duration chips as the web app
   const DURATIONS = [5, 10, 15, 25, 50, 90];
+
+  // ponytail: mock data — firmware fetches GET /api/v1/projects (first 5, no scroll)
+  const projects = ["Inbox", "Timebox Focus", "Side Quests"];
+  let curProject = 1;
+  const pickerEl = document.getElementById("picker"),
+        projList = document.getElementById("projList");
+  projects.forEach((name, i) => {
+    const row = document.createElement("div");
+    row.className = "proj" + (i === curProject ? " cur" : "");
+    row.textContent = name;
+    row.onclick = () => {
+      curProject = i;
+      [...projList.children].forEach((r, j) => r.classList.toggle("cur", j === i));
+      closePicker();  // firmware: saves to flash, re-syncs, back to list
+    };
+    projList.appendChild(row);
+  });
+  function openPicker() {
+    main.style.display = "none";
+    pickerEl.style.display = "flex";
+  }
+  function closePicker() {
+    pickerEl.style.display = "none";
+    main.style.display = "flex";
+  }
+  document.getElementById("date").onclick = openPicker;
+  document.getElementById("pBack").onclick = closePicker;
 
   const el = document.getElementById("tasks");
   const chipsbar = document.getElementById("chipsbar");
@@ -176,7 +220,8 @@
   timerEl.onclick = () => { paused = !paused; render(); };
   document.onkeydown = e => {   // keyboard only for browser preview; device uses ← buttons
     if (e.key !== "Escape") return;
-    if (timerEl.style.display === "flex") exitTimer();
+    if (pickerEl.style.display === "flex") closePicker();
+    else if (timerEl.style.display === "flex") exitTimer();
     else clearSel();
   };
 

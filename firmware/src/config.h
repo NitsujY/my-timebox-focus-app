@@ -1,8 +1,8 @@
 #pragma once
 
-// I2C bus (FT6336 touch, TCA9554 expander) — from vendor demo.
-#define PIN_SDA 8
-#define PIN_SCL 7
+// I2C bus (FT6336 touch, TCA9554 expander) — from dash_35 firmware.
+#define PIN_SDA 21
+#define PIN_SCL 22
 
 // FT6336 touch (minimal single-tap I2C read, no lib).
 #define FT_ADDR      0x38

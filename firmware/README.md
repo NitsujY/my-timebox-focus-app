@@ -22,9 +22,10 @@ pio run -t upload      # flash (auto-detects the serial port)
 pio device monitor     # serial logs, 115200 baud
 ```
 
-Pin map is already set from the vendor demo (SPI 1/5/2, DC 3, CS tied low,
-reset via TCA9554 pin 1, backlight GPIO 6, I2C SDA 8 / SCL 7). Only revisit it
-if you have a different board revision.
+Pin map is already set from the working dash_35 firmware (classic ESP32:
+SPI 23/18/19, CS 5, DC 27, reset via TCA9554 pin 0, backlight GPIO 25,
+I2C SDA 21 / SCL 22). Note: the FT6336 touch chip is held in reset by the
+TCA9554 at power-on — `setup()` releases all expander pins high to wake it.
 
 ## Switching projects
 

@@ -72,11 +72,18 @@ static bool inRect(int x, int y, int rx, int ry, int rw, int rh) {
 }
 
 // ---- touch: FT6336 single-point ----
+static bool touchPresent = true;
+static uint32_t touchRetryAt = 0;
 static bool readTouch(int16_t &x, int16_t &y) {
+  if (!touchPresent) {
+    if (millis() < touchRetryAt) return false;
+    touchRetryAt = millis() + 2000;  // ponytail: probe absent chip every 2s
+  }
   Wire.beginTransmission(FT_ADDR);
   Wire.write(0x02);  // TD_STATUS
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom((uint8_t)FT_ADDR, (uint8_t)5) != 5) return false;
+  if (Wire.endTransmission(false) != 0) { touchPresent = false; return false; }
+  if (Wire.requestFrom((uint8_t)FT_ADDR, (uint8_t)5) != 5) { touchPresent = false; return false; }
+  touchPresent = true;
   uint8_t n = Wire.read() & 0x0F;
   uint8_t xh = Wire.read(), xl = Wire.read(), yh = Wire.read(), yl = Wire.read();
   if (n == 0) return false;
@@ -410,14 +417,14 @@ static void handleProjectsTap(int x, int y) {
     }
 }
 
-// LCD reset line is on TCA9554 IO expander pin 1 (vendor demo lcd_reset()).
+// LCD reset line is on TCA9554 IO expander pin 0 (dash_35 DashboardDisplay::begin).
 static void lcdReset() {
   Wire.begin(PIN_SDA, PIN_SCL);
   // ponytail: assumes power-on defaults (all inputs, outputs 0xFF) — fine here.
-  Wire.beginTransmission(0x20); Wire.write(0x03); Wire.write(0xFD); Wire.endTransmission();  // pin1 output
-  for (uint8_t v : {0xFF, 0xFD, 0xFF}) {
+  Wire.beginTransmission(0x20); Wire.write(0x03); Wire.write(0xFE); Wire.endTransmission();  // pin0 output
+  for (uint8_t v : {0xFF, 0xFE, 0xFF}) {
     Wire.beginTransmission(0x20); Wire.write(0x01); Wire.write(v); Wire.endTransmission();
-    delay(v == 0xFF ? 200 : 10);
+    delay(v == 0xFE ? 10 : 200);  // high, 10ms low pulse, high+settle
   }
 }
 
@@ -429,6 +436,16 @@ void setup() {
   C_TEXT = tft.color565(244, 244, 245); C_MUTED = tft.color565(113, 113, 122);
   C_DIM = tft.color565(82, 82, 91);    C_CHIP_TX = tft.color565(161, 161, 170);
   lcdReset();
+  // touch chip held in reset by expander? release all pins high and rescan
+  Wire.beginTransmission(0x20); Wire.write(0x03); Wire.write(0x00); Wire.endTransmission();
+  Wire.beginTransmission(0x20); Wire.write(0x01); Wire.write(0xFF); Wire.endTransmission();
+  delay(50);
+  Serial.print("I2C scan:");
+  for (uint8_t a = 0x08; a < 0x78; a++) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0) Serial.printf(" 0x%02X", a);
+  }
+  Serial.println();
   tft.init();
   tft.setRotation(1);
   tft.fillScreen(C_BG);
