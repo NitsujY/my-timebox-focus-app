@@ -6,6 +6,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <TFT_eSPI.h>
+#include <Preferences.h>
 #include <Wire.h>
 #include "config.h"
 #include "secrets.h"
@@ -20,12 +21,19 @@ struct Task { String id, content; int durMin; };
 static Task tasks[3];
 static int taskCount = 0;
 static String focusSectionId;
+static Preferences prefs;
+static String projectId;  // NVS override, falls back to TODOIST_PROJECT_ID
+
+// ponytail: picker shows first 5 projects, no scroll — raise if you have more.
+struct Proj { String id, name; };
+static Proj projects[5];
+static int projectCount = 0;
 
 static int sel = -1;
 static int minutes = 25;
 static const int DURATIONS[] = {5, 10, 15, 25, 50, 90};
 
-enum Screen { SCR_LIST, SCR_TIMER };
+enum Screen { SCR_LIST, SCR_TIMER, SCR_PROJECTS };
 static Screen screen = SCR_LIST;
 static long totalS = 0, leftS = 0;
 static bool paused = false;
@@ -107,7 +115,7 @@ static bool syncTasks() {
   if (focusSectionId.isEmpty()) {
     filter["results"][0]["id"] = true;
     filter["results"][0]["name"] = true;
-    if (apiGet("/api/v1/sections?project_id=" TODOIST_PROJECT_ID, doc, filter) != 200)
+    if (apiGet("/api/v1/sections?project_id=" + projectId, doc, filter) != 200)
       return false;
     for (JsonObject s : doc["results"].as<JsonArray>())
       if (String(s["name"].as<const char*>()).equalsIgnoreCase("Focus")) {
@@ -122,7 +130,7 @@ static bool syncTasks() {
   filter["results"][0]["section_id"] = true;
   filter["results"][0]["duration"]["amount"] = true;
   filter["results"][0]["duration"]["unit"] = true;
-  if (apiGet("/api/v1/tasks?project_id=" TODOIST_PROJECT_ID, doc, filter) != 200)
+  if (apiGet("/api/v1/tasks?project_id=" + projectId, doc, filter) != 200)
     return false;
   taskCount = 0;
   for (JsonObject t : doc["results"].as<JsonArray>()) {
@@ -138,6 +146,21 @@ static bool syncTasks() {
     }
     tasks[taskCount].durMin = d;
     taskCount++;
+  }
+  return true;
+}
+
+static bool fetchProjects() {
+  JsonDocument doc, filter;
+  filter["results"][0]["id"] = true;
+  filter["results"][0]["name"] = true;
+  if (apiGet("/api/v1/projects", doc, filter) != 200) return false;
+  projectCount = 0;
+  for (JsonObject p : doc["results"].as<JsonArray>()) {
+    if (projectCount == 5) break;
+    projects[projectCount].id = p["id"].as<String>();
+    projects[projectCount].name = p["name"].as<String>();
+    projectCount++;
   }
   return true;
 }
@@ -275,6 +298,26 @@ static void drawTimer() {
   tft.drawString("tap background = pause/resume", 240, 310, 2);
 }
 
+static void drawProjects() {
+  tft.fillScreen(C_BG);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(C_MUTED, C_BG);
+  tft.drawString("PICK A PROJECT", 18, LABEL_Y, 2);
+  for (int i = 0; i < projectCount; i++) {
+    int y = TASK_Y0 + i * (TASK_H + TASK_GAP);
+    bool cur = projects[i].id == projectId;
+    tft.fillRoundRect(TASK_X, y, TASK_W, TASK_H, 10, C_CARD);
+    tft.drawRoundRect(TASK_X, y, TASK_W, TASK_H, 10, cur ? C_ACCENT : C_BORDER);
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextColor(C_TEXT, C_CARD);
+    tft.drawString(projects[i].name, TASK_X + 14, y + TASK_H / 2 + 1, 4);
+  }
+  tft.drawRoundRect(BACK_X, BAR_Y, BACK_W, BAR_H, 8, C_BORDER);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(C_MUTED, C_BG);
+  tft.drawString("<-", BACK_X + BACK_W / 2, BAR_Y + BAR_H / 2, 2);
+}
+
 // ---- state changes ----
 static void syncAndRefresh() {
   String selId = sel >= 0 ? tasks[sel].id : "";
@@ -309,6 +352,13 @@ static void exitTimer(bool closeIt) {
 }
 
 static void handleListTap(int x, int y) {
+  if (inRect(x, y, 300, 0, 180, 64)) {  // tap date = project picker
+    if (fetchProjects() && projectCount > 0) {
+      screen = SCR_PROJECTS;
+      drawProjects();
+    }
+    return;
+  }
   for (int i = 0; i < taskCount; i++)
     if (inRect(x, y, TASK_X, TASK_Y0 + i * (TASK_H + TASK_GAP), TASK_W, TASK_H)) {
       if (sel == i) { startTimer(); return; }
@@ -340,6 +390,26 @@ static void handleTimerTap(int x, int y) {
   }
 }
 
+static void handleProjectsTap(int x, int y) {
+  if (inRect(x, y, BACK_X, BAR_Y, BACK_W, BAR_H)) {
+    screen = SCR_LIST;
+    drawList();
+    return;
+  }
+  for (int i = 0; i < projectCount; i++)
+    if (inRect(x, y, TASK_X, TASK_Y0 + i * (TASK_H + TASK_GAP), TASK_W, TASK_H)) {
+      if (projects[i].id != projectId) {
+        projectId = projects[i].id;
+        prefs.putString("project_id", projectId);
+        focusSectionId = "";
+        sel = -1;
+      }
+      screen = SCR_LIST;
+      syncAndRefresh();
+      return;
+    }
+}
+
 // LCD reset line is on TCA9554 IO expander pin 1 (vendor demo lcd_reset()).
 static void lcdReset() {
   Wire.begin(PIN_SDA, PIN_SCL);
@@ -368,6 +438,8 @@ void setup() {
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   while (WiFi.status() != WL_CONNECTED) delay(250);
   tls.setInsecure();  // ponytail: pin api.todoist.com root CA before leaving your desk (DESIGN.md)
+  prefs.begin("timebox", false);
+  projectId = prefs.getString("project_id", TODOIST_PROJECT_ID);
   configTzTime(TZ_POSIX, "pool.ntp.org", "time.nist.gov");
   tft.drawString("syncing...", 240, 184, 2);
   screen = SCR_LIST;
@@ -380,7 +452,8 @@ void loop() {
   bool down = readTouch(tx, ty);
   if (down && !wasDown) {
     if (screen == SCR_LIST) handleListTap(tx, ty);
-    else handleTimerTap(tx, ty);
+    else if (screen == SCR_TIMER) handleTimerTap(tx, ty);
+    else handleProjectsTap(tx, ty);
   }
   wasDown = down;
 

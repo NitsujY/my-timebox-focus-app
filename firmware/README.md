@@ -26,6 +26,12 @@ Pin map is already set from the vendor demo (SPI 1/5/2, DC 3, CS tied low,
 reset via TCA9554 pin 1, backlight GPIO 6, I2C SDA 8 / SCL 7). Only revisit it
 if you have a different board revision.
 
+## Switching projects
+
+Tap the date (top-right) on the list screen → pick a project. The choice is
+saved to flash and survives reboots; `TODOIST_PROJECT_ID` in `secrets.h` is
+just the first-boot default.
+
 ## After first boot
 
 - If touch taps land mirrored/rotated, flip `TOUCH_SWAP_XY` / `TOUCH_INV_X` /
