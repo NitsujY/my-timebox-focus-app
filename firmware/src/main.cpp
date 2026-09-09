@@ -123,6 +123,7 @@ static int apiGet(const String& path, JsonDocument& doc, JsonDocument& filter) {
   if (!http.begin(tls, "https://api.todoist.com" + path)) return -1;
   http.addHeader("Authorization", "Bearer " TODOIST_TOKEN);
   int code = http.GET();
+  Serial.printf("[API] GET %s -> %d\n", path.c_str(), code);
   if (code == 200 && deserializeJson(doc, http.getStream(),
                                      DeserializationOption::Filter(filter)))
     code = -2;
@@ -143,7 +144,7 @@ static bool syncTasks() {
         focusSectionId = s["id"].as<String>();
         break;
       }
-    if (focusSectionId.isEmpty()) return false;
+    if (focusSectionId.isEmpty()) { Serial.println("[API] no Focus section found"); return false; }
   }
   filter.clear();
   filter["results"][0]["id"] = true;
