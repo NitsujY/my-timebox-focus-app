@@ -43,6 +43,7 @@ type Task = {
   description?: string | null;
   due?: { datetime?: string; date: string } | null;
   duration?: { amount: number; unit: string } | null;
+  added_at?: string; // ISO — tie-breaker so newest lands on top
 };
 type Project = { id: string; name: string };
 type SectionMap = Record<string, string>; // lowercase section name -> id
@@ -145,7 +146,8 @@ const sortTasks = (ts: Task[]) =>
     if (b.priority !== a.priority) return b.priority - a.priority;
     const da = a.due?.datetime ?? a.due?.date ?? "9999";
     const db = b.due?.datetime ?? b.due?.date ?? "9999";
-    return da.localeCompare(db);
+    if (da !== db) return da.localeCompare(db);
+    return (b.added_at ?? "").localeCompare(a.added_at ?? ""); // ties: newest first
   });
 
 const pBar = (p: number) =>
@@ -395,6 +397,7 @@ export default function App() {
       priority: p.priority ?? 1,
       section_id: sectionId ?? null,
       duration: p.duration != null ? { amount: p.duration, unit: "minute" } : undefined,
+      added_at: new Date().toISOString(),
     };
     setTasks((ts) => [...ts, tmp]);
     try {
@@ -704,6 +707,12 @@ export default function App() {
           />
         ) : view === "backlog" ? (
           <section>
+            <AddRow
+              alwaysOpen
+              placeholder="＋ Add to Backlog…"
+              sections={sections}
+              onAdd={(raw) => addTask(raw, roles.backlog)}
+            />
             {backlogTasks.length === 0 ? (
               <p className="py-4 text-[13px] text-zinc-500">
                 Your parking lot for ideas. Dump anything here — it waits without interrupting you.
@@ -721,11 +730,6 @@ export default function App() {
                 durations={prefs.durations}
               />
             )}
-            <AddRow
-              placeholder="＋ Add to Backlog…"
-              sections={sections}
-              onAdd={(raw) => addTask(raw, roles.backlog)}
-            />
           </section>
         ) : (
           <FocusView
@@ -1144,7 +1148,7 @@ function TaskRow({
         expanded
           ? "border-l-orange-500 bg-zinc-900 ring-1 ring-zinc-700"
           : `${pBar(t.priority)} hover:bg-zinc-900 active:bg-zinc-800`
-      }`}
+      } ${t.id.startsWith("tmp-") ? "row-new" : ""}`}
     >
       {expanded ? (
         <RowEditor
@@ -1283,7 +1287,7 @@ function RowEditor({
           <div className="border-t border-zinc-800" />
           <textarea
             ref={descRef}
-            className="w-full resize-none overflow-hidden bg-transparent font-mono text-[13px] text-zinc-400 outline-none placeholder:text-zinc-600"
+            className="w-full resize-none overflow-hidden bg-transparent font-mono text-[12px] leading-snug text-zinc-400 outline-none placeholder:text-zinc-600"
             placeholder="Add notes…"
             rows={2}
             value={desc}

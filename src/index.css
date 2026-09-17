@@ -32,6 +32,14 @@ body {
   animation: flash 0.6s ease-in-out 6;
 }
 
+@keyframes row-in {
+  from { background: rgba(249, 115, 22, 0.15); }
+  to { background: transparent; }
+}
+.row-new {
+  animation: row-in 1.2s ease-out;
+}
+
 @keyframes pop {
   0% { transform: scale(0.3); opacity: 0; }
   60% { transform: scale(1.25); opacity: 1; }

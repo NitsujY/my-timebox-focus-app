@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Backlog quick-capture**: the add input sits at the top of the Backlog tab, always open and focused on entry. New tasks land directly beneath it (equal priority/due now sorts newest-first via `added_at`) with a brief highlight.
+
 ## v8 — Fast switching & overrun visibility
 
 - **Auto-pick project on connect**: the first project besides Inbox is chosen automatically after OAuth/token entry — no manual selection screen.

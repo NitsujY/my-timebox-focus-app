@@ -26,7 +26,7 @@ The app maps Todoist sections (matched by name, case-insensitive) to a daily wor
 |---|---|
 | **Focus** | Today's top tasks (keep ≤ 3). Rendered as cards with a ▶ Start button. |
 | **Buffer** | Adhoc capture. Quick-add strip on top; chips start a fast 15/25m timebox. |
-| **Backlog** | Everything else. Its own tab for daily review (count in the tab); also behind a "Pull from Backlog" drawer in Focus. Click a task to move it into Focus. |
+| **Backlog** | Everything else. Its own tab for daily review (count in the tab), with an always-open quick-add at the top — new items land right beneath it; also behind a "Pull from Backlog" drawer in Focus. Click a task to move it into Focus. |
 | **Done** | Finished today. Listed in the Review tab; **Archive All** closes them all (end-of-day ritual). |
 
 Tasks in no section are treated as Backlog. Section IDs are cached in localStorage and re-resolved on every sync, so renames are picked up automatically. To switch project/token, click **Reset** in the header (clears localStorage).
