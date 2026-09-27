@@ -97,12 +97,13 @@ let lastWriteAt = 0; // grace window covers Todoist read-after-write lag
 async function mutate(token: string, m: Mutation) {
   pendingWrites++;
   try {
-    await api(token, m.path, m.method, m.body);
+    return await api(token, m.path, m.method, m.body);
   } catch (e) {
     if (e instanceof TypeError) {
       const q = load<Mutation[]>("tb_queue", []);
       q.push(m);
       save("tb_queue", q);
+      return null; // queued for replay
     } else throw e;
   } finally {
     pendingWrites--;
@@ -149,6 +150,11 @@ const sortTasks = (ts: Task[]) =>
     if (da !== db) return da.localeCompare(db);
     return (b.added_at ?? "").localeCompare(a.added_at ?? ""); // ties: newest first
   });
+
+// orange fade for freshly added rows — keeps glowing after the tmp id is swapped for the real one
+const isNew = (t: Task) =>
+  t.id.startsWith("tmp-") ||
+  (t.added_at != null && Date.now() - Date.parse(t.added_at) < 1500);
 
 const pBar = (p: number) =>
   p === 4
@@ -400,13 +406,18 @@ export default function App() {
       added_at: new Date().toISOString(),
     };
     setTasks((ts) => [...ts, tmp]);
+    // swap the optimistic tmp id for the real one, or notes/edits hit POST /tasks/tmp-* -> 404
+    const swap = (created: unknown) => {
+      if (created && typeof (created as Task).id === "string")
+        setTasks((ts) => ts.map((x) => (x.id === tmp.id ? (created as Task) : x)));
+    };
     try {
-      await mutate(token, { path: "/tasks", method: "POST", body: body(!noDuration) });
+      swap(await mutate(token, { path: "/tasks", method: "POST", body: body(!noDuration) }));
     } catch (e) {
       if (p.duration != null && !(e instanceof TypeError)) {
         proFail();
         try {
-          await mutate(token, { path: "/tasks", method: "POST", body: body(false) });
+          swap(await mutate(token, { path: "/tasks", method: "POST", body: body(false) }));
           return;
         } catch {
           /* falls through to rollback */
@@ -1148,7 +1159,7 @@ function TaskRow({
         expanded
           ? "border-l-orange-500 bg-zinc-900 ring-1 ring-zinc-700"
           : `${pBar(t.priority)} hover:bg-zinc-900 active:bg-zinc-800`
-      } ${t.id.startsWith("tmp-") ? "row-new" : ""}`}
+      } ${isNew(t) ? "row-new" : ""}`}
     >
       {expanded ? (
         <RowEditor
