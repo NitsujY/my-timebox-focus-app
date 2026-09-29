@@ -596,6 +596,7 @@ export default function App() {
         onExit={() => setActive(null)}
         onLog={logSession}
         onTick={onWorkTick}
+        onUpdate={updateTask}
         onComplete={() => {
           completeTask(active.task);
           if (prefs.celebrate) setCelebrating(true);
@@ -1823,6 +1824,7 @@ function Timer({
   onLog,
   onComplete,
   onTick,
+  onUpdate,
 }: {
   task: Task;
   minutes: number;
@@ -1831,6 +1833,7 @@ function Timer({
   onLog: (s: Session) => void;
   onComplete: () => void;
   onTick?: (sec: number) => void;
+  onUpdate?: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
 }) {
   const [left, setLeft] = useState(minutes * 60);
   const [paused, setPaused] = useState(false);
@@ -1901,6 +1904,7 @@ function Timer({
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement).closest("input,textarea")) return; // typing in notes
       if (e.key === " ") {
         e.preventDefault();
         setPaused((p) => !p);
@@ -1943,18 +1947,45 @@ function Timer({
 
   const tbtn =
     "min-h-12 rounded-md px-3 py-3 text-[13px] text-zinc-400 transition-colors duration-150 hover:bg-zinc-800 hover:text-zinc-200";
-  const tap = (e: React.MouseEvent) => e.stopPropagation();
+
+  // notes editor — same debounced persistence as the task list's RowEditor
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [title, setTitle] = useState(task.content);
+  const [desc, setDesc] = useState(task.description ?? "");
+  const [saveState, setSaveState] = useState<"" | "saving" | "saved">("");
+  const titleLive = useRef(title);
+  titleLive.current = title;
+  const descLive = useRef(desc);
+  descLive.current = desc;
+  const debRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const savedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  const persist = async (fields: { content?: string; description?: string }) => {
+    if (!onUpdate) return;
+    setSaveState("saving");
+    clearTimeout(savedTimer.current);
+    try {
+      await onUpdate(task.id, fields);
+      setSaveState("saved");
+      savedTimer.current = setTimeout(() => setSaveState(""), 1000);
+    } catch {
+      setSaveState(""); // rollback toast already shown by onUpdate
+    }
+  };
+  const flush = () => {
+    clearTimeout(debRef.current);
+    const v = titleLive.current.trim();
+    if (v && v !== task.content) persist({ content: v });
+    if (descLive.current !== (task.description ?? "")) persist({ description: descLive.current });
+  };
+  useEffect(() => () => flush(), []);
 
   return (
-    <div
-      className="relative flex min-h-screen flex-col items-center justify-center gap-6 overflow-hidden px-4 py-8"
-      onClick={() => setPaused((p) => !p)}
-    >
+    <div className="relative flex min-h-screen flex-col items-center justify-center gap-6 overflow-hidden px-4 py-8">
       <button
         aria-label="Exit timer"
         className="absolute top-4 right-4 z-10 flex h-11 w-11 items-center justify-center rounded-md text-[20px] text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
-        onClick={(e) => {
-          tap(e);
+        onClick={() => {
           logAndExit(false);
           onExit();
         }}
@@ -1966,6 +1997,48 @@ function Timer({
       >
         {task.content}
       </h2>
+      {onUpdate && (
+        <button
+          className={`-mt-3 text-[12px] transition-colors ${
+            notesOpen || task.description ? "text-orange-500" : "text-zinc-600 hover:text-zinc-400"
+          }`}
+          onClick={() => setNotesOpen((o) => !o)}
+        >
+          {notesOpen ? "Hide notes" : task.description ? "View notes" : "Add notes"}
+        </button>
+      )}
+      {notesOpen && (
+        <div className="w-full max-w-md space-y-2 rounded-md border border-zinc-800 bg-zinc-900 p-3">
+          <div className="flex items-center gap-2">
+            <input
+              className="min-w-0 flex-1 bg-transparent p-0 text-[15px] outline-none"
+              value={title}
+              onChange={(e) => {
+                setTitle(e.target.value);
+                clearTimeout(debRef.current);
+                debRef.current = setTimeout(flush, 500);
+              }}
+            />
+            {saveState && (
+              <span className="shrink-0 text-[12px] text-zinc-500">
+                {saveState === "saving" ? "Saving…" : "Saved ✓"}
+              </span>
+            )}
+          </div>
+          <div className="border-t border-zinc-800" />
+          <textarea
+            className="w-full resize-none bg-transparent font-mono text-[12px] leading-snug text-zinc-400 outline-none placeholder:text-zinc-600"
+            placeholder="Add notes…"
+            rows={3}
+            value={desc}
+            onChange={(e) => {
+              setDesc(e.target.value);
+              clearTimeout(debRef.current);
+              debRef.current = setTimeout(flush, 500);
+            }}
+          />
+        </div>
+      )}
       <div className="relative flex h-[64vmin] w-[64vmin] items-center justify-center">
         <svg viewBox="0 0 100 100" className="pointer-events-none absolute inset-0 h-full w-full -rotate-90">
           <circle cx="50" cy="50" r="48" fill="none" stroke="#27272a" strokeWidth="0.75" />
@@ -1982,45 +2055,33 @@ function Timer({
             className="transition-[stroke-dashoffset] duration-150"
           />
         </svg>
-        <p
-          className={`relative font-mono text-[14vmin] leading-none font-bold tabular-nums ${
-            paused ? "text-zinc-600" : frac <= 0.1 ? "text-orange-500" : "text-zinc-100"
+        <button
+          className={`relative rounded-full p-[10vmin] font-mono text-[14vmin] leading-none font-bold tabular-nums outline-none transition-colors duration-150 ${
+            paused ? "text-zinc-600" : frac <= 0.1 ? "text-orange-500" : "text-zinc-100 hover:bg-zinc-900/60 active:bg-zinc-800/60"
           }`}
+          title={paused ? "Resume (Space)" : "Pause (Space)"}
+          aria-label={paused ? "Resume timer" : "Pause timer"}
+          aria-pressed={paused}
+          onClick={() => setPaused((p) => !p)}
         >
           {over > 0 ? `+${fmt(over)}` : fmt(left)}
-        </p>
+        </button>
         {paused && (
           <span
-            className="absolute -bottom-[6vmin] left-1/2 -translate-x-1/2 animate-pulse rounded-md border border-zinc-600 bg-zinc-800 px-4 py-1.5 text-[13px] font-medium tracking-wide whitespace-nowrap text-zinc-200 uppercase"
+            className="pointer-events-none absolute -bottom-[6vmin] left-1/2 -translate-x-1/2 animate-pulse rounded-md border border-zinc-600 bg-zinc-800 px-4 py-1.5 text-[13px] font-medium tracking-wide whitespace-nowrap text-zinc-200 uppercase"
             aria-label="Paused"
           >
-            ⏸ Paused — tap anywhere to resume
+            ⏸ Paused
           </span>
         )}
       </div>
       <div className="flex w-full max-w-xs flex-col gap-2 px-6 sm:w-auto sm:max-w-none sm:flex-row">
-        <button
-          className={tbtn}
-          onClick={(e) => {
-            tap(e);
-            extend(5);
-          }}
-        >
+        <button className={tbtn} onClick={() => extend(5)}>
           +5 min
         </button>
         <button
-          className={tbtn}
-          onClick={(e) => {
-            tap(e);
-            setPaused((p) => !p);
-          }}
-        >
-          {paused ? "Resume" : "Pause"}
-        </button>
-        <button
           className={`${tbtn} text-orange-500`}
-          onClick={(e) => {
-            tap(e);
+          onClick={() => {
             logAndExit(true);
             onComplete();
           }}
@@ -2029,8 +2090,7 @@ function Timer({
         </button>
         <button
           className={tbtn}
-          onClick={(e) => {
-            tap(e);
+          onClick={() => {
             logAndExit(false);
             onExit();
           }}
@@ -2040,10 +2100,7 @@ function Timer({
       </div>
 
       {timesUp && (
-        <div
-          className="fixed inset-0 z-20 flex items-center justify-center bg-zinc-950/80"
-          onClick={tap}
-        >
+        <div className="fixed inset-0 z-20 flex items-center justify-center bg-zinc-950/80">
           <div className="w-full max-w-xs space-y-2 rounded-md border border-zinc-800 bg-zinc-900 p-6">
             <div className="mb-4">
               <h3 className="text-[20px] font-semibold">Time's up!</h3>
