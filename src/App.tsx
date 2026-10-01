@@ -1520,7 +1520,8 @@ function Review({
     const n = ts.filter((s) => s.task_id === id).reduce((a, s) => a + s.actual_minutes, 0);
     return n || null;
   };
-  // planned falls back to the timer's start time when the task has no estimate
+  // planned: sum of each timer start's planned minutes; falls back to the task estimate
+  // only when nothing was logged today
   const plannedFor = (id: string) => {
     const n = ts.filter((s) => s.task_id === id).reduce((a, s) => a + s.planned_minutes, 0);
     return n || null;
@@ -1551,23 +1552,25 @@ function Review({
         </p>
       ) : (
         <>
-          <table className="w-full text-left">
+          <table className="w-full table-fixed text-left">
             <thead>
               <tr className="border-b border-zinc-800 text-[13px] text-zinc-500">
                 <th className="py-2 font-normal">Task</th>
-                <th className="py-2 text-right font-normal">Planned</th>
-                <th className="py-2 text-right font-normal">Actual</th>
-                <th className="py-2 text-right font-normal">Δ</th>
+                <th className="w-16 py-2 text-right font-normal">Planned</th>
+                <th className="w-16 py-2 text-right font-normal">Actual</th>
+                <th className="w-14 py-2 text-right font-normal">Δ</th>
               </tr>
             </thead>
             <tbody>
               {tasks.map((t) => {
                 const a = actualFor(t.id);
-                const p = t.duration?.amount ?? plannedFor(t.id);
+                const p = plannedFor(t.id) ?? t.duration?.amount;
                 const d = a != null && p != null ? a - p : null;
                 return (
                   <tr key={t.id} className="border-b border-zinc-800/60">
-                    <td className="py-2 pr-2 text-[15px]">{t.content}</td>
+                    <td className="truncate py-2 pr-2 text-[15px]" title={t.content}>
+                      {t.content}
+                    </td>
                     <td className="py-2 text-right font-mono text-[13px] tabular-nums text-zinc-500">
                       {p != null ? `${p}m` : "—"}
                     </td>
