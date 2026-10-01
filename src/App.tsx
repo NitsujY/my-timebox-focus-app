@@ -510,6 +510,26 @@ export default function App() {
     }
   };
 
+  // completing from the list (timer never ran): log the planned time as actual,
+  // unless a session for this task was already logged today (avoid double-counting)
+  const completeWithLog = (t: Task) => {
+    const loggedToday = sessions.some(
+      (s) => s.task_id === t.id && new Date(s.timestamp).toDateString() === todayStr(),
+    );
+    if (!loggedToday) {
+      const mins = t.duration?.amount ?? prefs.defaultMinutes;
+      logSession({
+        task_id: t.id,
+        task_name: t.content,
+        planned_minutes: mins,
+        actual_minutes: mins,
+        completed: true,
+        timestamp: Date.now(),
+      });
+    }
+    completeTask(t);
+  };
+
   const archiveAll = async () => {
     const prev = tasksRef.current;
     const done = tasks.filter((t) => t.section_id === roles.done);
@@ -735,11 +755,12 @@ export default function App() {
                 expandedId={expandedId}
                 onToggle={toggleRow}
                 onMove={roles.focus ? (x) => moveTo(x, roles.focus!) : undefined}
-                onComplete={completeTask}
+                onComplete={completeWithLog}
                 onUpdate={updateTask}
                 onDuration={changeDuration}
                 onDelete={deleteTask}
                 durations={prefs.durations}
+                defaultMinutes={prefs.defaultMinutes}
               />
             )}
           </section>
@@ -763,7 +784,7 @@ export default function App() {
             onUpdate={updateTask}
             onDuration={changeDuration}
             onDelete={deleteTask}
-            onComplete={completeTask}
+            onComplete={completeWithLog}
             onStart={(t, minutes) => setActive({ task: t, minutes })}
             onGoBacklog={() => setView("backlog")}
           />
@@ -1037,6 +1058,7 @@ function BacklogList({
   onDuration,
   onDelete,
   durations,
+  defaultMinutes,
 }: {
   tasks: Task[];
   expandedId: string | null;
@@ -1047,6 +1069,7 @@ function BacklogList({
   onDuration: (t: Task, minutes: number) => void;
   onDelete: (t: Task) => void;
   durations: number[];
+  defaultMinutes: number;
 }) {
   const [showAll, setShowAll] = useState(false);
   const visible = showAll ? tasks : tasks.slice(0, PAGE);
@@ -1058,6 +1081,7 @@ function BacklogList({
             key={t.id}
             t={t}
             durations={durations}
+            defaultMinutes={defaultMinutes}
             expanded={expandedId === t.id}
             onToggle={() => onToggle(t.id)}
             onMove={onMove}
@@ -1169,6 +1193,7 @@ function TaskRow({
           dur={dur}
           actions={actions}
           durations={durations}
+          defaultMinutes={defaultMinutes}
           onClose={onToggle}
           onUpdate={onUpdate}
           onDuration={onDuration}
@@ -1198,6 +1223,7 @@ function RowEditor({
   dur,
   actions,
   durations,
+  defaultMinutes = 5,
   onClose,
   onUpdate,
   onDuration,
@@ -1210,6 +1236,7 @@ function RowEditor({
   dur: ReactNode;
   actions: ReactNode;
   durations: number[];
+  defaultMinutes?: number;
   onClose: () => void;
   onUpdate: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
   onDuration: (t: Task, minutes: number) => void;
@@ -1310,7 +1337,7 @@ function RowEditor({
             }}
           />
           <div className="flex flex-wrap items-center gap-2">
-            <DurationChips t={t} durations={durations} onDuration={onDuration} />
+            <DurationChips t={t} durations={durations} defaultMinutes={defaultMinutes} onDuration={onDuration} />
             {onDemote && (
               <button className={btn} title="Move back to Backlog" onClick={() => onDemote(t)}>
                 ↓ Backlog
@@ -1339,19 +1366,23 @@ function RowEditor({
 function DurationChips({
   t,
   durations,
+  defaultMinutes = 5,
   onDuration,
 }: {
   t: Task;
   durations: number[];
+  defaultMinutes?: number;
   onDuration: (t: Task, minutes: number) => void;
 }) {
+  // no explicit estimate: the chip matching the effective default shows as selected
+  const effective = t.duration?.amount ?? defaultMinutes;
   return (
     <div className="flex gap-1">
       {durations.map((m) => (
         <button
           key={m}
           className={`rounded-md border px-2 py-0.5 font-mono text-[11px] tabular-nums transition-colors duration-150 ${
-            t.duration?.amount === m
+            effective === m
               ? "border-zinc-600 text-zinc-200"
               : "border-zinc-800 text-zinc-500 hover:bg-zinc-800"
           }`}
