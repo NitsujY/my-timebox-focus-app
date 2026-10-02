@@ -19,3 +19,7 @@
 // LAN trigger (tools/timebox-relay.mjs, see ../docs/firmware-v2.md)
 #define BEACON_PORT 4242  // UDP: relay broadcasts timer beacons here
 #define RELAY_PORT  4241  // UDP: device unicasts extend/logstop events here
+
+// Screen sleep: idle clock goes fully dark (backlight + ST7796 SLPIN) after this.
+// Active timer keeps the screen on; touch or a beacon wakes it.
+#define SCREEN_OFF_MS (5 * 60 * 1000UL)

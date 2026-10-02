@@ -19,7 +19,9 @@ static Arduino_DataBus *bus = new Arduino_ESP32SPI(27 /*DC*/, 5 /*CS*/, 18 /*SCK
 static Arduino_GFX *gfx = new Arduino_ST7796(bus, GFX_NOT_DEFINED /*RST via TCA9554*/, 0, true /*ips*/);
 // PSRAM back buffer, flushed once per frame — kills flicker (same trick as dash_35).
 static Arduino_Canvas *cv = nullptr;
-static void flush() { if (cv) cv->flush(); }
+static Arduino_ST7796 *panel = nullptr;  // gfx may point at cv; panel stays for sleep cmds
+static bool screenAsleep = false;
+static void flush() { if (cv && !screenAsleep) cv->flush(); }
 
 // theme, mirrors web app
 #define C565(r, g, b) (uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3))
@@ -48,6 +50,7 @@ enum Screen { SCR_IDLE, SCR_TIMER };
 static Screen screen = SCR_IDLE;
 static int lastMinuteShown = -1;
 static long lastShownS = -1;
+static uint32_t lastTouchMs = 0;  // last touch press (screen-sleep activity)
 
 static WiFiUDP udp;
 static IPAddress relayIP;
@@ -78,6 +81,27 @@ static void serveLogs() {
 }
 
 static void drawTimer();  // defined below, used by pollUdp
+static void drawIdle();     // defined below, used by wakeScreen
+
+// ---- screen sleep: idle clock goes fully dark after SCREEN_OFF_MS (see config.h) ----
+static void wakeScreen() {
+  if (!screenAsleep) return;
+  screenAsleep = false;
+  panel->displayOn();       // SLPOUT + 120ms (library handles the delay)
+  digitalWrite(25, HIGH);
+  lastShownS = -1;          // force redraw of whatever screen we're on
+  lastMinuteShown = -1;
+  if (screen == SCR_TIMER) drawTimer();
+  else drawIdle();
+  logLine("[SCR] wake");
+}
+static void sleepScreen() {
+  if (screenAsleep) return;
+  logLine("[SCR] sleep (idle timeout)");
+  digitalWrite(25, LOW);    // backlight off
+  panel->displayOff();      // SLPIN — panel truly inert, GRAM retained
+  screenAsleep = true;
+}
 
 // ---- touch: FT6336 single-point ----
 static bool touchPresent = true;
@@ -89,8 +113,15 @@ static bool readTouch(int16_t &x, int16_t &y) {
   }
   Wire.beginTransmission(FT_ADDR);
   Wire.write(0x02);  // TD_STATUS
-  if (Wire.endTransmission(false) != 0) { touchPresent = false; return false; }
-  if (Wire.requestFrom((uint8_t)FT_ADDR, (uint8_t)5) != 5) { touchPresent = false; return false; }
+  if (Wire.endTransmission(false) != 0) {
+    if (touchPresent) logLine("[TOUCH] FT6336 absent");
+    touchPresent = false; return false;
+  }
+  if (Wire.requestFrom((uint8_t)FT_ADDR, (uint8_t)5) != 5) {
+    if (touchPresent) logLine("[TOUCH] FT6336 absent");
+    touchPresent = false; return false;
+  }
+  if (!touchPresent) logLine("[TOUCH] FT6336 present");
   touchPresent = true;
   uint8_t n = Wire.read() & 0x0F;
   uint8_t xh = Wire.read(), xl = Wire.read(), yh = Wire.read(), yl = Wire.read();
@@ -148,6 +179,7 @@ static void pollUdp() {
   sess = {sid, id, title, end, min};
   haveSess = true;
   lastBeacon = millis();
+  if (screenAsleep) wakeScreen();  // new timer lights the screen up
   if (isNew && screen == SCR_TIMER) drawTimer();  // new session while showing old one
   else if (screen != SCR_TIMER) { screen = SCR_TIMER; drawTimer(); }
   logLine(String("[BEACON] s=") + sid + " end=" + end + " '" + title + "'");
@@ -307,7 +339,10 @@ static int downX = 0;
 static bool holdFired = false;
 
 static void handleTouch(bool down, int16_t x) {
-  if (down && !wasDown) { downAt = millis(); downX = x; holdFired = false; }
+  if (down) lastTouchMs = millis();
+  if (down && !wasDown) { downAt = millis(); downX = x; holdFired = false; logLine(String("[TOUCH] down x=") + x + (screen == SCR_TIMER ? " (timer)" : " (idle)")); }
+  // wake tap is swallowed: waking the screen must not fire a gesture
+  if (screenAsleep) { if (down) wakeScreen(); wasDown = down; return; }
   if (screen != SCR_TIMER) { wasDown = down; return; }
   if (down && !holdFired && downX < 240 && millis() - downAt >= 1000) {
     holdFired = true;
@@ -345,6 +380,7 @@ void setup() {
   Wire.beginTransmission(0x20); Wire.write(0x01); Wire.write(0xFF); Wire.endTransmission();
   delay(50);
   if (!gfx->begin(40000000)) Serial.println("[LCD] panel begin failed");
+  panel = (Arduino_ST7796 *)gfx;  // keep panel handle before gfx may become the canvas
   gfx->setRotation(1);
   pinMode(25, OUTPUT);       // backlight (dash_35 kBacklightPin)
   digitalWrite(25, HIGH);
@@ -391,6 +427,8 @@ void loop() {
     int up = WiFi.status() == WL_CONNECTED ? 1 : 0;
     if (up != wifiShown) { wifiShown = up; drawWifiLine(); flush(); }
     updateIdleClock();
+    // screen sleep on the idle clock only; a running timer stays lit
+    if (!screenAsleep && millis() - lastTouchMs >= SCREEN_OFF_MS) sleepScreen();
   } else {
     drawDigits();
     if (millis() - lastBeacon > BEACON_TIMEOUT_MS) {
