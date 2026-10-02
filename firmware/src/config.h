@@ -16,4 +16,6 @@
 // POSIX TZ string for configTzTime, e.g. "PST8PDT,M3.2.0,M11.1.0".
 #define TZ_POSIX "CST-8"
 
-#define SYNC_INTERVAL_MS 60000  // Todoist poll, list screen only
+// LAN trigger (tools/timebox-relay.mjs, see ../docs/firmware-v2.md)
+#define BEACON_PORT 4242  // UDP: relay broadcasts timer beacons here
+#define RELAY_PORT  4241  // UDP: device unicasts extend/logstop events here
