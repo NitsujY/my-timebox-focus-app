@@ -41,6 +41,7 @@ http
         res.end("ok");
       });
     } else if (path === "/state" && req.method === "DELETE") {
+      if (state) { sendBye(state.session); byePending = state.session; }
       state = null;
       res.end("ok");
     } else if (path === "/events" && req.method === "GET") {
@@ -74,6 +75,16 @@ function subnetBroadcasts() {
 }
 const BCASTS = subnetBroadcasts();
 
+// Explicit "session over" packet so the device reacts in ms instead of the
+// 8s beacon-timeout. DELETE is fire-and-forget from the app and mDNS may not
+// have resolved yet, so queue until deviceIP is known (or the device moves on).
+let byePending = null;
+const sendBye = (session) => {
+  const pkt = Buffer.from(`TB1 s=${session} bye=1`);
+  if (deviceIP) sock.send(pkt, BEACON_PORT, deviceIP);
+  for (const t of BCASTS) sock.send(pkt, BEACON_PORT, t);
+};
+
 const sock = dgram.createSocket({ type: "udp4", reuseAddr: true });
 sock.on("listening", () => {
   sock.setBroadcast(true);
@@ -91,6 +102,9 @@ sock.on("message", (msg) => {
   } else if (m.logstop != null) {
     events.push({ type: "logstop", session: m.s });
     console.log(`[relay] device log & stop`);
+  } else if (m.complete != null) {
+    events.push({ type: "complete", session: m.s });
+    console.log(`[relay] device mark complete`);
   }
 });
 sock.bind(EVENT_PORT);
@@ -111,6 +125,7 @@ async function rediscover() {
       deviceIP = address;
       console.log(`[relay] discovered timebox.local → ${address} (unicast beacons)`);
     }
+    if (byePending) { sendBye(byePending); byePending = null; console.log(`[relay] bye → ${address}`); }
   } catch {
     if (deviceIP) { console.log(`[relay] lost timebox.local — broadcast only`); deviceIP = null; }
   }
@@ -119,7 +134,13 @@ setInterval(rediscover, 10_000);
 setTimeout(rediscover, 1000);
 
 setInterval(() => {
-  if (!state || Date.now() - lastPostAt > STATE_TTL_MS) return;
+  if (state && Date.now() - lastPostAt > STATE_TTL_MS) {
+    // app died without a DELETE — retire it so the device gets the fast bye
+    sendBye(state.session);
+    byePending = state.session;
+    state = null;
+  }
+  if (!state) return;
   const title = String(state.title ?? "").replace(/\s+/g, " ").slice(0, 60);
   const pkt = Buffer.from(
     `TB1 s=${state.session} id=${state.id} end=${Math.floor(state.end / 1000)} min=${state.minutes} t=${title}`,

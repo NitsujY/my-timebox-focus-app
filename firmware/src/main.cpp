@@ -1,6 +1,6 @@
 // ESP32 Timebox Companion v2 — triggered countdown display, see ../docs/firmware-v2.md.
 // Idle clock until the app starts a timer; LAN beacons via tools/timebox-relay.mjs.
-// Left-half hold = log & stop, right-half tap = +5 min (mirrors the web app).
+// Left hold = log & stop, right tap = +5 min, right hold = mark complete (mirrors the web app).
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
@@ -82,6 +82,7 @@ static void serveLogs() {
 
 static void drawTimer();  // defined below, used by pollUdp
 static void drawIdle();     // defined below, used by wakeScreen
+static void goIdle();       // defined below, used by pollUdp (bye packet)
 
 // ---- screen sleep: idle clock goes fully dark after SCREEN_OFF_MS (see config.h) ----
 static void wakeScreen() {
@@ -165,7 +166,13 @@ static void pollUdp() {
   relayKnown = true;
   // leading space: kv() matches " key=", which the first key would miss
   String s = " " + String(buf + 4);
-  String sid = kv(s, "s"), id = kv(s, "id");
+  String sid = kv(s, "s");
+  // explicit end-of-session: drop straight to idle, no 8s beacon-timeout wait
+  if (kv(s, "bye") == "1") {
+    if (haveSess && sid == sess.id) { logLine("[BEACON] bye — session ended"); goIdle(); }
+    return;
+  }
+  String id = kv(s, "id");
   long end = kv(s, "end").toInt();
   int min = kv(s, "min").toInt();
   int ti = s.indexOf(" t=");
@@ -239,9 +246,21 @@ static void drawWifiLine() {
     text("wifi disconnected — reconnecting...", 240, 274, 1, C_ACCENT, C_BG, true);
 }
 
+// touch feedback: accent bar under the pressed half — proves the touch
+// registered and shows which zone it mapped to (diagnoses axis flips)
+static int touchBarShown = -1;  // 0=left, 1=right, -1=none
+static void drawTouchBar(int zone) {
+  if (zone == touchBarShown) return;
+  if (touchBarShown >= 0) gfx->fillRect(touchBarShown * 240, 312, 240, 6, C_BG);
+  if (zone >= 0) gfx->fillRect(zone * 240, 312, 240, 6, C_ACCENT);
+  touchBarShown = zone;
+  flush();
+}
+
 static void drawIdle() {
   gfx->fillScreen(C_BG);
   lastMinuteShown = -1;
+  touchBarShown = -1;  // fillScreen wiped the bar
   struct tm tm;
   if (getLocalTime(&tm, 0) && tm.tm_year >= 124) {
     char buf[8], dbuf[12];
@@ -296,11 +315,12 @@ static void drawDigits() {
 static void drawTimer() {
   gfx->fillScreen(C_BG);
   lastShownS = -1;
+  touchBarShown = -1;  // fillScreen wiped the bar
   String title = sess.title;
   while (title.length() && title.length() * 12 > 460) title.remove(title.length() - 1);
   text(title, 240, 36, 2, C_MUTED, C_BG, true);
   text("hold = log & stop", 120, 298, 1, C_DIM, C_BG, true);
-  text("tap = +5 min", 360, 298, 1, C_DIM, C_BG, true);
+  text("tap +5 / hold = done", 360, 298, 1, C_DIM, C_BG, true);
   drawDigits();
   flush();
 }
@@ -332,7 +352,18 @@ static void doLogStop() {
   goIdle();
 }
 
-// ---- touch gestures: left hold = log & stop, right tap = +5 ----
+// right-half hold: app logs as completed and closes the task itself
+// (it owns the close/move pref and posts the ✓ completed comment — no TLS here)
+static void doComplete() {
+  sendEvent("complete=1");
+  ignoredSess = sess.id;
+  text("marked complete", 240, 220, 2, C_ACCENT, C_BG, true);
+  flush();
+  delay(800);
+  goIdle();
+}
+
+// ---- touch gestures: left hold = log & stop, right tap = +5, right hold = complete ----
 static bool wasDown = false;
 static uint32_t downAt = 0;
 static int downX = 0;
@@ -343,12 +374,15 @@ static void handleTouch(bool down, int16_t x) {
   if (down && !wasDown) { downAt = millis(); downX = x; holdFired = false; logLine(String("[TOUCH] down x=") + x + (screen == SCR_TIMER ? " (timer)" : " (idle)")); }
   // wake tap is swallowed: waking the screen must not fire a gesture
   if (screenAsleep) { if (down) wakeScreen(); wasDown = down; return; }
+  // visible feedback: accent bar under the half your finger mapped to
+  drawTouchBar(down ? (x < 240 ? 0 : 1) : -1);
   if (screen != SCR_TIMER) { wasDown = down; return; }
-  if (down && !holdFired && downX < 240 && millis() - downAt >= 1000) {
+  if (down && !holdFired && millis() - downAt >= 1000) {
     holdFired = true;
-    doLogStop();
+    if (downX < 240) doLogStop();   // left hold = log & stop
+    else doComplete();              // right hold = mark complete
   } else if (!down && wasDown && !holdFired && downX >= 240 && millis() - downAt < 1000) {
-    doExtend();
+    doExtend();                     // right tap = +5
   }
   wasDown = down;
 }
