@@ -51,6 +51,7 @@ enum Screen { SCR_IDLE, SCR_TIMER };
 static Screen screen = SCR_IDLE;
 static int lastMinuteShown = -1;
 static long lastShownS = -1;
+static int lastHintS = -1;        // last pre-sleep hint second drawn (-1 = none)
 static uint32_t lastTouchMs = 0;  // last touch press (screen-sleep activity)
 static uint32_t screenOffMs = SCREEN_OFF_MS;  // app-overridable, persisted in NVS "tb"/"soff" (0 = never)
 
@@ -82,9 +83,10 @@ static void serveLogs() {
   c.stop();
 }
 
-static void drawTimer();  // defined below, used by pollUdp
-static void drawIdle();     // defined below, used by wakeScreen
-static void goIdle();       // defined below, used by pollUdp (bye packet)
+static void drawTimer();        // defined below, used by pollUdp
+static void drawIdle();         // defined below, used by wakeScreen
+static void goIdle();           // defined below, used by pollUdp (bye packet)
+static void drawStatusIcons();  // defined below, used by applyConfig
 
 // ---- screen sleep: idle clock goes fully dark after SCREEN_OFF_MS (see config.h) ----
 static void wakeScreen() {
@@ -100,7 +102,7 @@ static void wakeScreen() {
 }
 static void sleepScreen() {
   if (screenAsleep) return;
-  logLine("[SCR] sleep (idle timeout)");
+  logLine(String("[SCR] sleep (idle timeout ") + (screenOffMs / 60000) + "m)");
   digitalWrite(25, LOW);    // backlight off
   panel->displayOff();      // SLPIN — panel truly inert, GRAM retained
   screenAsleep = true;
@@ -168,6 +170,7 @@ static void applyConfig(const char* body) {
   nvs.begin("tb", false);
   nvs.putUInt("soff", ms);
   nvs.end();
+  if (!screenAsleep && screen == SCR_IDLE) { drawStatusIcons(); flush(); }  // refresh the moon badge live
   logLine(String("[CFG] screen off after ") + (sec ? String(sec / 60) + "m" : String("never")));
 }
 
@@ -258,13 +261,31 @@ static void commentTaskBg(void* p) {
 }
 
 // ---- drawing ----
-// small status line: "wifi <ip>" when connected, warning when not
-static void drawWifiLine() {
-  gfx->fillRect(0, 272, 480, 14, C_BG);
+// status icons, bottom center: wifi fan (accent = disconnected) + crescent moon
+// with the screen-off minutes badge (∞ = never) — replaces the old text line
+static void drawWifiIcon(int x, int y, uint16_t c) {
+  for (int i = 0; i < 3; i++) {
+    int r = 4 + i * 3;
+    for (int a = 25; a <= 155; a += 3) {
+      float rad = a * 0.0174533f;
+      gfx->fillCircle(x + (int)(r * cosf(rad)), y - (int)(r * sinf(rad)), 1, c);
+    }
+  }
+  gfx->fillCircle(x, y - 1, 2, c);
+}
+static void drawMoonIcon(int x, int y, uint16_t c) {
+  gfx->fillCircle(x, y - 4, 5, c);
+  gfx->fillCircle(x + 3, y - 6, 4, C_BG);
+}
+static void drawStatusIcons() {
+  gfx->fillRect(0, 268, 480, 20, C_BG);
+  gfx->fillRect(0, 304, 480, 10, C_BG);  // the IP readout zone
+  drawWifiIcon(200, 282, WiFi.status() == WL_CONNECTED ? C_DIM : C_ACCENT);
+  drawMoonIcon(244, 282, C_DIM);
+  text(screenOffMs ? String(screenOffMs / 60000) : String("*"), 258, 278, 1, C_DIM, C_BG);  // * = never
+  // small IP, bottom right — so you know what to ping (subnet moves happen)
   if (WiFi.status() == WL_CONNECTED)
-    text("wifi " + WiFi.localIP().toString(), 240, 274, 1, C_DIM, C_BG, true);
-  else
-    text("wifi disconnected — reconnecting...", 240, 274, 1, C_ACCENT, C_BG, true);
+    text(WiFi.localIP().toString(), 470 - WiFi.localIP().toString().length() * 6, 306, 1, C_DIM, C_BG);
 }
 
 // touch feedback: accent bar under the pressed half — proves the touch
@@ -281,6 +302,7 @@ static void drawTouchBar(int zone) {
 static void drawIdle() {
   gfx->fillScreen(C_BG);
   lastMinuteShown = -1;
+  lastHintS = -1;      // fillScreen wiped the hint
   touchBarShown = -1;  // fillScreen wiped the bar
   struct tm tm;
   if (getLocalTime(&tm, 0) && tm.tm_year >= 124) {
@@ -291,8 +313,15 @@ static void drawIdle() {
     text(dbuf, 240, 190, 2, C_MUTED, C_BG, true);
     lastMinuteShown = tm.tm_min;
   }
-  text("waiting for timer...", 240, 296, 1, C_DIM, C_BG, true);
-  drawWifiLine();
+  text("waiting for timer...", 240, 292, 1, C_DIM, C_BG, true);
+  drawStatusIcons();
+  flush();
+}
+
+// pre-sleep hint: a few seconds of warning so a tap can still cancel it
+static void drawSleepHint(int secs) {
+  gfx->fillRect(0, 216, 480, 20, C_BG);
+  text("screen off in " + String(secs) + "s — tap to stay awake", 240, 220, 1, C_MUTED, C_BG, true);
   flush();
 }
 
@@ -481,13 +510,24 @@ void loop() {
   handleTouch(readTouch(tx, ty), tx);
 
   if (screen == SCR_IDLE) {
-    // live wifi hint: redraw the status line when the link state flips
+    // live wifi hint: redraw the status icons when the link state flips
     static int wifiShown = -1;
     int up = WiFi.status() == WL_CONNECTED ? 1 : 0;
-    if (up != wifiShown) { wifiShown = up; drawWifiLine(); flush(); }
+    if (up != wifiShown) { wifiShown = up; drawStatusIcons(); flush(); }
     updateIdleClock();
     // screen sleep on the idle clock only; a running timer stays lit (0 = never)
-    if (screenOffMs && !screenAsleep && millis() - lastTouchMs >= screenOffMs) sleepScreen();
+    if (screenOffMs && !screenAsleep) {
+      uint32_t idle = millis() - lastTouchMs;
+      if (idle >= screenOffMs) { sleepScreen(); lastHintS = -1; }
+      else if (idle >= screenOffMs - 5000) {  // 5s warning, tap cancels via lastTouchMs
+        int s = (int)((screenOffMs - idle + 999) / 1000);
+        if (s != lastHintS) { lastHintS = s; drawSleepHint(s); }
+      } else if (lastHintS >= 0) {  // woke during the warning window — clear it
+        lastHintS = -1;
+        gfx->fillRect(0, 216, 480, 20, C_BG);
+        flush();
+      }
+    }
   } else {
     drawDigits();
     if (millis() - lastBeacon > BEACON_TIMEOUT_MS) {
