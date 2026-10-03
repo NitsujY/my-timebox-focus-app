@@ -46,7 +46,19 @@ Event, device → relay, UDP port 4241:
 ```
 TB1 s=<sessionId> extend=300
 TB1 s=<sessionId> logstop=1
+TB1 s=<sessionId> complete=1
 ```
+
+Config, relay → device, UDP port 4242 (on change, then re-sent every 10 s):
+
+```
+TB1 cfg=1 soff=<screenOffSeconds>
+```
+
+- `soff` is the idle screen-off timeout in seconds (`0` = never sleep).
+- The device applies config live and persists it to flash (NVS), so the last
+  pushed config survives reboots and relay downtime. Config packets are not
+  written to the device's log ring (the 10 s re-send would flood it).
 
 ### App side (`src/deviceBeacon.ts`, wired into `Timer` in `src/App.tsx`)
 
@@ -61,7 +73,8 @@ it off mid-timer stops the beacons (device returns to idle within 8 s).
 | Every 10 s while running | re-`POST /state` (heartbeat + carries current `end`) |
 | `extend(m)` | re-`POST /state` with the new `end` |
 | Timer unmounts (complete / log & stop / ✕) | `DELETE /state` — beacons stop |
-| Every 5 s while running | `GET /events` — `extend` → `extend(5)`, `logstop` → log & exit, same as the app's own buttons |
+| Every 5 s while running | `GET /events` — `extend` → `extend(5)`, `logstop` → log & exit, `complete` → log as completed + close task, same as the app's own buttons |
+| Enabling the bridge, or changing the screen-off pref | `POST /config {screenOffMin}` — relay beacons `TB1 cfg=1 soff=<sec>` |
 
 Everything is fire-and-forget: if the relay isn't running, the timer works
 exactly as before (device just stays idle).
@@ -70,6 +83,8 @@ exactly as before (device just stays idle).
 
 - Beacons every 2 s while state exists and the last `POST /state` is < 30 s
   old (app crash / closed tab stops the beacons on its own).
+- App-pushed device config (`POST /config`) is beaconed on change and re-sent
+  every 10 s so a device that boots later still picks it up.
 - Device events are queued and drained by `GET /events`.
 
 ### Device behavior
@@ -81,6 +96,8 @@ exactly as before (device just stays idle).
 4. After a device-side **log & stop**, ignore that `s=` until a new session
    id appears (the app may keep beaconing briefly before it processes the
    event).
+5. Config beacons (`TB1 cfg=1 …`) are applied live and persisted to flash
+   (NVS); `soff` sets the idle screen-off timeout (`0` = never).
 
 ### Why not the alternatives (kept for the record)
 
@@ -103,7 +120,9 @@ exactly as before (device just stays idle).
   - `MM:SS` centered, Adafruit **size 12** (5 chars ≈ 360×96 px).
   - Overtime: digits turn accent orange and show `+MM:SS`.
   - Bottom hints, size 1, dim: left half `hold = log & stop`, right half
-    `tap = +5 min`.
+    `tap = +5 · hold = done`.
+  - An accent bar under the pressed half appears while touching — instant
+    feedback that the touch registered and which zone (left/right) it mapped to.
 
 ## Touch — two zones (mirrors the app)
 
@@ -113,11 +132,14 @@ Screen split vertically at x = 240:
 |---|---|---|---|
 | Left half (x < 240) | **tap-and-hold 1 s** | Post session comment to Todoist, send `logstop` event, back to idle | `Not done — log & stop` → `logAndExit(false)` |
 | Right half (x ≥ 240) | **single tap** | `end += 300`, send `extend=300` event, keep counting | `+5 min` → `extend(5)` |
+| Right half (x ≥ 240) | **tap-and-hold 1 s** | Send `complete=1` event, back to idle | `Mark complete` → `logAndExit(true)` + complete task |
 
-Hold-to-confirm on the left because it terminates the session; extend is
-harmless so it gets the cheap gesture. The app processes both events through
-the same `extend()` / `logAndExit(false)` paths as its own buttons, so the
-behavior is identical no matter which side you touch.
+Hold-to-confirm on both halves because they terminate the session; extend is
+harmless so it gets the cheap gesture. The app processes all events through
+the same `extend()` / `logAndExit()` / `onComplete()` paths as its own buttons,
+so the behavior is identical no matter which side you touch. On `complete` the
+app also closes the task per the user's complete-action pref and posts the
+`✓ completed` comment — the device deliberately does neither (no TLS needed).
 
 ### Session comment (must match the app exactly)
 
@@ -134,7 +156,6 @@ v2 — completing stays in the app.
 - No task list, no project picker, no duration chips on device
 - No pause on device (pause is app-only; the device keeps counting to the
   wall-clock `end` — accepted divergence, same as the app showing real time)
-- No `Mark complete` on device — the app owns task completion
 - Still no TLS CA pinning, alarm sound, or battery icon
 
 ## Keep from v1

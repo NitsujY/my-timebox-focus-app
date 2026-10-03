@@ -11,6 +11,7 @@
 #include <ArduinoJson.h>
 #include <Arduino_GFX_Library.h>
 #include <Wire.h>
+#include <Preferences.h>
 #include "config.h"
 #include "secrets.h"
 
@@ -51,6 +52,7 @@ static Screen screen = SCR_IDLE;
 static int lastMinuteShown = -1;
 static long lastShownS = -1;
 static uint32_t lastTouchMs = 0;  // last touch press (screen-sleep activity)
+static uint32_t screenOffMs = SCREEN_OFF_MS;  // app-overridable, persisted in NVS "tb"/"soff" (0 = never)
 
 static WiFiUDP udp;
 static IPAddress relayIP;
@@ -153,6 +155,22 @@ static String kv(const String& s, const char* key) {
   return j < 0 ? s.substring(i) : s.substring(i, j);
 }
 
+// ---- runtime config from the app (relay → "TB1 cfg=1 soff=<sec>", docs/firmware-v2.md) ----
+static void applyConfig(const char* body) {
+  String s = " " + String(body);
+  String soff = kv(s, "soff");  // idle screen-off timeout, seconds; 0 = never
+  if (!soff.length()) return;
+  uint32_t sec = (uint32_t)soff.toInt();
+  uint32_t ms = sec == 0 ? 0 : (sec < 10 ? 10 : sec) * 1000UL;  // clamp: min 10s
+  if (ms == screenOffMs) return;
+  screenOffMs = ms;
+  Preferences nvs;
+  nvs.begin("tb", false);
+  nvs.putUInt("soff", ms);
+  nvs.end();
+  logLine(String("[CFG] screen off after ") + (sec ? String(sec / 60) + "m" : String("never")));
+}
+
 static void pollUdp() {
   int n = udp.parsePacket();
   if (!n) return;
@@ -160,6 +178,9 @@ static void pollUdp() {
   int len = udp.read(buf, sizeof(buf) - 1);
   if (len <= 0) return;
   buf[len] = 0;
+  // config packet: apply + persist quietly — the relay re-sends every 10s, and
+  // logging each one would flood the 24-line log ring
+  if (!strncmp(buf, "TB1 cfg=1 ", 10)) { applyConfig(buf + 10); return; }
   logLine(String("[UDP] rx ") + len + "B from " + udp.remoteIP().toString() + ": " + String(buf).substring(0, 40));
   if (strncmp(buf, "TB1 ", 4)) return;
   relayIP = udp.remoteIP();  // device events unicast back to whoever beacons
@@ -408,6 +429,10 @@ static void wifiEnsure() {
 // ---- Arduino ----
 void setup() {
   Serial.begin(115200);
+  Preferences nvs;  // last app-pushed config survives reboots
+  nvs.begin("tb", true);
+  screenOffMs = nvs.getUInt("soff", SCREEN_OFF_MS);
+  nvs.end();
   lcdReset();
   // touch chip is held in reset by the expander at power-on — release all pins high
   Wire.beginTransmission(0x20); Wire.write(0x03); Wire.write(0x00); Wire.endTransmission();
@@ -461,8 +486,8 @@ void loop() {
     int up = WiFi.status() == WL_CONNECTED ? 1 : 0;
     if (up != wifiShown) { wifiShown = up; drawWifiLine(); flush(); }
     updateIdleClock();
-    // screen sleep on the idle clock only; a running timer stays lit
-    if (!screenAsleep && millis() - lastTouchMs >= SCREEN_OFF_MS) sleepScreen();
+    // screen sleep on the idle clock only; a running timer stays lit (0 = never)
+    if (screenOffMs && !screenAsleep && millis() - lastTouchMs >= screenOffMs) sleepScreen();
   } else {
     drawDigits();
     if (millis() - lastBeacon > BEACON_TIMEOUT_MS) {

@@ -22,4 +22,6 @@
 
 // Screen sleep: idle clock goes fully dark (backlight + ST7796 SLPIN) after this.
 // Active timer keeps the screen on; touch or a beacon wakes it.
+// Default only — the app overrides it at runtime via the relay
+// ("TB1 cfg=1 soff=<sec>", ../docs/firmware-v2.md); the override persists in NVS.
 #define SCREEN_OFF_MS (5 * 60 * 1000UL)

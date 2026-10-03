@@ -14,6 +14,7 @@ const STATE_TTL_MS = 30_000; // app heartbeats every 10s; crash/close stops beac
 
 let state = null; // { session, id, title, minutes, end }
 let lastPostAt = 0;
+let config = null; // { screenOffMin } — beaconed on change + every 10s
 const events = []; // drained by GET /events
 
 const cors = {
@@ -44,6 +45,19 @@ http
       if (state) { sendBye(state.session); byePending = state.session; }
       state = null;
       res.end("ok");
+    } else if (path === "/config" && req.method === "POST") {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        try {
+          const c = JSON.parse(body);
+          // minutes on the wire; 0 = never sleep. Clamped to a sane desk range.
+          config = { screenOffMin: Math.max(0, Math.min(1440, Math.round(+c.screenOffMin || 0))) };
+          sendConfig();
+          console.log(`[relay] config: screen off ${config.screenOffMin ? config.screenOffMin + "m" : "never"}`);
+        } catch { /* keep previous config */ }
+        res.end("ok");
+      });
     } else if (path === "/events" && req.method === "GET") {
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify(events.splice(0)));
@@ -108,6 +122,17 @@ sock.on("message", (msg) => {
   }
 });
 sock.bind(EVENT_PORT);
+
+// App-pushed device config (docs/firmware-v2.md): beaconed on change, then
+// every 10 s so a device that boots later still picks it up. The device
+// persists it to flash, so this is a hint, not a lifeline.
+const sendConfig = () => {
+  if (!config) return;
+  const pkt = Buffer.from(`TB1 cfg=1 soff=${Math.round(config.screenOffMin * 60)}`);
+  if (deviceIP) sock.send(pkt, BEACON_PORT, deviceIP); // unicast once discovered
+  for (const t of BCASTS) sock.send(pkt, BEACON_PORT, t);
+};
+setInterval(sendConfig, 10_000);
 
 // ---- device discovery via mDNS (timebox.local) → unicast beacons ----
 // The VPN hijacks the limited broadcast (255.255.255.255 → utun5), but the

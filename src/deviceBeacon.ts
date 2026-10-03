@@ -41,7 +41,14 @@ export function deviceStop() {
   void call("/state");
 }
 
-export type DeviceEvent = { type: "extend" | "logstop"; minutes?: number; session?: string };
+// push device-config prefs (screen-off timeout etc.) — the relay beacons them
+// to the device, which applies + persists them (docs/firmware-v2.md)
+export function deviceConfig(screenOffMin: number) {
+  if (!enabled) return;
+  void call("/config", { screenOffMin });
+}
+
+export type DeviceEvent = { type: "extend" | "logstop" | "complete"; minutes?: number; session?: string };
 
 export async function deviceEvents(): Promise<DeviceEvent[]> {
   if (!enabled || !session) return [];

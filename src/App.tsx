@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { handleOAuthCallback, load, refreshToken, save, startOAuth } from "./auth";
 import {
+  deviceConfig,
   deviceEvents,
   deviceSetEnabled,
   deviceStart,
@@ -31,6 +32,7 @@ type Prefs = {
   celebrate: boolean;
   defaultMinutes: number;
   deviceOn: boolean; // ESP32 companion display via LAN relay (docs/firmware-v2.md)
+  screenOffMin: number; // device idle screen-off timeout, minutes (0 = never)
 };
 const DEFAULT_PREFS: Prefs = {
   focusCap: 3,
@@ -42,6 +44,7 @@ const DEFAULT_PREFS: Prefs = {
   celebrate: true,
   defaultMinutes: 5,
   deviceOn: false,
+  screenOffMin: 5,
 };
 
 type Task = {
@@ -239,6 +242,12 @@ export default function App() {
 
   // device bridge follows the toggle; turning it off stops any live beacons
   useEffect(() => deviceSetEnabled(prefs.deviceOn), [prefs.deviceOn]);
+
+  // push device-config prefs on toggle/change — the relay beacons them to the
+  // device, which applies + persists them
+  useEffect(() => {
+    if (prefs.deviceOn) deviceConfig(prefs.screenOffMin);
+  }, [prefs.deviceOn, prefs.screenOffMin]);
 
   const updateRoles = (r: RoleMap) => {
     setRoles(r);
@@ -1895,6 +1904,7 @@ function Timer({
   onTickRef.current = onTick;
   // assigned below logAndExit so the interval can trigger the walk-away auto-stop
   const stopRef = useRef<() => void>(() => {});
+  const completeRef = useRef<() => void>(() => {}); // device "mark complete" event
 
   const canNotify = typeof Notification !== "undefined";
 
@@ -1905,6 +1915,7 @@ function Timer({
     const ev = setInterval(async () => {
       for (const e of await deviceEvents()) {
         if (e.type === "extend") extend(e.minutes ?? 5); // device right-half tap
+        else if (e.type === "complete") completeRef.current(); // device right-half hold
         else stopRef.current(); // device left-half hold → log & stop
       }
     }, 5000);
@@ -2001,6 +2012,10 @@ function Timer({
   stopRef.current = () => {
     logAndExit(false); // auto-stop logs as abandoned; overrun is still counted in actual_minutes
     onExit();
+  };
+  completeRef.current = () => {
+    logAndExit(true); // device mark complete — same path as the button
+    onComplete();
   };
 
   const tbtn =
@@ -2630,6 +2645,24 @@ function SettingsPage({
               className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${prefs.deviceOn ? "left-4.5" : "left-0.5"}`}
             />
           </button>
+        </div>
+        <div className={row}>
+          <span className="text-[14px]">Screen off after</span>
+          <div className="flex gap-1">
+            {[1, 5, 15, 30, 0].map((m) => (
+              <button
+                key={m}
+                className={`rounded-md border px-3 py-1 text-[13px] ${
+                  prefs.screenOffMin === m
+                    ? "border-zinc-600 text-zinc-200"
+                    : "border-zinc-800 text-zinc-500 hover:bg-zinc-800"
+                }`}
+                onClick={() => onPrefs({ screenOffMin: m })}
+              >
+                {m === 0 ? "Never" : `${m}m`}
+              </button>
+            ))}
+          </div>
         </div>
         <p className="text-[12px] text-zinc-600">
           Big-digit countdown on the desk display while a timer runs. Run{" "}
