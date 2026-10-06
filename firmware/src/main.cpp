@@ -14,6 +14,9 @@
 #include "secrets.h"
 
 // pins from esp32-drive-orbit dash_35 (dashboard_display.cpp)
+// NOTE: Arduino_ESP32SPIDMA would be ideal (frees the CPU during flush) but its
+// ISR handlers don't fit this board's IRAM alongside WiFi+BLE (iram0 overflow).
+// The polling ESP32SPI is fine as long as the BLE stack is NimBLE (light ISRs).
 static Arduino_DataBus *bus = new Arduino_ESP32SPI(27 /*DC*/, 5 /*CS*/, 18 /*SCK*/, 23 /*MOSI*/, 19 /*MISO*/);
 static Arduino_GFX *gfx = new Arduino_ST7796(bus, GFX_NOT_DEFINED /*RST via TCA9554*/, 0, true /*ips*/);
 // PSRAM back buffer, flushed once per frame — kills flicker (same trick as dash_35).
@@ -349,13 +352,19 @@ static void drawDigits() {
   long left = sess.end - (long)time(NULL);
   if (left == lastShownS) return;
   lastShownS = left;
-  char buf[10];
-  if (left >= 0) snprintf(buf, sizeof(buf), "%02ld:%02ld", left / 60, left % 60);
-  else {
-    long ov = -left;
-    if (ov > 5999) ov = 5999;  // ponytail: cap +99:59, 6 chars at size 12 = 432px
-    snprintf(buf, sizeof(buf), "+%ld:%02ld", ov / 60, ov % 60);
-  }
+  // manual MM:SS — GCC 8.4's -Werror=format-truncation can't prove snprintf is
+  // bounded here, so build the (capped) 6-char string by hand instead
+  bool neg = left < 0;
+  long s = neg ? -left : left;
+  if (s > 5999) s = 5999;  // cap 99:59
+  int mm = (int)(s / 60), ss = (int)(s % 60);
+  char buf[8];
+  char* p = buf;
+  if (neg) *p++ = '+';
+  *p++ = char('0' + mm / 10); *p++ = char('0' + mm % 10);
+  *p++ = ':';
+  *p++ = char('0' + ss / 10); *p++ = char('0' + ss % 10);
+  *p = 0;
   gfx->fillRect(20, 96, 440, 112, C_BG);
   text(buf, 240, 104, 12, left < 0 ? C_ACCENT : C_TEXT, C_BG, true);
   flush();
