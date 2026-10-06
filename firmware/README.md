@@ -4,9 +4,9 @@ Triggered countdown display for the Timebox Focus web app: idle clock until
 you start a timer in the app, then big digits. Design contract:
 [../docs/firmware-v2.md](../docs/firmware-v2.md). Hardware: `SPEC.md`.
 
-The device is driven over LAN by **UDP broadcast beacons** from
-`../tools/timebox-relay.mjs` running on your laptop — no Todoist polling on
-the device anymore (Todoist is only used for the log & stop comment).
+The web app drives the device directly over **HTTP** — the device runs a tiny
+server on `http://timebox.local:4242`. No relay, no Todoist polling on the
+device anymore (Todoist is only used for the log & stop comment).
 
 ## Setup
 
@@ -16,7 +16,7 @@ the device anymore (Todoist is only used for the log & stop comment).
    - `TODOIST_TOKEN` — Todoist → Settings → Integrations → Developer
      (only used to post the "log & stop" session comment)
 3. Set your timezone in `src/config.h` (`TZ_POSIX`, e.g. `"CST-8"`).
-4. On the laptop: `npm run relay` (repo root) — keep it running next to the app.
+4. Nothing to run on the laptop — the app talks to the device directly.
 
 ## Build, flash, monitor
 
@@ -34,7 +34,9 @@ TCA9554 at power-on — `setup()` releases all expander pins high to wake it.
 
 ## Usage
 
-1. Start the relay (`npm run relay`) and the web app on the laptop.
+1. Serve the web app over HTTP (`npm run dev`, or the built app from a LAN IP)
+   — the device uses plain HTTP to `timebox.local`, which the HTTPS-deployed
+   app can't reach (mixed content). Use a Todoist API token for local dev.
 2. In the app: Settings → ESP32 companion display → **Trigger device over LAN**
    (off by default).
 3. Start a timer in the app → the device shows the countdown within a second.
@@ -47,9 +49,11 @@ TCA9554 at power-on — `setup()` releases all expander pins high to wake it.
 
 - If touch taps land mirrored/rotated, flip `TOUCH_SWAP_XY` / `TOUCH_INV_X` /
   `TOUCH_INV_Y` in `src/config.h` and reflash.
-- If the device never reacts: check that the relay is running
-  (`curl 127.0.0.1:8787/health`), that laptop and device share a network,
-  and that the network allows UDP broadcast (some guest/AP-isolated WLANs don't).
+- If the device never reacts: check that it resolves
+  (`ping timebox.local`), that its HTTP server answers
+  (`curl http://timebox.local:4242/health` → `ok`), and that you're running
+  the app over HTTP (not the HTTPS deploy). Peek at the device without serial:
+  `curl http://timebox.local:4242/logs`.
 
 ## v2 scope cuts (per docs/firmware-v2.md)
 

@@ -16,12 +16,11 @@
 // POSIX TZ string for configTzTime, e.g. "PST8PDT,M3.2.0,M11.1.0".
 #define TZ_POSIX "CST-8"
 
-// LAN trigger (tools/timebox-relay.mjs, see ../docs/firmware-v2.md)
-#define BEACON_PORT 4242  // UDP: relay broadcasts timer beacons here
-#define RELAY_PORT  4241  // UDP: device unicasts extend/logstop events here
+// LAN trigger: the app drives the device over plain HTTP (docs/firmware-v2.md)
+#define HTTP_PORT 4242  // POST /state · DELETE /state · POST /config · GET /events · GET /logs
 
 // Screen sleep: idle clock goes fully dark (backlight + ST7796 SLPIN) after this.
-// Active timer keeps the screen on; touch or a beacon wakes it.
-// Default only — the app overrides it at runtime via the relay
-// ("TB1 cfg=1 soff=<sec>", ../docs/firmware-v2.md); the override persists in NVS.
+// Active timer keeps the screen on; touch or a /state POST wakes it.
+// Default only — the app overrides it at runtime via POST /config
+// ({screenOffMin}, ../docs/firmware-v2.md); the override persists in NVS.
 #define SCREEN_OFF_MS (5 * 60 * 1000UL)

@@ -6,8 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview",
-    "relay": "node tools/timebox-relay.mjs"
+    "preview": "vite preview"
   },
   "dependencies": {
     "react": "^19.1.0",

@@ -1,9 +1,8 @@
 // ESP32 Timebox Companion v2 — triggered countdown display, see ../docs/firmware-v2.md.
-// Idle clock until the app starts a timer; LAN beacons via tools/timebox-relay.mjs.
+// Idle clock until the app starts a timer; the app drives it directly over HTTP.
 // Left hold = log & stop, right tap = +5 min, right hold = mark complete (mirrors the web app).
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiUdp.h>
 #include <WiFiServer.h>
 #include <ESPmDNS.h>
 #include <WiFiClientSecure.h>
@@ -44,7 +43,7 @@ static Session sess;
 static bool haveSess = false;
 static String ignoredSess;          // after device-side log & stop, until a new session id
 static uint32_t lastBeacon = 0;
-#define BEACON_TIMEOUT_MS 8000      // relay beacons every 2s; 4 misses = session over
+#define BEACON_TIMEOUT_MS 25000     // app heartbeats every 10s; 2 misses + slack = session over
 #define EXTEND_S 300
 
 enum Screen { SCR_IDLE, SCR_TIMER };
@@ -55,37 +54,31 @@ static int lastHintS = -1;        // last pre-sleep hint second drawn (-1 = none
 static uint32_t lastTouchMs = 0;  // last touch press (screen-sleep activity)
 static uint32_t screenOffMs = SCREEN_OFF_MS;  // app-overridable, persisted in NVS "tb"/"soff" (0 = never)
 
-static WiFiUDP udp;
-static IPAddress relayIP;
-static bool relayKnown = false;
+// ---- HTTP server on port 4242: the app drives the device directly ----
+// POST /state {session,id,title,minutes,end} · DELETE /state · POST /config
+// {screenOffMin} · GET /events (JSON array, drains) · GET /logs (ring buffer).
+// CORS * + PNA so a browser page on localhost / a LAN IP can call it.
+static WiFiServer httpSrv(HTTP_PORT);
+static String httpBody;   // body of the in-flight request (state/config handlers read it)
 
-// ---- pull-based log server: curl http://<device>:4243/logs ----
-// ponytail: simplest OTA visibility without ArduinoOTA/mDNS. Ring buffer + raw TCP.
+// device → app events (extend / logstop / complete), drained by GET /events
+#define EVENT_SLOTS 8
+static String eventBuf[EVENT_SLOTS];
+static int eventHead = 0;
+
+// log ring (GET /logs) — simplest OTA visibility without serial
 #define LOG_LINES 24
 static String logBuf[LOG_LINES];
 static int logHead = 0;
-static WiFiServer logSrv(4243);
 static void logLine(const String& s) {
   Serial.println(s);
   logBuf[logHead] = s;
   logHead = (logHead + 1) % LOG_LINES;
 }
-static void serveLogs() {
-  WiFiClient c = logSrv.available();
-  if (!c || !c.connected()) return;
-  c.setTimeout(200);
-  c.print("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n");
-  for (int i = 0; i < LOG_LINES; i++) {
-    const String& l = logBuf[(logHead + i) % LOG_LINES];
-    if (l.length()) c.println(l);
-  }
-  c.flush();
-  c.stop();
-}
 
-static void drawTimer();        // defined below, used by pollUdp
+static void drawTimer();        // defined below, used by serveHttp
 static void drawIdle();         // defined below, used by wakeScreen
-static void goIdle();           // defined below, used by pollUdp (bye packet)
+static void goIdle();           // defined below, used by serveHttp (DELETE /state)
 static void drawStatusIcons();  // defined below, used by applyConfig
 
 // ---- screen sleep: idle clock goes fully dark after SCREEN_OFF_MS (see config.h) ----
@@ -147,23 +140,14 @@ static bool readTouch(int16_t &x, int16_t &y) {
   return true;
 }
 
-// ---- beacon parse: "TB1 s=.. id=.. end=.. min=.. t=<title to end>" ----
-static String kv(const String& s, const char* key) {
-  String k = String(" ") + key + "=";
-  int i = s.indexOf(k);
-  if (i < 0) return "";
-  i += k.length();
-  int j = s.indexOf(' ', i);
-  return j < 0 ? s.substring(i) : s.substring(i, j);
-}
-
-// ---- runtime config from the app (relay → "TB1 cfg=1 soff=<sec>", docs/firmware-v2.md) ----
-static void applyConfig(const char* body) {
-  String s = " " + String(body);
-  String soff = kv(s, "soff");  // idle screen-off timeout, seconds; 0 = never
-  if (!soff.length()) return;
-  uint32_t sec = (uint32_t)soff.toInt();
-  uint32_t ms = sec == 0 ? 0 : (sec < 10 ? 10 : sec) * 1000UL;  // clamp: min 10s
+// ---- runtime config from the app (POST /config {screenOffMin}, docs/firmware-v2.md) ----
+// minutes on the wire, matching the app's pref; 0 = never sleep. Persisted to NVS.
+static void applyConfigJson(const char* body) {
+  JsonDocument doc;
+  if (deserializeJson(doc, body)) return;
+  uint32_t min = (uint32_t)(doc["screenOffMin"] | -1L);
+  if (min == (uint32_t)-1L) return;
+  uint32_t ms = min == 0 ? 0 : min * 60000UL;
   if (ms == screenOffMs) return;
   screenOffMs = ms;
   Preferences nvs;
@@ -171,57 +155,101 @@ static void applyConfig(const char* body) {
   nvs.putUInt("soff", ms);
   nvs.end();
   if (!screenAsleep && screen == SCR_IDLE) { drawStatusIcons(); flush(); }  // refresh the moon badge live
-  logLine(String("[CFG] screen off after ") + (sec ? String(sec / 60) + "m" : String("never")));
+  logLine(String("[CFG] screen off after ") + (min ? String(min) + "m" : String("never")));
 }
 
-static void pollUdp() {
-  int n = udp.parsePacket();
-  if (!n) return;
-  char buf[257];
-  int len = udp.read(buf, sizeof(buf) - 1);
-  if (len <= 0) return;
-  buf[len] = 0;
-  // config packet: apply + persist quietly — the relay re-sends every 10s, and
-  // logging each one would flood the 24-line log ring
-  if (!strncmp(buf, "TB1 cfg=1 ", 10)) { applyConfig(buf + 10); return; }
-  logLine(String("[UDP] rx ") + len + "B from " + udp.remoteIP().toString() + ": " + String(buf).substring(0, 40));
-  if (strncmp(buf, "TB1 ", 4)) return;
-  relayIP = udp.remoteIP();  // device events unicast back to whoever beacons
-  relayKnown = true;
-  // leading space: kv() matches " key=", which the first key would miss
-  String s = " " + String(buf + 4);
-  String sid = kv(s, "s");
-  // explicit end-of-session: drop straight to idle, no 8s beacon-timeout wait
-  if (kv(s, "bye") == "1") {
-    if (haveSess && sid == sess.id) { logLine("[BEACON] bye — session ended"); goIdle(); }
-    return;
-  }
-  String id = kv(s, "id");
-  long end = kv(s, "end").toInt();
-  int min = kv(s, "min").toInt();
-  int ti = s.indexOf(" t=");
-  String title = ti < 0 ? "" : s.substring(ti + 3);
-  if (sid.isEmpty() || end <= 0) {
-    logLine(String("[UDP] dropped malformed: ") + buf);
-    return;
-  }
-  if (sid == ignoredSess) { lastBeacon = millis(); return; }
+// POST/DELETE /state {session,id,title,minutes,end} — end is unix ms on the wire
+static void applyStateJson(const char* body) {
+  JsonDocument doc;
+  if (deserializeJson(doc, body)) { logLine(String("[HTTP] bad /state json: ") + String(body).substring(0, 60)); return; }
+  const char* sid = doc["session"];
+  long long endMs = doc["end"] | 0LL;  // 13-digit unix ms — overflows 32-bit long on ESP32
+  if (!sid || !*sid || endMs <= 0) { logLine(String("[HTTP] dropped malformed /state: ") + String(body).substring(0, 60)); return; }
+  if (ignoredSess == sid) { lastBeacon = millis(); return; }
   bool isNew = !haveSess || sess.id != sid;
-  sess = {sid, id, title, end, min};
+  sess.id = sid;
+  sess.taskId = (const char*)(doc["id"] | "");
+  sess.title = (const char*)(doc["title"] | "");
+  sess.end = (long)(endMs / 1000);
+  sess.minPlanned = doc["minutes"] | 0;
   haveSess = true;
   lastBeacon = millis();
   if (screenAsleep) wakeScreen();  // new timer lights the screen up
   if (isNew && screen == SCR_TIMER) drawTimer();  // new session while showing old one
   else if (screen != SCR_TIMER) { screen = SCR_TIMER; drawTimer(); }
-  logLine(String("[BEACON] s=") + sid + " end=" + end + " '" + title + "'");
+  logLine(String("[STATE] s=") + sid + " end=" + sess.end + " '" + sess.title + "'");
 }
 
-static void sendEvent(const char* what) {
-  if (!relayKnown) return;
-  udp.beginPacket(relayIP, RELAY_PORT);
-  udp.printf("TB1 s=%s %s", sess.id.c_str(), what);
-  udp.endPacket();
-  Serial.printf("[EVENT] -> relay %s\n", what);
+// device → app event: buffered, drained by the app's GET /events poll
+static void sendEvent(const char* json) {
+  eventBuf[eventHead] = String("{\"type\":") + json + ",\"session\":\"" + sess.id + "\"}";
+  eventHead = (eventHead + 1) % EVENT_SLOTS;
+  Serial.printf("[EVENT] queued %s\n", json);
+}
+
+// ---- minimal HTTP/1.0 server: request line → optional body → dispatch ----
+static void httpReply(WiFiClient& c, const char* status, const char* ctype, const String& body) {
+  c.printf("HTTP/1.0 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
+           "Access-Control-Allow-Origin: *\r\n"
+           "Access-Control-Allow-Methods: GET,POST,DELETE,OPTIONS\r\n"
+           "Access-Control-Allow-Headers: content-type\r\n"
+           "Access-Control-Allow-Private-Network: true\r\n"
+           "Connection: close\r\n\r\n", status, ctype, (int)body.length());
+  c.print(body);
+}
+static void serveHttp() {
+  WiFiClient c = httpSrv.available();
+  if (!c || !c.connected()) return;
+  c.setTimeout(5000);  // generous: WiFi pre-tasks can starve loop() past 1s
+  String line = c.readStringUntil('\n'); line.trim();  // "METHOD /path HTTP/1.1"
+  int sp1 = line.indexOf(' '), sp2 = line.indexOf(' ', sp1 + 1);
+  if (sp1 < 0 || sp2 < 0) { c.stop(); return; }
+  String method = line.substring(0, sp1), path = line.substring(sp1 + 1, sp2);
+  int contentLen = 0;
+  while (true) {  // headers
+    String h = c.readStringUntil('\n'); h.trim();
+    if (!h.length()) break;
+    if (h.startsWith("Content-Length:") || h.startsWith("content-length:"))
+      contentLen = h.substring(15).toInt();
+  }
+  if (method == "OPTIONS") { httpReply(c, "204 No Content", "text/plain", ""); c.flush(); c.stop(); return; }
+  httpBody = "";
+  if (contentLen > 0 && contentLen <= 2048) {
+    httpBody.reserve(contentLen);
+    while ((int)httpBody.length() < contentLen && c.connected()) {
+      int a = c.available();
+      if (a) { httpBody += (char)c.read(); }
+      else delay(1);
+    }
+  }
+  if (path == "/state" && method == "POST") { applyStateJson(httpBody.c_str()); httpReply(c, "200 OK", "text/plain", "ok"); }
+  else if (path == "/state" && method == "DELETE") {
+    if (haveSess) { logLine("[STATE] DELETE — session ended"); goIdle(); }
+    httpReply(c, "200 OK", "text/plain", "ok");
+  }
+  else if (path == "/config" && method == "POST") { applyConfigJson(httpBody.c_str()); httpReply(c, "200 OK", "text/plain", "ok"); }
+  else if (path == "/events" && method == "GET") {
+    String out = "[";
+    bool first = true;
+    for (int i = 0; i < EVENT_SLOTS; i++) {
+      int idx = (eventHead + i) % EVENT_SLOTS;  // oldest→newest
+      if (eventBuf[idx].length()) { if (!first) out += ","; out += eventBuf[idx]; eventBuf[idx] = ""; first = false; }
+    }
+    out += "]";
+    httpReply(c, "200 OK", "application/json", out);
+  }
+  else if (path == "/logs" && method == "GET") {
+    String out;
+    for (int i = 0; i < LOG_LINES; i++) {
+      const String& l = logBuf[(logHead + i) % LOG_LINES];
+      if (l.length()) { out += l; out += "\n"; }
+    }
+    httpReply(c, "200 OK", "text/plain", out);
+  }
+  else if (path == "/health" && method == "GET") httpReply(c, "200 OK", "text/plain", "ok");
+  else httpReply(c, "404 Not Found", "text/plain", "nope");
+  c.flush();
+  c.stop();
 }
 
 // ---- Todoist comment (log & stop) ----
@@ -384,12 +412,12 @@ static void goIdle() {
 
 static void doExtend() {
   sess.end += EXTEND_S;
-  sendEvent("extend=300");  // app applies the same extend(5) on its next poll
+  sendEvent("\"extend\",\"minutes\":5");  // app applies the same extend(5) on its next poll
   drawDigits();
 }
 
 static void doLogStop() {
-  sendEvent("logstop=1");   // app logs & exits through its own logAndExit(false)
+  sendEvent("\"logstop\"");  // app logs & exits through its own logAndExit(false)
   long started = sess.end - (long)sess.minPlanned * 60;
   int actual = (int)(((long)time(NULL) - started + 30) / 60);
   if (actual < 0) actual = 0;
@@ -405,7 +433,7 @@ static void doLogStop() {
 // right-half hold: app logs as completed and closes the task itself
 // (it owns the close/move pref and posts the ✓ completed comment — no TLS here)
 static void doComplete() {
-  sendEvent("complete=1");
+  sendEvent("\"complete\"");
   ignoredSess = sess.id;
   text("marked complete", 240, 220, 2, C_ACCENT, C_BG, true);
   flush();
@@ -483,28 +511,24 @@ void setup() {
   while (WiFi.status() != WL_CONNECTED && millis() - t < 15000) delay(250);
   Serial.printf("[BOOT] wifi status=%d ip=%s\n", WiFi.status(), WiFi.localIP().toString().c_str());
   configTzTime(TZ_POSIX, "pool.ntp.org", "time.nist.gov");
-  udp.begin(BEACON_PORT);
-  logSrv.begin();
-  Serial.println("[BOOT] udp+logsrv up, starting mDNS");
-  // advertise so the relay can find us and unicast beacons (survives VPN broadcast hijack)
+  httpSrv.begin();
+  Serial.println("[BOOT] http up, starting mDNS");
+  // advertise timebox.local so the app can reach us without any IP config
   if (MDNS.begin("timebox")) {
-    MDNS.addService("timebox", "udp", BEACON_PORT);
-    MDNS.addService("http", "tcp", 4243);  // the /logs server
+    MDNS.addService("http", "tcp", HTTP_PORT);
     logLine("[MDNS] timebox.local up");
   } else {
     logLine("[MDNS] begin failed");
   }
-  Serial.printf("[UDP] listening on %d\n", BEACON_PORT);
-  IPAddress bcast(WiFi.localIP() | ~WiFi.subnetMask());
+  Serial.printf("[HTTP] listening on %d\n", HTTP_PORT);
   logLine(String("[NET] ip=") + WiFi.localIP().toString() + " gw=" + WiFi.gatewayIP().toString() +
-          " bcast=" + bcast.toString() + " rssi=" + WiFi.RSSI());
+          " rssi=" + WiFi.RSSI());
   drawIdle();
 }
 
 void loop() {
   wifiEnsure();
-  pollUdp();
-  serveLogs();
+  serveHttp();
 
   int16_t tx, ty;
   handleTouch(readTouch(tx, ty), tx);
@@ -531,7 +555,7 @@ void loop() {
   } else {
     drawDigits();
     if (millis() - lastBeacon > BEACON_TIMEOUT_MS) {
-      Serial.println("[BEACON] timeout — back to idle");
+      Serial.println("[STATE] heartbeat timeout — back to idle");
       goIdle();
     }
   }

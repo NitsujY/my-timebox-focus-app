@@ -31,7 +31,7 @@ type Prefs = {
   completeAction: "done" | "close";
   celebrate: boolean;
   defaultMinutes: number;
-  deviceOn: boolean; // ESP32 companion display via LAN relay (docs/firmware-v2.md)
+  deviceOn: boolean; // ESP32 companion display over LAN HTTP (docs/firmware-v2.md)
   screenOffMin: number; // device idle screen-off timeout, minutes (0 = never)
 };
 const DEFAULT_PREFS: Prefs = {
@@ -243,8 +243,8 @@ export default function App() {
   // device bridge follows the toggle; turning it off stops any live beacons
   useEffect(() => deviceSetEnabled(prefs.deviceOn), [prefs.deviceOn]);
 
-  // push device-config prefs on toggle/change — the relay beacons them to the
-  // device, which applies + persists them
+  // push device-config prefs on toggle/change — sent straight to the device,
+  // which applies + persists them
   useEffect(() => {
     if (prefs.deviceOn) deviceConfig(prefs.screenOffMin);
   }, [prefs.deviceOn, prefs.screenOffMin]);
@@ -1911,7 +1911,7 @@ function Timer({
   useEffect(() => {
     if (canNotify && Notification.permission === "default") Notification.requestPermission();
     deviceStart(task, minutes, endRef.current);
-    const hb = setInterval(() => deviceUpdate(endRef.current), 10_000); // relay TTL is 30s
+    const hb = setInterval(() => deviceUpdate(endRef.current), 10_000); // device heartbeat-timeout is 25s
     const ev = setInterval(async () => {
       for (const e of await deviceEvents()) {
         if (e.type === "extend") extend(e.minutes ?? 5); // device right-half tap
@@ -2665,9 +2665,11 @@ function SettingsPage({
           </div>
         </div>
         <p className="text-[12px] text-zinc-600">
-          Big-digit countdown on the desk display while a timer runs. Run{" "}
-          <span className="font-mono text-zinc-500">npm run relay</span> on this machine first
-          (see docs/firmware-v2.md). Off by default.
+          Big-digit countdown on the desk display while a timer runs. The app
+          talks straight to the device over HTTP (
+          <span className="font-mono text-zinc-500">http://timebox.local:4242</span>) — no
+          relay. Works from this app served over HTTP (localhost / LAN IP), not the HTTPS
+          deploy (see docs/firmware-v2.md). Off by default.
         </p>
       </section>
       <section>

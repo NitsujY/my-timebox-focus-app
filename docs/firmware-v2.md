@@ -11,93 +11,65 @@ The device is no longer a standalone Todoist client with a task list. It is a
 then big digits. Same hardware (Waveshare ESP32-S3-Touch-LCD-3.5 class board,
 480×320, FT6336 touch).
 
-## Trigger channel — UDP broadcast beacons via a local relay
+## Trigger channel — plain HTTP, app talks straight to the device
 
-Browsers can't send raw UDP, so a tiny zero-dependency Node relay runs on the
-laptop (`tools/timebox-relay.mjs`, started with `npm run relay`):
-
-```
-app ──HTTP──▶ relay (127.0.0.1:8787) ──UDP broadcast──▶ ESP32 (port 4242)
-app ◀──HTTP──┘        ◀──UDP events─── ESP32 (port 4241)
-```
-
-- `http://127.0.0.1` avoids mixed-content problems (the relay answers CORS +
-  Private-Network-Access preflights, so it works whether the app is served
-  from `http://localhost:5173`, a LAN IP, or a public HTTPS deploy).
-- Broadcast needs **no device IP configuration** — any laptop on the LAN can
-  drive the device.
-- The device learns the relay's IP from the beacon packets and unicasts its
-  own events back (extend / log & stop), so the touchscreen can drive the app.
-
-### Wire formats (one line, space-separated key=value)
-
-Beacon, relay → device, UDP port 4242, every 2 s while a timer runs:
+The ESP32 runs a tiny HTTP server (raw `WiFiServer`, port **4242**); the web
+app fetches it directly. **No relay, no UDP.**
 
 ```
-TB1 s=<sessionId> id=<todoistTaskId> end=<unixSeconds> min=<plannedMin> t=<title>
+app ──HTTP──▶ ESP32  http://timebox.local:4242
+  POST   /state   {session, id, title, minutes, end}   start / heartbeat (end = unix ms)
+  DELETE /state                                          session over
+  POST   /config  {screenOffMin}                        screen-off timeout (min, 0 = never)
+  GET    /events  → [{type, minutes?, session}]         touchscreen events, drained
+  GET    /logs    → last 24 log lines                   serial-less debugging
+  GET    /health  → ok
 ```
 
-- `end` is absolute wall-clock UTC seconds; the device renders `end − now`, so
-  both sides always agree to the second with zero drift.
-- `t=` is always last (title may contain spaces), title truncated to 60 chars.
-
-Event, device → relay, UDP port 4241:
-
-```
-TB1 s=<sessionId> extend=300
-TB1 s=<sessionId> logstop=1
-TB1 s=<sessionId> complete=1
-```
-
-Config, relay → device, UDP port 4242 (on change, then re-sent every 10 s):
-
-```
-TB1 cfg=1 soff=<screenOffSeconds>
-```
-
-- `soff` is the idle screen-off timeout in seconds (`0` = never sleep).
-- The device applies config live and persists it to flash (NVS), so the last
-  pushed config survives reboots and relay downtime. Config packets are not
-  written to the device's log ring (the 10 s re-send would flood it).
+- The device answers CORS + Private-Network-Access preflights, so a browser
+  page can call it.
+- **mDNS**: the device advertises `timebox.local`, so no IP configuration is
+  needed — any machine on the LAN can drive it.
+- **Constraint**: this is plain HTTP to `timebox.local`. It works when the app
+  is served over HTTP (`http://localhost:5173`, or a LAN IP). The
+  HTTPS-deployed app **cannot** fetch it (mixed content) — use the local build
+  with a Todoist API token for the device. This is the deliberate trade for
+  deleting the relay.
 
 ### App side (`src/deviceBeacon.ts`, wired into `Timer` in `src/App.tsx`)
 
 The bridge is gated behind **Settings → ESP32 companion display → Trigger
 device over LAN** (`prefs.deviceOn`, default **off**). While off, every
 `deviceBeacon` call is a no-op and the app behaves exactly as before. Toggling
-it off mid-timer stops the beacons (device returns to idle within 8 s).
+it off mid-timer stops the heartbeats (device returns to idle within ~25 s).
 
 | Moment | Action |
 |---|---|
-| Timer mounts | `POST /state {session, id, title, minutes, end}` — relay starts beacons |
+| Timer mounts | `POST /state {session, id, title, minutes, end}` — device shows the countdown |
 | Every 10 s while running | re-`POST /state` (heartbeat + carries current `end`) |
 | `extend(m)` | re-`POST /state` with the new `end` |
-| Timer unmounts (complete / log & stop / ✕) | `DELETE /state` — beacons stop |
+| Timer unmounts (complete / log & stop / ✕) | `DELETE /state` — device returns to idle |
 | Every 5 s while running | `GET /events` — `extend` → `extend(5)`, `logstop` → log & exit, `complete` → log as completed + close task, same as the app's own buttons |
-| Enabling the bridge, or changing the screen-off pref | `POST /config {screenOffMin}` — relay beacons `TB1 cfg=1 soff=<sec>` |
+| Enabling the bridge, or changing the screen-off pref | `POST /config {screenOffMin}` |
 
-Everything is fire-and-forget: if the relay isn't running, the timer works
-exactly as before (device just stays idle).
-
-### Relay behavior
-
-- Beacons every 2 s while state exists and the last `POST /state` is < 30 s
-  old (app crash / closed tab stops the beacons on its own).
-- App-pushed device config (`POST /config`) is beaconed on change and re-sent
-  every 10 s so a device that boots later still picks it up.
-- Device events are queued and drained by `GET /events`.
+Everything is fire-and-forget: if the device is off or unreachable, the timer
+works exactly as before (the display just stays idle).
 
 ### Device behavior
 
-1. **Idle**: clock only. Listen on UDP 4242.
-2. Beacon with a new `s=` → countdown screen (`left = end − now`).
-3. Same `s=` → refresh `lastSeen`; if no beacon for **8 s** → back to idle
-   (covers app stop, tab close, network blip).
-4. After a device-side **log & stop**, ignore that `s=` until a new session
-   id appears (the app may keep beaconing briefly before it processes the
+1. **Idle**: clock only. Serve HTTP on 4242.
+2. `POST /state` with a new `session` → countdown screen (`left = end − now`).
+3. Re-`POST /state` (heartbeat) refreshes `lastSeen`; if none for **25 s** →
+   back to idle (covers app stop, tab close, network blip). Heartbeats are
+   every 10 s, so 25 s = 2 misses + slack.
+4. `DELETE /state` → back to idle immediately.
+5. After a device-side **log & stop**, ignore that `session` until a new one
+   appears (the app may keep heartbeating briefly before it processes the
    event).
-5. Config beacons (`TB1 cfg=1 …`) are applied live and persisted to flash
-   (NVS); `soff` sets the idle screen-off timeout (`0` = never).
+6. `POST /config` is applied live and persisted to flash (NVS); `screenOffMin`
+   sets the idle screen-off timeout (`0` = never).
+7. Touchscreen gestures (extend / log & stop / complete) push JSON onto an
+   8-slot in-device event queue, drained by the app's `GET /events` poll.
 
 ### Why not the alternatives (kept for the record)
 
@@ -105,7 +77,8 @@ exactly as before (device just stays idle).
 |---|---|
 | Todoist task `description` as message bus | Works anywhere, but 0–10 s latency and abuses a user-visible field |
 | Todoist `due.datetime` as the timer | Semantically honest, but same latency and changes real task data (Todoist fires its own reminders) |
-| Web Bluetooth LE | Instant, no LAN needed; Chrome/Edge only, pairing UX, large BLE firmware surface |
+| Localhost relay (the old design) | Worked from the HTTPS deploy via `127.0.0.1`, but required a Node process always running on the laptop — removed in favor of direct HTTP |
+| Web Bluetooth LE | Instant, no LAN, works from HTTPS; Chrome/Edge only, pairing UX, large BLE firmware surface |
 | Cloud relay (MQTT/Firebase) | Real-time anywhere; new backend + on-device secrets, overkill for one desk |
 | App as server | Browsers can't accept connections — a closed tab is unreachable |
 
@@ -147,7 +120,7 @@ app also closes the task per the user's complete-action pref and posts the
 ⏱ M/D · planned Xm · actual Ym · abandoned
 ```
 
-Posted to `POST /api/v1/comments` with the task id from the beacon
+Posted to `POST /api/v1/comments` with the task id from the session state
 (`sessionComment()` in `src/App.tsx`). The device never completes tasks in
 v2 — completing stays in the app.
 
