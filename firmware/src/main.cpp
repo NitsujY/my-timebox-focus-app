@@ -1,10 +1,12 @@
 // ESP32 Timebox Companion v2 — triggered countdown display, see ../docs/firmware-v2.md.
-// Idle clock until the app starts a timer; the app drives it directly over HTTP.
+// Idle clock until the app starts a timer; the app drives it over BLE (Web Bluetooth).
 // Left hold = log & stop, right tap = +5 min, right hold = mark complete (mirrors the web app).
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiServer.h>
-#include <ESPmDNS.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -54,19 +56,15 @@ static int lastHintS = -1;        // last pre-sleep hint second drawn (-1 = none
 static uint32_t lastTouchMs = 0;  // last touch press (screen-sleep activity)
 static uint32_t screenOffMs = SCREEN_OFF_MS;  // app-overridable, persisted in NVS "tb"/"soff" (0 = never)
 
-// ---- HTTP server on port 4242: the app drives the device directly ----
-// POST /state {session,id,title,minutes,end} · DELETE /state · POST /config
-// {screenOffMin} · GET /events (JSON array, drains) · GET /logs (ring buffer).
-// CORS * + PNA so a browser page on localhost / a LAN IP can call it.
-static WiFiServer httpSrv(HTTP_PORT);
-static String httpBody;   // body of the in-flight request (state/config handlers read it)
+// ---- BLE peripheral: the app (Web Bluetooth) drives the device directly ----
+// Works from the HTTPS-deployed app (BLE is a permissioned browser API, not a
+// network fetch). One service, two characteristics (docs/firmware-v2.md):
+//   STATE  write {session,id,title,minutes,end} ({} = stop) · notify = events
+//   CONFIG write {screenOffMin}
+static BLECharacteristic* bleEventChar = nullptr;
+static bool bleConnected = false;
 
-// device → app events (extend / logstop / complete), drained by GET /events
-#define EVENT_SLOTS 8
-static String eventBuf[EVENT_SLOTS];
-static int eventHead = 0;
-
-// log ring (GET /logs) — simplest OTA visibility without serial
+// log ring (serial + curl via the log server is gone with HTTP; serial only now)
 #define LOG_LINES 24
 static String logBuf[LOG_LINES];
 static int logHead = 0;
@@ -76,10 +74,10 @@ static void logLine(const String& s) {
   logHead = (logHead + 1) % LOG_LINES;
 }
 
-static void drawTimer();        // defined below, used by serveHttp
+static void drawTimer();        // defined below, used by applyStateJson
 static void drawIdle();         // defined below, used by wakeScreen
-static void goIdle();           // defined below, used by serveHttp (DELETE /state)
-static void drawStatusIcons();  // defined below, used by applyConfig
+static void goIdle();           // defined below, used by applyStateJson ({} stop)
+static void drawStatusIcons();  // defined below, used by applyConfigJson
 
 // ---- screen sleep: idle clock goes fully dark after SCREEN_OFF_MS (see config.h) ----
 static void wakeScreen() {
@@ -158,13 +156,18 @@ static void applyConfigJson(const char* body) {
   logLine(String("[CFG] screen off after ") + (min ? String(min) + "m" : String("never")));
 }
 
-// POST/DELETE /state {session,id,title,minutes,end} — end is unix ms on the wire
+// STATE write: {session,id,title,minutes,end} starts/heartbeats; {} (or no session) stops.
+// end is unix ms on the wire.
 static void applyStateJson(const char* body) {
   JsonDocument doc;
-  if (deserializeJson(doc, body)) { logLine(String("[HTTP] bad /state json: ") + String(body).substring(0, 60)); return; }
+  if (deserializeJson(doc, body)) { logLine(String("[BLE] bad state json: ") + String(body).substring(0, 60)); return; }
   const char* sid = doc["session"];
+  if (!sid || !*sid) {  // app sent {} → session over (replaces HTTP DELETE /state)
+    if (haveSess) { logLine("[STATE] stop — session ended"); goIdle(); }
+    return;
+  }
   long long endMs = doc["end"] | 0LL;  // 13-digit unix ms — overflows 32-bit long on ESP32
-  if (!sid || !*sid || endMs <= 0) { logLine(String("[HTTP] dropped malformed /state: ") + String(body).substring(0, 60)); return; }
+  if (endMs <= 0) { logLine(String("[BLE] dropped malformed state: ") + String(body).substring(0, 60)); return; }
   if (ignoredSess == sid) { lastBeacon = millis(); return; }
   bool isNew = !haveSess || sess.id != sid;
   sess.id = sid;
@@ -180,76 +183,48 @@ static void applyStateJson(const char* body) {
   logLine(String("[STATE] s=") + sid + " end=" + sess.end + " '" + sess.title + "'");
 }
 
-// device → app event: buffered, drained by the app's GET /events poll
-static void sendEvent(const char* json) {
-  eventBuf[eventHead] = String("{\"type\":") + json + ",\"session\":\"" + sess.id + "\"}";
-  eventHead = (eventHead + 1) % EVENT_SLOTS;
-  Serial.printf("[EVENT] queued %s\n", json);
+// device → app event over BLE notify (extend / logstop / complete)
+static void sendEvent(const char* evt) {
+  if (!bleConnected || !bleEventChar) return;
+  bleEventChar->setValue(evt);
+  bleEventChar->notify();
+  Serial.printf("[EVENT] -> app %s\n", evt);
 }
 
-// ---- minimal HTTP/1.0 server: request line → optional body → dispatch ----
-static void httpReply(WiFiClient& c, const char* status, const char* ctype, const String& body) {
-  c.printf("HTTP/1.0 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
-           "Access-Control-Allow-Origin: *\r\n"
-           "Access-Control-Allow-Methods: GET,POST,DELETE,OPTIONS\r\n"
-           "Access-Control-Allow-Headers: content-type\r\n"
-           "Access-Control-Allow-Private-Network: true\r\n"
-           "Connection: close\r\n\r\n", status, ctype, (int)body.length());
-  c.print(body);
-}
-static void serveHttp() {
-  WiFiClient c = httpSrv.available();
-  if (!c || !c.connected()) return;
-  c.setTimeout(5000);  // generous: WiFi pre-tasks can starve loop() past 1s
-  String line = c.readStringUntil('\n'); line.trim();  // "METHOD /path HTTP/1.1"
-  int sp1 = line.indexOf(' '), sp2 = line.indexOf(' ', sp1 + 1);
-  if (sp1 < 0 || sp2 < 0) { c.stop(); return; }
-  String method = line.substring(0, sp1), path = line.substring(sp1 + 1, sp2);
-  int contentLen = 0;
-  while (true) {  // headers
-    String h = c.readStringUntil('\n'); h.trim();
-    if (!h.length()) break;
-    if (h.startsWith("Content-Length:") || h.startsWith("content-length:"))
-      contentLen = h.substring(15).toInt();
+// ---- BLE callbacks ----
+class ServerCB : public BLEServerCallbacks {
+  void onConnect(BLEServer*) override { bleConnected = true; logLine("[BLE] app connected"); }
+  void onDisconnect(BLEServer* s) override {
+    bleConnected = false;
+    logLine("[BLE] app disconnected");
+    s->startAdvertising();  // keep advertising so the app can reconnect
   }
-  if (method == "OPTIONS") { httpReply(c, "204 No Content", "text/plain", ""); c.flush(); c.stop(); return; }
-  httpBody = "";
-  if (contentLen > 0 && contentLen <= 2048) {
-    httpBody.reserve(contentLen);
-    while ((int)httpBody.length() < contentLen && c.connected()) {
-      int a = c.available();
-      if (a) { httpBody += (char)c.read(); }
-      else delay(1);
-    }
-  }
-  if (path == "/state" && method == "POST") { applyStateJson(httpBody.c_str()); httpReply(c, "200 OK", "text/plain", "ok"); }
-  else if (path == "/state" && method == "DELETE") {
-    if (haveSess) { logLine("[STATE] DELETE — session ended"); goIdle(); }
-    httpReply(c, "200 OK", "text/plain", "ok");
-  }
-  else if (path == "/config" && method == "POST") { applyConfigJson(httpBody.c_str()); httpReply(c, "200 OK", "text/plain", "ok"); }
-  else if (path == "/events" && method == "GET") {
-    String out = "[";
-    bool first = true;
-    for (int i = 0; i < EVENT_SLOTS; i++) {
-      int idx = (eventHead + i) % EVENT_SLOTS;  // oldest→newest
-      if (eventBuf[idx].length()) { if (!first) out += ","; out += eventBuf[idx]; eventBuf[idx] = ""; first = false; }
-    }
-    out += "]";
-    httpReply(c, "200 OK", "application/json", out);
-  }
-  else if (path == "/logs" && method == "GET") {
-    String out;
-    for (int i = 0; i < LOG_LINES; i++) {
-      const String& l = logBuf[(logHead + i) % LOG_LINES];
-      if (l.length()) { out += l; out += "\n"; }
-    }
-    httpReply(c, "200 OK", "text/plain", out);
-  }
-  else if (path == "/health" && method == "GET") httpReply(c, "200 OK", "text/plain", "ok");
-  else httpReply(c, "404 Not Found", "text/plain", "nope");
-  c.flush();
-  c.stop();
+};
+class StateCB : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* c) override { applyStateJson(c->getValue().c_str()); }
+};
+class ConfigCB : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* c) override { applyConfigJson(c->getValue().c_str()); }
+};
+
+static void bleSetup() {
+  BLEDevice::init("Timebox");
+  BLEServer* srv = BLEDevice::createServer();
+  srv->setCallbacks(new ServerCB());
+  BLEService* svc = srv->createService(BLE_SVC_UUID);
+  BLECharacteristic* state = svc->createCharacteristic(BLE_STATE_UUID,
+    BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY);
+  state->setCallbacks(new StateCB());
+  state->addDescriptor(new BLE2902());  // enable notifications
+  bleEventChar = state;
+  BLECharacteristic* cfg = svc->createCharacteristic(BLE_CONFIG_UUID, BLECharacteristic::PROPERTY_WRITE);
+  cfg->setCallbacks(new ConfigCB());
+  svc->start();
+  BLEAdvertising* adv = BLEDevice::getAdvertising();
+  adv->addServiceUUID(BLE_SVC_UUID);
+  adv->setScanResponse(true);
+  adv->start();
+  logLine("[BLE] advertising as 'Timebox'");
 }
 
 // ---- Todoist comment (log & stop) ----
@@ -412,12 +387,12 @@ static void goIdle() {
 
 static void doExtend() {
   sess.end += EXTEND_S;
-  sendEvent("\"extend\",\"minutes\":5");  // app applies the same extend(5) on its next poll
+  sendEvent("extend");  // app applies extend(5) on the notification
   drawDigits();
 }
 
 static void doLogStop() {
-  sendEvent("\"logstop\"");  // app logs & exits through its own logAndExit(false)
+  sendEvent("logstop");  // app logs & exits through its own logAndExit(false)
   long started = sess.end - (long)sess.minPlanned * 60;
   int actual = (int)(((long)time(NULL) - started + 30) / 60);
   if (actual < 0) actual = 0;
@@ -433,7 +408,7 @@ static void doLogStop() {
 // right-half hold: app logs as completed and closes the task itself
 // (it owns the close/move pref and posts the ✓ completed comment — no TLS here)
 static void doComplete() {
-  sendEvent("\"complete\"");
+  sendEvent("complete");
   ignoredSess = sess.id;
   text("marked complete", 240, 220, 2, C_ACCENT, C_BG, true);
   flush();
@@ -511,24 +486,13 @@ void setup() {
   while (WiFi.status() != WL_CONNECTED && millis() - t < 15000) delay(250);
   Serial.printf("[BOOT] wifi status=%d ip=%s\n", WiFi.status(), WiFi.localIP().toString().c_str());
   configTzTime(TZ_POSIX, "pool.ntp.org", "time.nist.gov");
-  httpSrv.begin();
-  Serial.println("[BOOT] http up, starting mDNS");
-  // advertise timebox.local so the app can reach us without any IP config
-  if (MDNS.begin("timebox")) {
-    MDNS.addService("http", "tcp", HTTP_PORT);
-    logLine("[MDNS] timebox.local up");
-  } else {
-    logLine("[MDNS] begin failed");
-  }
-  Serial.printf("[HTTP] listening on %d\n", HTTP_PORT);
-  logLine(String("[NET] ip=") + WiFi.localIP().toString() + " gw=" + WiFi.gatewayIP().toString() +
-          " rssi=" + WiFi.RSSI());
+  bleSetup();
+  logLine(String("[NET] ip=") + WiFi.localIP().toString() + " rssi=" + WiFi.RSSI());
   drawIdle();
 }
 
 void loop() {
   wifiEnsure();
-  serveHttp();
 
   int16_t tx, ty;
   handleTouch(readTouch(tx, ty), tx);

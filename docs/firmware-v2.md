@@ -11,65 +11,66 @@ The device is no longer a standalone Todoist client with a task list. It is a
 then big digits. Same hardware (Waveshare ESP32-S3-Touch-LCD-3.5 class board,
 480×320, FT6336 touch).
 
-## Trigger channel — plain HTTP, app talks straight to the device
+## Trigger channel — BLE (Web Bluetooth), app talks straight to the device
 
-The ESP32 runs a tiny HTTP server (raw `WiFiServer`, port **4242**); the web
-app fetches it directly. **No relay, no UDP.**
+The ESP32 is a **BLE peripheral**; the web app connects with **Web Bluetooth**
+and drives it directly. No relay, no HTTP server, no LAN — and because BLE is a
+permissioned browser API (not a network fetch), it **works from the
+HTTPS-deployed app** (`todolist-md.com`), which the old plain-HTTP design could
+not. Chrome/Edge only (Safari/Firefox have no Web Bluetooth).
 
 ```
-app ──HTTP──▶ ESP32  http://timebox.local:4242
-  POST   /state   {session, id, title, minutes, end}   start / heartbeat (end = unix ms)
-  DELETE /state                                          session over
-  POST   /config  {screenOffMin}                        screen-off timeout (min, 0 = never)
-  GET    /events  → [{type, minutes?, session}]         touchscreen events, drained
-  GET    /logs    → last 24 log lines                   serial-less debugging
-  GET    /health  → ok
+app ──BLE GATT──▶ ESP32 "Timebox"
+  STATE  char  write {session, id, title, minutes, end}   start / heartbeat (end = unix ms)
+                write {}                                     session over
+                notify "extend" | "logstop" | "complete"      touchscreen events → app
+  CONFIG char write {screenOffMin}                            screen-off timeout (min, 0 = never)
 ```
 
-- The device answers CORS + Private-Network-Access preflights, so a browser
-  page can call it.
-- **mDNS**: the device advertises `timebox.local`, so no IP configuration is
-  needed — any machine on the LAN can drive it.
-- **Constraint**: this is plain HTTP to `timebox.local`. It works when the app
-  is served over HTTP (`http://localhost:5173`, or a LAN IP). The
-  HTTPS-deployed app **cannot** fetch it (mixed content) — use the local build
-  with a Todoist API token for the device. This is the deliberate trade for
-  deleting the relay.
+- **Service** `6e400001-b5a3-f393-e0a9-e50e24dcca9e` (Nordic-UART-style);
+  **STATE** `6e400002-…` (write + notify), **CONFIG** `6e400003-…` (write).
+- The device advertises the name **`Timebox`**. The app calls
+  `navigator.bluetooth.requestDevice({filters:[{name:"Timebox"}]})`, so the user
+  picks it once in the browser's pairing dialog; after that it reconnects
+  automatically.
+- No pairing/bonding, no PIN — just the Web Bluetooth device picker.
 
-### App side (`src/deviceBeacon.ts`, wired into `Timer` in `src/App.tsx`)
+### App side (`src/deviceBle.ts`, wired into `Timer` in `src/App.tsx`)
 
 The bridge is gated behind **Settings → ESP32 companion display → Trigger
-device over LAN** (`prefs.deviceOn`, default **off**). While off, every
-`deviceBeacon` call is a no-op and the app behaves exactly as before. Toggling
-it off mid-timer stops the heartbeats (device returns to idle within ~25 s).
+device** (`prefs.deviceOn`, default **off**). While off, every call is a no-op
+and the app behaves exactly as before. Toggling it off mid-timer stops the
+heartbeats (device returns to idle within ~25 s).
 
 | Moment | Action |
 |---|---|
-| Timer mounts | `POST /state {session, id, title, minutes, end}` — device shows the countdown |
-| Every 10 s while running | re-`POST /state` (heartbeat + carries current `end`) |
-| `extend(m)` | re-`POST /state` with the new `end` |
-| Timer unmounts (complete / log & stop / ✕) | `DELETE /state` — device returns to idle |
-| Every 5 s while running | `GET /events` — `extend` → `extend(5)`, `logstop` → log & exit, `complete` → log as completed + close task, same as the app's own buttons |
-| Enabling the bridge, or changing the screen-off pref | `POST /config {screenOffMin}` |
+| Timer mounts | write STATE `{session, id, title, minutes, end}` — device shows the countdown |
+| Every 10 s while running | re-write STATE (heartbeat + carries current `end`) |
+| `extend(m)` | re-write STATE with the new `end` |
+| Timer unmounts (complete / log & stop / ✕) | write STATE `{}` — device returns to idle |
+| Every 5 s while running | drain the event queue — `extend` → `extend(5)`, `logstop` → log & exit, `complete` → log as completed + close task (same as the app's own buttons). Events arrive as BLE notifications into a queue, so this poll just drains it. |
+| Enabling the bridge, or changing the screen-off pref | write CONFIG `{screenOffMin}` |
 
-Everything is fire-and-forget: if the device is off or unreachable, the timer
-works exactly as before (the display just stays idle).
+Everything is fire-and-forget: if the device is off, out of range, or never
+paired, the timer works exactly as before (the display just stays idle).
 
 ### Device behavior
 
-1. **Idle**: clock only. Serve HTTP on 4242.
-2. `POST /state` with a new `session` → countdown screen (`left = end − now`).
-3. Re-`POST /state` (heartbeat) refreshes `lastSeen`; if none for **25 s** →
-   back to idle (covers app stop, tab close, network blip). Heartbeats are
-   every 10 s, so 25 s = 2 misses + slack.
-4. `DELETE /state` → back to idle immediately.
+1. **Idle**: clock only. Advertise BLE as `Timebox`; the app connects and
+   writes STATE.
+2. STATE write with a new `session` → countdown screen (`left = end − now`).
+3. Re-write STATE (heartbeat) refreshes `lastSeen`; if none for **25 s** →
+   back to idle (covers app stop, tab close, BLE drop). Heartbeats are every
+   10 s, so 25 s = 2 misses + slack.
+4. STATE write of `{}` → back to idle immediately.
 5. After a device-side **log & stop**, ignore that `session` until a new one
    appears (the app may keep heartbeating briefly before it processes the
    event).
-6. `POST /config` is applied live and persisted to flash (NVS); `screenOffMin`
+6. CONFIG write is applied live and persisted to flash (NVS); `screenOffMin`
    sets the idle screen-off timeout (`0` = never).
-7. Touchscreen gestures (extend / log & stop / complete) push JSON onto an
-   8-slot in-device event queue, drained by the app's `GET /events` poll.
+7. Touchscreen gestures (extend / log & stop / complete) send a BLE
+   notification on the STATE characteristic; the app's listener pushes them
+   onto a queue.
 
 ### Why not the alternatives (kept for the record)
 
@@ -77,8 +78,9 @@ works exactly as before (the display just stays idle).
 |---|---|
 | Todoist task `description` as message bus | Works anywhere, but 0–10 s latency and abuses a user-visible field |
 | Todoist `due.datetime` as the timer | Semantically honest, but same latency and changes real task data (Todoist fires its own reminders) |
-| Localhost relay (the old design) | Worked from the HTTPS deploy via `127.0.0.1`, but required a Node process always running on the laptop — removed in favor of direct HTTP |
-| Web Bluetooth LE | Instant, no LAN, works from HTTPS; Chrome/Edge only, pairing UX, large BLE firmware surface |
+| Localhost relay | Worked from the HTTPS deploy via `127.0.0.1`, but required a Node process always running on the laptop — removed |
+| Direct HTTP to the device | No relay, but plain HTTP to `timebox.local` is mixed-content-blocked from the HTTPS deploy — removed |
+| **Web Bluetooth LE (chosen)** | Works from the HTTPS deploy, no LAN/relay; Chrome/Edge only, one-time pairing dialog |
 | Cloud relay (MQTT/Firebase) | Real-time anywhere; new backend + on-device secrets, overkill for one desk |
 | App as server | Browsers can't accept connections — a closed tab is unreachable |
 

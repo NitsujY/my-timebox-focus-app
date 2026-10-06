@@ -4,9 +4,11 @@ Triggered countdown display for the Timebox Focus web app: idle clock until
 you start a timer in the app, then big digits. Design contract:
 [../docs/firmware-v2.md](../docs/firmware-v2.md). Hardware: `SPEC.md`.
 
-The web app drives the device directly over **HTTP** — the device runs a tiny
-server on `http://timebox.local:4242`. No relay, no Todoist polling on the
-device anymore (Todoist is only used for the log & stop comment).
+The web app drives the device directly over **BLE (Web Bluetooth)** — the
+device advertises as `Timebox` and the app connects to it. No relay, no HTTP
+server, no LAN needed, and it works from the HTTPS-deployed app. Chrome/Edge
+only (Safari/Firefox have no Web Bluetooth). Todoist is only used for the
+log & stop comment.
 
 ## Setup
 
@@ -16,7 +18,7 @@ device anymore (Todoist is only used for the log & stop comment).
    - `TODOIST_TOKEN` — Todoist → Settings → Integrations → Developer
      (only used to post the "log & stop" session comment)
 3. Set your timezone in `src/config.h` (`TZ_POSIX`, e.g. `"CST-8"`).
-4. Nothing to run on the laptop — the app talks to the device directly.
+4. Nothing to run on the laptop — the app connects to the device over BLE.
 
 ## Build, flash, monitor
 
@@ -34,14 +36,13 @@ TCA9554 at power-on — `setup()` releases all expander pins high to wake it.
 
 ## Usage
 
-1. Serve the web app over HTTP (`npm run dev`, or the built app from a LAN IP)
-   — the device uses plain HTTP to `timebox.local`, which the HTTPS-deployed
-   app can't reach (mixed content). Use a Todoist API token for local dev.
-2. In the app: Settings → ESP32 companion display → **Trigger device over LAN**
-   (off by default).
+1. Open the app in Chrome/Edge (works from the HTTPS deploy or `npm run dev`).
+2. In the app: Settings → ESP32 companion display → **Trigger device**
+   (off by default). The first time you start a timer, the browser shows a
+   pairing dialog — pick **Timebox**.
 3. Start a timer in the app → the device shows the countdown within a second.
 3. Touchscreen while counting:
-   - **right half, tap** = +5 min (app extends too, on its next event poll)
+   - **right half, tap** = +5 min (app extends too, via the BLE notification)
    - **left half, hold 1 s** = log & stop (posts the Todoist comment, app exits the timer)
 4. Timer ends/stops in the app → device returns to the idle clock.
 
@@ -49,11 +50,10 @@ TCA9554 at power-on — `setup()` releases all expander pins high to wake it.
 
 - If touch taps land mirrored/rotated, flip `TOUCH_SWAP_XY` / `TOUCH_INV_X` /
   `TOUCH_INV_Y` in `src/config.h` and reflash.
-- If the device never reacts: check that it resolves
-  (`ping timebox.local`), that its HTTP server answers
-  (`curl http://timebox.local:4242/health` → `ok`), and that you're running
-  the app over HTTP (not the HTTPS deploy). Peek at the device without serial:
-  `curl http://timebox.local:4242/logs`.
+- If the device never reacts: confirm it's powered and advertising (scan for a
+  BLE device named `Timebox`), that you're on Chrome/Edge, and that you picked
+  the device in the browser's pairing dialog. Serial logs: `pio device monitor`
+  at 115200 baud.
 
 ## v2 scope cuts (per docs/firmware-v2.md)
 

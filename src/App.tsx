@@ -7,7 +7,7 @@ import {
   deviceStart,
   deviceStop,
   deviceUpdate,
-} from "./deviceBeacon";
+} from "./deviceBle";
 
 const API = "https://api.todoist.com/api/v1";
 const PAGE = 50;
@@ -2665,11 +2665,10 @@ function SettingsPage({
           </div>
         </div>
         <p className="text-[12px] text-zinc-600">
-          Big-digit countdown on the desk display while a timer runs. The app
-          talks straight to the device over HTTP (
-          <span className="font-mono text-zinc-500">http://timebox.local:4242</span>) — no
-          relay. Works from this app served over HTTP (localhost / LAN IP), not the HTTPS
-          deploy (see docs/firmware-v2.md). Off by default.
+          Big-digit countdown on the desk display while a timer runs. Connects
+          over Bluetooth (Web Bluetooth — Chrome/Edge). The first time you start a
+          timer, pick <span className="font-mono text-zinc-500">Timebox</span> in the
+          pairing dialog (see docs/firmware-v2.md). Off by default.
         </p>
       </section>
       <section>
