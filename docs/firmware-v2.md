@@ -64,9 +64,10 @@ paired, the timer works exactly as before (the display just stays idle).
 
 1. **Idle**: clock only. The app opens the serial port and sends state lines.
 2. A state line with a new `session` → countdown screen (`left = end − now`).
-3. A re-sent state line (heartbeat) refreshes `lastSeen`; if none for **25 s** →
-   back to idle (covers app stop, tab close, cable pull). Heartbeats are every
-   10 s, so 25 s = 2 misses + slack.
+3. A re-sent state line (heartbeat) refreshes `lastSeen`; if none for **12 s**
+   → back to idle (covers app stop, tab close, cable pull — the `{}` stop line
+   is best-effort when the cable is unplugged). Heartbeats are every 10 s, so
+   12 s = 1 miss + slack.
 4. A state line of `{}` → back to idle immediately.
 5. After a device-side **log & stop**, ignore that `session` until a new one
    appears (the app may keep heartbeating briefly before it processes the

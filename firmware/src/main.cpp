@@ -46,7 +46,8 @@ static Session sess;
 static bool haveSess = false;
 static String ignoredSess;          // after device-side log & stop, until a new session id
 static uint32_t lastBeacon = 0;
-#define BEACON_TIMEOUT_MS 25000     // app heartbeats every 10s; 2 misses + slack = session over
+#define BEACON_TIMEOUT_MS 12000     // app heartbeats every 10s; 1 miss + slack = session over
+                                    // (unplugged cable = no {} stop line — don't sit on the timer screen)
 #define EXTEND_S 300
 
 enum Screen { SCR_IDLE, SCR_TIMER };

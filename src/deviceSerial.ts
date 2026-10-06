@@ -67,16 +67,19 @@ async function readLoop(p: SerialPortLike, r: ReadableStreamDefaultReader<Uint8A
   }
 }
 
-// Open the port (previously-granted port if there is one, else the picker) and
-// push the time — the device has no NTP without WiFi; we are its clock.
-async function ensure(): Promise<boolean> {
+// Open the port and push the time — the device may have no NTP if WiFi is
+// down; we are its backup clock. allowPicker: only explicit user-driven paths
+// (starting a timer, changing prefs) may pop the port dialog; background paths
+// (stop, events) silently use a previously-granted port or fail quietly.
+async function ensure(allowPicker: boolean): Promise<boolean> {
   if (!enabled || !deviceSerialSupported()) return false;
   if (port && writer) return true;
   if (connecting) return connecting.then(() => !!(port && writer));
   connecting = (async () => {
     try {
       const granted = await nav2.serial!.getPorts();
-      port = granted[0] ?? (await nav2.serial!.requestPort());
+      port = granted[0] ?? (allowPicker ? await nav2.serial!.requestPort() : null);
+      if (!port) return;
       await port.open({ baudRate: 115200 });
       writer = port.writable!.getWriter();
       void readLoop(port, port.readable!.getReader());
@@ -104,7 +107,7 @@ async function write(body: object): Promise<void> {
 // The bare {} stop line is exempt: {} must stay empty so the device reads it
 // as "session over" instead of a clock sync.
 async function writeState(body: object): Promise<void> {
-  if (!(await ensure())) return;
+  if (!(await ensure(true))) return;
   await write(Object.keys(body).length ? { time: Math.floor(Date.now() / 1000), ...body } : body);
 }
 
@@ -130,11 +133,11 @@ export function deviceStop() {
   if (!session) return;
   session = "";
   current = null;
-  // ensure() first: if the original connect was cancelled, writer is null and a
-  // plain writeState({}) would be swallowed — the device would sit on the timer
-  // screen until the 25s heartbeat timeout (and show a blank idle clock: no
-  // {time} ever reached it). A stop is worth one reconnect attempt.
-  void ensure().then(() => write({})); // {} = session over
+  // reconnect without the picker: if the original connect died (or the user
+  // cancelled the picker), a previously-granted port still lets the {} land;
+  // nothing granted → fail quietly and the device's heartbeat timeout takes
+  // the display back to idle on its own.
+  void ensure(false).then(() => write({})); // {} = session over
 }
 
 // push device-config prefs (screen-off timeout etc.) — the device applies +
@@ -142,7 +145,7 @@ export function deviceStop() {
 export function deviceConfig(screenOffMin: number) {
   if (!enabled) return;
   void (async () => {
-    if (await ensure()) await write({ screenOffMin });
+    if (await ensure(true)) await write({ screenOffMin });
   })();
 }
 
