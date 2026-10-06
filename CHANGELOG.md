@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **ESP32 companion over USB serial**: BLE (and the WiFi/TLS the device needed
+  alongside it) starved IRAM/heap and made the 480×320 display flicker. The app
+  now drives the device over Web Serial (one JSON object per line, Chrome/Edge);
+  the firmware has no radios at all and gets its clock from `{time}` lines the
+  app sends. The pioarduino/IDF-5 DMA experiments are abandoned — polling SPI is
+  fine with the CPU to itself.
 - **Device screen-off timeout**: Settings → ESP32 companion display picks how long the idle clock stays lit (1/5/15/30 min or never). Pushed over the LAN relay and persisted on the device (NVS), so it survives reboots.
 - **Backlog quick-capture**: the add input sits at the top of the Backlog tab, always open and focused on entry. New tasks land directly beneath it (equal priority/due now sorts newest-first via `added_at`) with a brief highlight.
 

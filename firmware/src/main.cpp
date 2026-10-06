@@ -1,11 +1,12 @@
 // ESP32 Timebox Companion v2 — triggered countdown display, see ../docs/firmware-v2.md.
-// Idle clock until the app starts a timer; the app drives it over BLE (Web Bluetooth).
+// Idle clock until the app starts a timer; the app drives it over USB serial
+// (Web Serial, one JSON object per line). WiFi is on for NTP so it works as a
+// normal clock with the app closed — but no BLE and no on-device TLS: those
+// were what starved IRAM/heap and tore frames on the 480x320 flush.
 // Left hold = log & stop, right tap = +5 min, right hold = mark complete (mirrors the web app).
 #include <Arduino.h>
 #include <WiFi.h>
-#include <NimBLEDevice.h>
-#include <WiFiClientSecure.h>
-#include <HTTPClient.h>
+#include <ESPmDNS.h>
 #include <ArduinoJson.h>
 #include <Arduino_GFX_Library.h>
 #include <Wire.h>
@@ -14,9 +15,9 @@
 #include "secrets.h"
 
 // pins from esp32-drive-orbit dash_35 (dashboard_display.cpp)
-// NOTE: Arduino_ESP32SPIDMA would be ideal (frees the CPU during flush) but its
-// ISR handlers don't fit this board's IRAM alongside WiFi+BLE (iram0 overflow).
-// The polling ESP32SPI is fine as long as the BLE stack is NimBLE (light ISRs).
+// NOTE: Arduino_ESP32SPIDMA overflows iram0 on this board's prebuilt core
+// (IDF 4.4 links the WiFi/BT ISRs no matter what we call at runtime). The
+// polling ESP32SPI is fine now that nothing competes for the CPU.
 static Arduino_DataBus *bus = new Arduino_ESP32SPI(27 /*DC*/, 5 /*CS*/, 18 /*SCK*/, 23 /*MOSI*/, 19 /*MISO*/);
 static Arduino_GFX *gfx = new Arduino_ST7796(bus, GFX_NOT_DEFINED /*RST via TCA9554*/, 0, true /*ips*/);
 // PSRAM back buffer, flushed once per frame — kills flicker (same trick as dash_35).
@@ -39,7 +40,7 @@ static void text(const String& s, int x, int y, uint8_t size, uint16_t fg, uint1
   gfx->print(s);
 }
 
-// ---- session state (driven by beacons) ----
+// ---- session state (driven by the app over USB serial) ----
 struct Session { String id, taskId, title; long end; int minPlanned; };
 static Session sess;
 static bool haveSess = false;
@@ -56,13 +57,12 @@ static int lastHintS = -1;        // last pre-sleep hint second drawn (-1 = none
 static uint32_t lastTouchMs = 0;  // last touch press (screen-sleep activity)
 static uint32_t screenOffMs = SCREEN_OFF_MS;  // app-overridable, persisted in NVS "tb"/"soff" (0 = never)
 
-// ---- BLE peripheral: the app (Web Bluetooth) drives the device directly ----
-// Works from the HTTPS-deployed app (BLE is a permissioned browser API, not a
-// network fetch). One service, two characteristics (docs/firmware-v2.md):
-//   STATE  write {session,id,title,minutes,end} ({} = stop) · notify = events
-//   CONFIG write {screenOffMin}
-static NimBLECharacteristic* bleEventChar = nullptr;
-static bool bleConnected = false;
+// ---- USB serial: the app (Web Serial) drives the device directly ----
+// One JSON object per line, app -> device (docs/firmware-v2.md):
+//   {session,id,title,minutes,end,time}   start / heartbeat ({} = stop)
+//   {screenOffMin}                        screen-off timeout
+//   {time}                                unix secs — no NTP without WiFi
+// device -> app events are "EVT <name>" lines (extend / logstop / complete).
 
 // log ring (serial + curl via the log server is gone with HTTP; serial only now)
 #define LOG_LINES 24
@@ -138,7 +138,7 @@ static bool readTouch(int16_t &x, int16_t &y) {
   return true;
 }
 
-// ---- runtime config from the app (POST /config {screenOffMin}, docs/firmware-v2.md) ----
+// ---- runtime config from the app ({screenOffMin} line, docs/firmware-v2.md) ----
 // minutes on the wire, matching the app's pref; 0 = never sleep. Persisted to NVS.
 static void applyConfigJson(const char* body) {
   JsonDocument doc;
@@ -160,14 +160,14 @@ static void applyConfigJson(const char* body) {
 // end is unix ms on the wire.
 static void applyStateJson(const char* body) {
   JsonDocument doc;
-  if (deserializeJson(doc, body)) { logLine(String("[BLE] bad state json: ") + String(body).substring(0, 60)); return; }
+  if (deserializeJson(doc, body)) { logLine(String("[SER] bad state json: ") + String(body).substring(0, 60)); return; }
   const char* sid = doc["session"];
-  if (!sid || !*sid) {  // app sent {} → session over (replaces HTTP DELETE /state)
+  if (!sid || !*sid) {  // app sent {} → session over
     if (haveSess) { logLine("[STATE] stop — session ended"); goIdle(); }
     return;
   }
   long long endMs = doc["end"] | 0LL;  // 13-digit unix ms — overflows 32-bit long on ESP32
-  if (endMs <= 0) { logLine(String("[BLE] dropped malformed state: ") + String(body).substring(0, 60)); return; }
+  if (endMs <= 0) { logLine(String("[SER] dropped malformed state: ") + String(body).substring(0, 60)); return; }
   if (ignoredSess == sid) { lastBeacon = millis(); return; }
   bool isNew = !haveSess || sess.id != sid;
   sess.id = sid;
@@ -183,111 +183,61 @@ static void applyStateJson(const char* body) {
   logLine(String("[STATE] s=") + sid + " end=" + sess.end + " '" + sess.title + "'");
 }
 
-// device → app event over BLE notify (extend / logstop / complete)
+// device → app event over serial (extend / logstop / complete). The "EVT "
+// prefix keeps it parseable amid log lines; harmless if nothing is listening.
 static void sendEvent(const char* evt) {
-  if (!bleConnected || !bleEventChar) return;
-  bleEventChar->setValue(evt);
-  bleEventChar->notify();
-  Serial.printf("[EVENT] -> app %s\n", evt);
+  Serial.printf("EVT %s\n", evt);
 }
 
-// ---- BLE callbacks (NimBLE) ----
-class ServerCB : public NimBLEServerCallbacks {
-  void onConnect(NimBLEServer*, NimBLEConnInfo&) override { bleConnected = true; logLine("[BLE] app connected"); }
-  void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int) override {
-    bleConnected = false;
-    logLine("[BLE] app disconnected");
-    NimBLEDevice::startAdvertising();  // keep advertising so the app can reconnect
-  }
-};
-class StateCB : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) override { applyStateJson(c->getValue().c_str()); }
-};
-class ConfigCB : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) override { applyConfigJson(c->getValue().c_str()); }
-};
-
-static void bleSetup() {
-  NimBLEDevice::init("Timebox");  // NimBLE: BLE-only, ~100KB less RAM than Bluedroid
-  NimBLEServer* srv = NimBLEDevice::createServer();
-  srv->setCallbacks(new ServerCB());
-  NimBLEService* svc = srv->createService(BLE_SVC_UUID);
-  NimBLECharacteristic* state = svc->createCharacteristic(BLE_STATE_UUID,
-    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
-  state->setCallbacks(new StateCB());
-  bleEventChar = state;
-  NimBLECharacteristic* cfg = svc->createCharacteristic(BLE_CONFIG_UUID, NIMBLE_PROPERTY::WRITE);
-  cfg->setCallbacks(new ConfigCB());
-  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-  adv->addServiceUUID(BLE_SVC_UUID);
-  adv->setName("Timebox");
-  adv->enableScanResponse(true);
-  adv->start();
-  logLine("[BLE] advertising as 'Timebox'");
+// ---- serial input: complete JSON lines, dispatched by shape ----
+static void setClock(long long unixSecs) {
+  if (unixSecs < 1700000000LL) return;  // pre-2023 = garbage, ignore
+  long now = (long)time(NULL);
+  if (now > 1700000000L && labs(now - (long)unixSecs) < 5) return;  // close enough
+  struct timeval tv;
+  tv.tv_sec = (time_t)unixSecs;
+  tv.tv_usec = 0;
+  settimeofday(&tv, NULL);
+  logLine(String("[TIME] set from app: ") + (long)unixSecs);
+  // idle screen was drawn without a clock (blank) — force it now
+  if (!screenAsleep && screen == SCR_IDLE) drawIdle();
 }
 
-// ---- Todoist comment (log & stop) ----
-// ponytail: runs on a bg task — TLS handshake can block for seconds and
-// froze the countdown when done synchronously. Failure is visible in Todoist.
-static void commentTaskBg(void* p) {
-  String payload = *(String*)p;  // "taskId|plannedMin|actualMin"
-  delete (String*)p;
-  int a = payload.indexOf('|'), b = payload.indexOf('|', a + 1);
-  String taskId = payload.substring(0, a);
-  int planned = payload.substring(a + 1, b).toInt();
-  int actual = payload.substring(b + 1).toInt();
-  if (WiFi.status() != WL_CONNECTED) { vTaskDelete(NULL); return; }
-  // same format as sessionComment() in src/App.tsx
-  struct tm tm;
-  getLocalTime(&tm, 0);
+static void handleLine(char* line) {
+  if (!strchr(line, '{')) return;
   JsonDocument doc;
-  doc["task_id"] = taskId;
-  char content[96];
-  snprintf(content, sizeof(content), "\xE2\x8F\xB1 %d/%d \xC2\xB7 planned %dm \xC2\xB7 actual %dm \xC2\xB7 abandoned",
-           tm.tm_mon + 1, tm.tm_mday, planned, actual);
-  doc["content"] = content;
-  String body;
-  serializeJson(doc, body);
-  WiFiClientSecure c;
-  c.setInsecure();
-  HTTPClient http;
-  if (http.begin(c, "https://api.todoist.com/api/v1/comments")) {
-    http.addHeader("Authorization", "Bearer " TODOIST_TOKEN);
-    http.addHeader("Content-Type", "application/json");
-    http.setTimeout(8000);
-    int code = http.POST(body);
-    Serial.printf("[API] POST /comments -> %d\n", code);
+  if (deserializeJson(doc, line)) return;
+  if (doc["time"].is<long long>()) setClock(doc["time"]);  // rides along on state lines
+  if (doc["screenOffMin"].is<long>()) { applyConfigJson(line); return; }
+  if (doc["session"].is<const char*>() || doc.size() == 0) applyStateJson(line);  // {} = stop
+}
+
+static void serialPoll() {
+  static char buf[512];
+  static size_t n = 0;
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\r') continue;
+    if (c == '\n') {
+      buf[n] = 0;
+      if (n) handleLine(buf);
+      n = 0;
+    } else if (n < sizeof(buf) - 1) buf[n++] = c;
+    else n = 0;  // overflow — drop the line
   }
-  http.end();
-  vTaskDelete(NULL);
 }
 
 // ---- drawing ----
-// status icons, bottom center: wifi fan (accent = disconnected) + crescent moon
-// with the screen-off minutes badge (∞ = never) — replaces the old text line
-static void drawWifiIcon(int x, int y, uint16_t c) {
-  for (int i = 0; i < 3; i++) {
-    int r = 4 + i * 3;
-    for (int a = 25; a <= 155; a += 3) {
-      float rad = a * 0.0174533f;
-      gfx->fillCircle(x + (int)(r * cosf(rad)), y - (int)(r * sinf(rad)), 1, c);
-    }
-  }
-  gfx->fillCircle(x, y - 1, 2, c);
-}
+// status icons, bottom center: crescent moon with the screen-off minutes badge
+// (* = never) — replaces the old text line
 static void drawMoonIcon(int x, int y, uint16_t c) {
   gfx->fillCircle(x, y - 4, 5, c);
   gfx->fillCircle(x + 3, y - 6, 4, C_BG);
 }
 static void drawStatusIcons() {
   gfx->fillRect(0, 268, 480, 20, C_BG);
-  gfx->fillRect(0, 304, 480, 10, C_BG);  // the IP readout zone
-  drawWifiIcon(200, 282, WiFi.status() == WL_CONNECTED ? C_DIM : C_ACCENT);
-  drawMoonIcon(244, 282, C_DIM);
-  text(screenOffMs ? String(screenOffMs / 60000) : String("*"), 258, 278, 1, C_DIM, C_BG);  // * = never
-  // small IP, bottom right — so you know what to ping (subnet moves happen)
-  if (WiFi.status() == WL_CONNECTED)
-    text(WiFi.localIP().toString(), 470 - WiFi.localIP().toString().length() * 6, 306, 1, C_DIM, C_BG);
+  drawMoonIcon(228, 282, C_DIM);
+  text(screenOffMs ? String(screenOffMs / 60000) : String("*"), 242, 278, 1, C_DIM, C_BG);  // * = never
 }
 
 // touch feedback: accent bar under the pressed half — proves the touch
@@ -314,6 +264,8 @@ static void drawIdle() {
     strftime(dbuf, sizeof(dbuf), "%a %b %d", &tm);
     text(dbuf, 240, 190, 2, C_MUTED, C_BG, true);
     lastMinuteShown = tm.tm_min;
+  } else {
+    text("no clock yet — connect from the app", 240, 152, 1, C_MUTED, C_BG, true);
   }
   text("waiting for timer...", 240, 292, 1, C_DIM, C_BG, true);
   drawStatusIcons();
@@ -398,11 +350,6 @@ static void doExtend() {
 
 static void doLogStop() {
   sendEvent("logstop");  // app logs & exits through its own logAndExit(false)
-  long started = sess.end - (long)sess.minPlanned * 60;
-  int actual = (int)(((long)time(NULL) - started + 30) / 60);
-  if (actual < 0) actual = 0;
-  String* payload = new String(sess.taskId + "|" + sess.minPlanned + "|" + actual);
-  xTaskCreate(commentTaskBg, "comment", 12288, payload, 1, NULL);
   ignoredSess = sess.id;
   text("logged & stopped", 240, 220, 2, C_ACCENT, C_BG, true);
   flush();
@@ -456,15 +403,9 @@ static void lcdReset() {
   }
 }
 
-static void wifiEnsure() {
-  if (WiFi.status() == WL_CONNECTED) return;
-  WiFi.disconnect();
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  WiFi.setSleep(false);
-}
-
 // ---- Arduino ----
 void setup() {
+  Serial.setRxBufferSize(1024);  // state lines with long titles exceed the 256B default
   Serial.begin(115200);
   delay(300);  // let the UART settle so the banner isn't lost
   Serial.printf("[BOOT] psramFound=%d psramSize=%u freeHeap=%u freePsram=%u\n",
@@ -473,6 +414,9 @@ void setup() {
   nvs.begin("tb", true);
   screenOffMs = nvs.getUInt("soff", SCREEN_OFF_MS);
   nvs.end();
+  // observable at boot: NVS persists across flashes — a stored 0 ("never")
+  // would silently disable the timeout, so say what we actually loaded
+  logLine(String("[CFG] screen off after ") + (screenOffMs ? String(screenOffMs / 60000) + "m" : String("never")));
   lcdReset();
   // touch chip is held in reset by the expander at power-on — release all pins high
   Wire.beginTransmission(0x20); Wire.write(0x03); Wire.write(0x00); Wire.endTransmission();
@@ -488,28 +432,29 @@ void setup() {
   else { delete cv; cv = nullptr; Serial.printf("[LCD] canvas FAILED (direct draws = flicker) freePsram=%u freeHeap=%u\n", (unsigned)ESP.getFreePsram(), (unsigned)ESP.getFreeHeap()); }
   gfx->fillScreen(C_BG);
   text("connecting WiFi...", 240, 152, 2, C_MUTED, C_BG, true);
+  flush();
+  // WiFi for NTP only (normal-clock duty with the app closed). Non-blocking:
+  // the app can also push {time} over serial if the network is down.
   WiFi.begin(WIFI_SSID, WIFI_PASS);
-  WiFi.setSleep(false);  // ponytail: DTIM power-save drops buffered packets (beacons!)
-  uint32_t t = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t < 15000) delay(250);
-  Serial.printf("[BOOT] wifi status=%d ip=%s\n", WiFi.status(), WiFi.localIP().toString().c_str());
+  WiFi.setSleep(false);  // ponytail: DTIM power-save drops packets and jitters the loop
   configTzTime(TZ_POSIX, "pool.ntp.org", "time.nist.gov");
-  bleSetup();
-  logLine(String("[NET] ip=") + WiFi.localIP().toString() + " rssi=" + WiFi.RSSI());
+  MDNS.begin("timebox");  // timebox.local — discovery for whatever comes later
+  logLine("[SER] ready — waiting for app over USB serial");
   drawIdle();
 }
 
 void loop() {
-  wifiEnsure();
+  serialPoll();
+
+  if (WiFi.status() != WL_CONNECTED) {  // NTP clock duty only; cheap check
+    static uint32_t lastTry = 0;
+    if (millis() - lastTry > 15000) { lastTry = millis(); WiFi.disconnect(); WiFi.begin(WIFI_SSID, WIFI_PASS); }
+  }
 
   int16_t tx, ty;
   handleTouch(readTouch(tx, ty), tx);
 
   if (screen == SCR_IDLE) {
-    // live wifi hint: redraw the status icons when the link state flips
-    static int wifiShown = -1;
-    int up = WiFi.status() == WL_CONNECTED ? 1 : 0;
-    if (up != wifiShown) { wifiShown = up; drawStatusIcons(); flush(); }
     updateIdleClock();
     // screen sleep on the idle clock only; a running timer stays lit (0 = never)
     if (screenOffMs && !screenAsleep) {
