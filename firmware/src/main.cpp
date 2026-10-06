@@ -3,10 +3,7 @@
 // Left hold = log & stop, right tap = +5 min, right hold = mark complete (mirrors the web app).
 #include <Arduino.h>
 #include <WiFi.h>
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
-#include <BLE2902.h>
+#include <NimBLEDevice.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -61,7 +58,7 @@ static uint32_t screenOffMs = SCREEN_OFF_MS;  // app-overridable, persisted in N
 // network fetch). One service, two characteristics (docs/firmware-v2.md):
 //   STATE  write {session,id,title,minutes,end} ({} = stop) · notify = events
 //   CONFIG write {screenOffMin}
-static BLECharacteristic* bleEventChar = nullptr;
+static NimBLECharacteristic* bleEventChar = nullptr;
 static bool bleConnected = false;
 
 // log ring (serial + curl via the log server is gone with HTTP; serial only now)
@@ -191,38 +188,37 @@ static void sendEvent(const char* evt) {
   Serial.printf("[EVENT] -> app %s\n", evt);
 }
 
-// ---- BLE callbacks ----
-class ServerCB : public BLEServerCallbacks {
-  void onConnect(BLEServer*) override { bleConnected = true; logLine("[BLE] app connected"); }
-  void onDisconnect(BLEServer* s) override {
+// ---- BLE callbacks (NimBLE) ----
+class ServerCB : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer*, NimBLEConnInfo&) override { bleConnected = true; logLine("[BLE] app connected"); }
+  void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int) override {
     bleConnected = false;
     logLine("[BLE] app disconnected");
-    s->startAdvertising();  // keep advertising so the app can reconnect
+    NimBLEDevice::startAdvertising();  // keep advertising so the app can reconnect
   }
 };
-class StateCB : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* c) override { applyStateJson(c->getValue().c_str()); }
+class StateCB : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) override { applyStateJson(c->getValue().c_str()); }
 };
-class ConfigCB : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* c) override { applyConfigJson(c->getValue().c_str()); }
+class ConfigCB : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) override { applyConfigJson(c->getValue().c_str()); }
 };
 
 static void bleSetup() {
-  BLEDevice::init("Timebox");
-  BLEServer* srv = BLEDevice::createServer();
+  NimBLEDevice::init("Timebox");  // NimBLE: BLE-only, ~100KB less RAM than Bluedroid
+  NimBLEServer* srv = NimBLEDevice::createServer();
   srv->setCallbacks(new ServerCB());
-  BLEService* svc = srv->createService(BLE_SVC_UUID);
-  BLECharacteristic* state = svc->createCharacteristic(BLE_STATE_UUID,
-    BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY);
+  NimBLEService* svc = srv->createService(BLE_SVC_UUID);
+  NimBLECharacteristic* state = svc->createCharacteristic(BLE_STATE_UUID,
+    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
   state->setCallbacks(new StateCB());
-  state->addDescriptor(new BLE2902());  // enable notifications
   bleEventChar = state;
-  BLECharacteristic* cfg = svc->createCharacteristic(BLE_CONFIG_UUID, BLECharacteristic::PROPERTY_WRITE);
+  NimBLECharacteristic* cfg = svc->createCharacteristic(BLE_CONFIG_UUID, NIMBLE_PROPERTY::WRITE);
   cfg->setCallbacks(new ConfigCB());
-  svc->start();
-  BLEAdvertising* adv = BLEDevice::getAdvertising();
+  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   adv->addServiceUUID(BLE_SVC_UUID);
-  adv->setScanResponse(true);
+  adv->setName("Timebox");
+  adv->enableScanResponse(true);
   adv->start();
   logLine("[BLE] advertising as 'Timebox'");
 }
@@ -461,6 +457,9 @@ static void wifiEnsure() {
 // ---- Arduino ----
 void setup() {
   Serial.begin(115200);
+  delay(300);  // let the UART settle so the banner isn't lost
+  Serial.printf("[BOOT] psramFound=%d psramSize=%u freeHeap=%u freePsram=%u\n",
+    psramFound(), (unsigned)ESP.getPsramSize(), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram());
   Preferences nvs;  // last app-pushed config survives reboots
   nvs.begin("tb", true);
   screenOffMs = nvs.getUInt("soff", SCREEN_OFF_MS);
@@ -476,8 +475,8 @@ void setup() {
   pinMode(25, OUTPUT);       // backlight (dash_35 kBacklightPin)
   digitalWrite(25, HIGH);
   cv = new Arduino_Canvas(480, 320, gfx);
-  if (cv->begin(GFX_SKIP_OUTPUT_BEGIN)) gfx = cv;
-  else { delete cv; cv = nullptr; }  // ponytail: no PSRAM → direct draws, some flicker
+  if (cv->begin(GFX_SKIP_OUTPUT_BEGIN)) { gfx = cv; Serial.printf("[LCD] canvas OK, freePsram=%u freeHeap=%u\n", (unsigned)ESP.getFreePsram(), (unsigned)ESP.getFreeHeap()); }
+  else { delete cv; cv = nullptr; Serial.printf("[LCD] canvas FAILED (direct draws = flicker) freePsram=%u freeHeap=%u\n", (unsigned)ESP.getFreePsram(), (unsigned)ESP.getFreeHeap()); }
   gfx->fillScreen(C_BG);
   text("connecting WiFi...", 240, 152, 2, C_MUTED, C_BG, true);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
