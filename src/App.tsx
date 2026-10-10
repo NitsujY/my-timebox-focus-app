@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { handleOAuthCallback, load, refreshToken, save, startOAuth } from "./auth";
 import {
   deviceConfig,
@@ -211,6 +211,12 @@ export default function App() {
   const [noDuration, setNoDuration] = useState(() => load("tb_no_duration", false));
   const [sessions, setSessions] = useState<Session[]>(() => load("tb_sessions", []));
   const [archivedDay, setArchivedDay] = useState(() => load("tb_archived", ""));
+  // task_id -> minutes actually timed, all history (cross-device via comment backfill)
+  const spentBy = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const s of sessions) m[s.task_id] = (m[s.task_id] ?? 0) + s.actual_minutes;
+    return m;
+  }, [sessions]);
   const [active, setActive] = useState<{ task: Task; minutes: number } | null>(null);
   const [celebrating, setCelebrating] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -774,6 +780,7 @@ export default function App() {
               <BacklogList
                 tasks={backlogTasks}
                 expandedId={expandedId}
+                spentBy={spentBy}
                 onToggle={toggleRow}
                 onMove={roles.focus ? (x) => moveTo(x, roles.focus!) : undefined}
                 onComplete={completeWithLog}
@@ -797,6 +804,7 @@ export default function App() {
             planBanner={prefs.planBanner}
             durations={prefs.durations}
             defaultMinutes={prefs.defaultMinutes}
+            spentBy={spentBy}
             expandedId={expandedId}
             onToggle={toggleRow}
             onMove={(t) => roles.focus && moveTo(t, roles.focus)}
@@ -913,6 +921,7 @@ function FocusView({
   planBanner,
   durations,
   defaultMinutes,
+  spentBy,
   expandedId,
   onToggle,
   onMove,
@@ -935,6 +944,7 @@ function FocusView({
   planBanner: boolean;
   durations: number[];
   defaultMinutes: number;
+  spentBy: Record<string, number>;
   expandedId: string | null;
   onToggle: (id: string) => void;
   onMove: (t: Task) => void;
@@ -998,6 +1008,7 @@ function FocusView({
                     t={t}
                     durations={durations}
                     defaultMinutes={defaultMinutes}
+                    spentBy={spentBy}
                     expanded={expandedId === t.id}
                     onToggle={() => onToggle(t.id)}
                     onStart={onStart}
@@ -1044,6 +1055,7 @@ function FocusView({
                 large
                 durations={durations}
                 defaultMinutes={defaultMinutes}
+                spentBy={spentBy}
                 expanded={expandedId === t.id}
                 onToggle={() => onToggle(t.id)}
                 onStart={onStart}
@@ -1072,6 +1084,7 @@ function FocusView({
 function BacklogList({
   tasks,
   expandedId,
+  spentBy,
   onToggle,
   onMove,
   onComplete,
@@ -1083,6 +1096,7 @@ function BacklogList({
 }: {
   tasks: Task[];
   expandedId: string | null;
+  spentBy: Record<string, number>;
   onToggle: (id: string) => void;
   onMove?: (t: Task) => void;
   onComplete: (t: Task) => void;
@@ -1103,6 +1117,7 @@ function BacklogList({
             t={t}
             durations={durations}
             defaultMinutes={defaultMinutes}
+            spentBy={spentBy}
             expanded={expandedId === t.id}
             onToggle={() => onToggle(t.id)}
             onMove={onMove}
@@ -1136,6 +1151,7 @@ function TaskRow({
   onDuration,
   onDelete,
   durations,
+  spentBy,
 }: {
   t: Task;
   large?: boolean;
@@ -1150,6 +1166,7 @@ function TaskRow({
   onDuration: (t: Task, minutes: number) => void;
   onDelete: (t: Task) => void;
   durations: number[];
+  spentBy: Record<string, number>;
 }) {
   const rootRef = useRef<HTMLLIElement>(null);
 
@@ -1170,9 +1187,22 @@ function TaskRow({
     };
   }, [expanded, onToggle]);
 
-  const dur = t.duration && (
+  const spent = spentBy[t.id] ?? 0;
+  // planned minutes: the task estimate, else what ▶ would actually run (defaultMinutes)
+  const planned = t.duration?.amount ?? defaultMinutes;
+  const over = spent > planned;
+  // chip: always "spent/planned" once any time is logged; bare estimate before that.
+  // "23/–" is never shown — the timer would run planned minutes, so that's the plan.
+  const dur = (
     <span className="shrink-0 font-mono text-[13px] tabular-nums text-zinc-500">
-      {t.duration.amount}m
+      {spent > 0 ? (
+        <>
+          <span className={over ? "text-orange-500" : "text-zinc-400"}>{spent}m/</span>
+          {planned}m
+        </>
+      ) : (
+        t.duration && `${t.duration.amount}m`
+      )}
     </span>
   );
   const actions = (
@@ -2000,11 +2030,13 @@ function Timer({
   const C = 2 * Math.PI * 48;
 
   const logAndExit = (completed: boolean) => {
+    const secs = elapsedRef.current;
     onLog({
       task_id: task.id,
       task_name: task.content,
       planned_minutes: minutes,
-      actual_minutes: Math.round(elapsedRef.current / 60),
+      // any real run counts at least 1m — Math.round(29s) -> 0 would erase the effort
+      actual_minutes: secs > 0 ? Math.max(1, Math.round(secs / 60)) : 0,
       completed,
       timestamp: Date.now(),
     });
