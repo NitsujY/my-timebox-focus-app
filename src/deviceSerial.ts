@@ -21,8 +21,9 @@ interface SerialPortLike {
 
 const nav2 = navigator as Navigator & {
   serial?: {
-    requestPort(): Promise<SerialPortLike>;
+    requestPort(o?: { filters: { usbVendorId: number }[] }): Promise<SerialPortLike>;
     getPorts(): Promise<SerialPortLike[]>;
+    addEventListener(type: "connect", listener: () => void): void;
   };
 };
 
@@ -40,6 +41,10 @@ const enc = new TextEncoder();
 export function deviceSerialSupported(): boolean {
   return !!nav2.serial;
 }
+
+// After the one-time grant, Chrome fires "connect" for a replugged granted
+// port with no gesture needed — reconnect silently in the background.
+nav2.serial?.addEventListener("connect", () => { if (enabled) void ensure(false); });
 
 // device → app: the firmware logs freely; only "EVT <name>" lines are events.
 async function readLoop(p: SerialPortLike, r: ReadableStreamDefaultReader<Uint8Array>) {
@@ -68,9 +73,10 @@ async function readLoop(p: SerialPortLike, r: ReadableStreamDefaultReader<Uint8A
 }
 
 // Open the port and push the time — the device may have no NTP if WiFi is
-// down; we are its backup clock. allowPicker: only explicit user-driven paths
-// (starting a timer, changing prefs) may pop the port dialog; background paths
-// (stop, events) silently use a previously-granted port or fail quietly.
+// down; we are its backup clock. allowPicker: only deviceSetEnabled(true)
+// (the Settings toggle's click) may pop the port dialog, and only once per
+// origin; every other path silently uses a previously-granted port or fails
+// quietly — requestPort() outside a user gesture would throw anyway.
 async function ensure(allowPicker: boolean): Promise<boolean> {
   if (!enabled || !deviceSerialSupported()) return false;
   if (port && writer) return true;
@@ -78,7 +84,9 @@ async function ensure(allowPicker: boolean): Promise<boolean> {
   connecting = (async () => {
     try {
       const granted = await nav2.serial!.getPorts();
-      port = granted[0] ?? (allowPicker ? await nav2.serial!.requestPort() : null);
+      port = granted[0] ?? (allowPicker
+        ? await nav2.serial!.requestPort({ filters: [{ usbVendorId: 0x1a86 }] }) // CH343 (WCH)
+        : null);
       if (!port) return;
       await port.open({ baudRate: 115200 });
       writer = port.writable!.getWriter();
@@ -107,13 +115,19 @@ async function write(body: object): Promise<void> {
 // The bare {} stop line is exempt: {} must stay empty so the device reads it
 // as "session over" instead of a clock sync.
 async function writeState(body: object): Promise<void> {
-  if (!(await ensure(true))) return;
+  if (!(await ensure(false))) return; // never pop the picker from timer paths
   await write(Object.keys(body).length ? { time: Math.floor(Date.now() / 1000), ...body } : body);
 }
 
 export function deviceSetEnabled(on: boolean) {
   enabled = on;
-  if (!on) deviceStop();
+  if (!on) { deviceStop(); return; }
+  // The one and only picker: App.tsx calls this from an effect, but the
+  // Settings toggle's click leaves transient activation active (~5s), so the
+  // picker is allowed. On plain page load there is no activation — skip the
+  // picker (it would throw) and just reconnect a granted port silently.
+  const gestured = !!(navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation?.isActive;
+  void ensure(gestured);
 }
 
 export function deviceStart(task: { id: string; content: string }, minutes: number, endMs: number) {
@@ -145,7 +159,7 @@ export function deviceStop() {
 export function deviceConfig(screenOffMin: number) {
   if (!enabled) return;
   void (async () => {
-    if (await ensure(true)) await write({ screenOffMin });
+    if (await ensure(false)) await write({ screenOffMin });
   })();
 }
 
