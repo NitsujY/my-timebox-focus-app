@@ -1255,11 +1255,15 @@ function TaskRow({
         />
       ) : (
         <div className={`flex items-center gap-2 px-2 ${large ? "min-h-14" : "min-h-11"}`}>
-          <button
-            className={`min-w-0 flex-1 truncate text-left ${large ? "text-[15px] font-medium" : "text-[14px]"}`}
-            onClick={onToggle}
-          >
-            {t.content}
+          <button className="min-w-0 flex-1 text-left" onClick={onToggle}>
+            <span className={`block truncate ${large ? "text-[15px] font-medium" : "text-[14px]"}`}>
+              {t.content}
+            </span>
+            {t.description && (
+              <span className="block truncate text-[11px] text-zinc-500">
+                {t.description.split("\n")[0]}
+              </span>
+            )}
           </button>
           {dur}
           {actions}
