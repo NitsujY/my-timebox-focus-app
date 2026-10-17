@@ -4,6 +4,7 @@ import {
   deviceConfig,
   deviceEvents,
   deviceSetEnabled,
+  deviceSetPaused,
   deviceStart,
   deviceStop,
   deviceUpdate,
@@ -1950,7 +1951,7 @@ function Timer({
       }
     }, 5000);
     const iv = setInterval(() => {
-      if (paused) return;
+      if (pausedRef.current) return; // ref, not state — pausing must not re-run this effect (it would deviceStop/deviceStart churn)
       const now = Date.now();
       const rem = Math.max(0, (endRef.current - now) / 1000);
       const ov = Math.max(0, (now - endRef.current) / 1000); // overrun past planned end
@@ -1987,7 +1988,7 @@ function Timer({
       deviceStop();
       document.title = "Timebox Focus";
     };
-  }, [paused, task.content, gentle]);
+  }, [task.content, gentle]);
 
   const extend = (m: number) => {
     endRef.current = Math.max(endRef.current, Date.now()) + m * 60_000;
@@ -2016,13 +2017,17 @@ function Timer({
 
   // keep endTime honest across pause: shift it forward by paused duration
   const pauseStarted = useRef(0);
+  const pausedRef = useRef(false);
   useEffect(() => {
+    pausedRef.current = paused;
     if (paused) {
       document.title = `⏸ paused - ${task.content}`;
       pauseStarted.current = Date.now();
+      deviceSetPaused(true, endRef.current); // device freezes its digits at end − now
     } else if (pauseStarted.current) {
       endRef.current += Date.now() - pauseStarted.current;
       pauseStarted.current = 0;
+      deviceSetPaused(false, endRef.current); // device thaws at the shifted end
     }
   }, [paused, task.content]);
 

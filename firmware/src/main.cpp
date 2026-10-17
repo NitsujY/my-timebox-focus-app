@@ -41,7 +41,7 @@ static void text(const String& s, int x, int y, uint8_t size, uint16_t fg, uint1
 }
 
 // ---- session state (driven by the app over USB serial) ----
-struct Session { String id, taskId, title; long end; int minPlanned; };
+struct Session { String id, taskId, title; long end; int minPlanned; bool paused; long remainS; };
 static Session sess;
 static bool haveSess = false;
 static String ignoredSess;          // after device-side log & stop, until a new session id
@@ -60,7 +60,7 @@ static uint32_t screenOffMs = SCREEN_OFF_MS;  // app-overridable, persisted in N
 
 // ---- USB serial: the app (Web Serial) drives the device directly ----
 // One JSON object per line, app -> device (docs/firmware-v2.md):
-//   {session,id,title,minutes,end,time}   start / heartbeat ({} = stop)
+//   {session,id,title,minutes,end,time,paused?}   start / heartbeat ({} = stop)
 //   {screenOffMin}                        screen-off timeout
 //   {time}                                unix secs — no NTP without WiFi
 // device -> app events are "EVT <name>" lines (extend / logstop / complete).
@@ -158,7 +158,9 @@ static void applyConfigJson(const char* body) {
 }
 
 // STATE write: {session,id,title,minutes,end} starts/heartbeats; {} (or no session) stops.
-// end is unix ms on the wire.
+// end is unix ms on the wire. paused:true freezes the countdown at (end − now);
+// the app resumes with paused:false and an end already shifted by the pause.
+static void drawTimer();  // fwd — defined with the drawing code below
 static void applyStateJson(const char* body) {
   JsonDocument doc;
   if (deserializeJson(doc, body)) { logLine(String("[SER] bad state json: ") + String(body).substring(0, 60)); return; }
@@ -176,6 +178,12 @@ static void applyStateJson(const char* body) {
   sess.title = (const char*)(doc["title"] | "");
   sess.end = (long)(endMs / 1000);
   sess.minPlanned = doc["minutes"] | 0;
+  bool pz = doc["paused"] | false;
+  if (pz != sess.paused) {  // pause edge only — heartbeats must not re-freeze the digits
+    sess.paused = pz;
+    if (pz) sess.remainS = sess.end - (long)time(NULL);
+    if (screen == SCR_TIMER) drawTimer();  // full redraw: paint/clear the "paused" label
+  }
   haveSess = true;
   lastBeacon = millis();
   if (screenAsleep) wakeScreen();  // new timer lights the screen up
@@ -302,7 +310,7 @@ static void updateIdleClock() {
 }
 
 static void drawDigits() {
-  long left = sess.end - (long)time(NULL);
+  long left = sess.paused ? sess.remainS : sess.end - (long)time(NULL);
   if (left == lastShownS) return;
   lastShownS = left;
   // manual MM:SS — GCC 8.4's -Werror=format-truncation can't prove snprintf is
@@ -319,7 +327,7 @@ static void drawDigits() {
   *p++ = char('0' + ss / 10); *p++ = char('0' + ss % 10);
   *p = 0;
   gfx->fillRect(20, 96, 440, 112, C_BG);
-  text(buf, 240, 104, 12, left < 0 ? C_ACCENT : C_TEXT, C_BG, true);
+  text(buf, 240, 104, 12, left < 0 ? C_ACCENT : (sess.paused ? C_MUTED : C_TEXT), C_BG, true);
   flush();
 }
 
@@ -332,6 +340,7 @@ static void drawTimer() {
   text(title, 240, 36, 2, C_MUTED, C_BG, true);
   text("hold = log & stop", 120, 298, 1, C_DIM, C_BG, true);
   text("tap +5 / hold = done", 360, 298, 1, C_DIM, C_BG, true);
+  if (sess.paused) text("paused", 240, 216, 2, C_DIM, C_BG, true);
   drawDigits();
   flush();
 }
@@ -345,6 +354,7 @@ static void goIdle() {
 
 static void doExtend() {
   sess.end += EXTEND_S;
+  if (sess.paused) sess.remainS += EXTEND_S;  // frozen digits move too
   sendEvent("extend");  // app applies extend(5) on the notification
   drawDigits();
 }

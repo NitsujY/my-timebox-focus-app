@@ -25,7 +25,7 @@ permissioned browser API, so it **works from the HTTPS-deployed app**
 
 ```
 app ──USB CDC @115200, one JSON object per line──▶ ESP32
-  write {session, id, title, minutes, end, time}   start / heartbeat (end = unix ms, time = unix s)
+  write {session, id, title, minutes, end, time, paused?}   start / heartbeat (end = unix ms, time = unix s)
   write {}                                          session over
   write {screenOffMin}                              screen-off timeout (min, 0 = never)
   read  "EVT extend" | "EVT logstop" | "EVT complete"   touchscreen events → app
@@ -53,6 +53,7 @@ heartbeats (device returns to idle within ~25 s).
 | Timer mounts | send `{session, id, title, minutes, end, time}` — device shows the countdown |
 | Every 10 s while running | re-send state (heartbeat + carries current `end` and `time`) |
 | `extend(m)` | re-send state with the new `end` |
+| pause / resume | re-send state with `paused: true` (device freezes its digits at `end − now`) / `paused: false` with the shifted `end`; the flag rides the 10 s heartbeat too, so heartbeats can't thaw it |
 | Timer unmounts (complete / log & stop / ✕) | send `{}` — device returns to idle |
 | Every 5 s while running | drain the event queue — `extend` → `extend(5)`, `logstop` → log & exit, `complete` → log as completed + close task (same as the app's own buttons). Events arrive as `EVT` serial lines into a queue, so this poll just drains it. |
 | Enabling the bridge, or changing the screen-off pref | send `{screenOffMin}` |

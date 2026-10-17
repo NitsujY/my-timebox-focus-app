@@ -30,6 +30,7 @@ const nav2 = navigator as Navigator & {
 let enabled = false;
 let session = "";
 let current: { id: string; title: string; minutes: number } | null = null;
+let paused = false; // mirrors the app's pause; rides every state line so the 10s heartbeat can't thaw the device
 
 let port: SerialPortLike | null = null;
 let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
@@ -133,6 +134,7 @@ export function deviceSetEnabled(on: boolean) {
 export function deviceStart(task: { id: string; content: string }, minutes: number, endMs: number) {
   if (!enabled) return;
   session = `${Date.now()}`;
+  paused = false;
   current = { id: task.id, title: task.content, minutes };
   void writeState({ session, ...current, end: endMs });
 }
@@ -140,13 +142,21 @@ export function deviceStart(task: { id: string; content: string }, minutes: numb
 // heartbeat + extend share this: re-post the current wall-clock end
 export function deviceUpdate(endMs: number) {
   if (!enabled || !session || !current) return;
-  void writeState({ session, ...current, end: endMs });
+  void writeState({ session, ...current, end: endMs, ...(paused ? { paused: true } : {}) });
+}
+
+// pause freezes the device's digits at (end − now); resume sends the
+// already-shifted end and clears the flag
+export function deviceSetPaused(on: boolean, endMs: number) {
+  paused = on;
+  deviceUpdate(endMs);
 }
 
 export function deviceStop() {
   if (!session) return;
   session = "";
   current = null;
+  paused = false;
   // reconnect without the picker: if the original connect died (or the user
   // cancelled the picker), a previously-granted port still lets the {} land;
   // nothing granted → fail quietly and the device's heartbeat timeout takes
