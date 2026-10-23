@@ -2824,16 +2824,19 @@ function ProjectChips({
   if (chips.length < 2) return null; // nothing useful to switch between
   return (
     <div className="border-t border-zinc-800/60 bg-zinc-900/30">
-      <div className="mx-auto flex max-w-[640px] items-center gap-1 overflow-x-auto px-4 py-1.5">
+      <div className="mx-auto flex max-w-[640px] items-center gap-1.5 overflow-x-auto px-4 py-2">
         <span className="mr-1 shrink-0 text-[11px] tracking-wide text-zinc-600 uppercase">
           List
         </span>
+        {/* pill chips, visually distinct from the nav tabs above (rounded-md ghost buttons) */}
         {chips.map((p) => (
           <button
             key={p.id}
             title={`Switch to ${p.name}`}
-            className={`${btn} max-w-36 shrink-0 truncate px-2 py-1 text-[12px] ${
-              p.id === projectId ? "bg-zinc-800 text-zinc-100" : "text-zinc-500"
+            className={`max-w-36 shrink-0 truncate rounded-full border px-3 py-1 text-[12px] transition-colors duration-150 ${
+              p.id === projectId
+                ? "border-orange-500/50 bg-orange-500/15 text-orange-400"
+                : "border-zinc-800 bg-zinc-900 text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
             }`}
             onClick={() => p.id !== projectId && onProject(p.id)}
           >
