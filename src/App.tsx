@@ -231,6 +231,18 @@ export default function App() {
   );
   const [showRef, setShowRef] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement).closest?.("input,textarea")) return; // typing
+      if (e.key === "?") {
+        e.preventDefault();
+        setShowRef((s) => !s);
+      }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
   const [oauthErr, setOauthErr] = useState("");
 
   // complete the OAuth redirect (PKCE) before anything else needs the token
@@ -693,7 +705,7 @@ export default function App() {
           <div className="flex items-center justify-end gap-2">
             <button
               className={`${btn} px-2 text-zinc-500`}
-              title="How it works"
+              title="How it works (?)"
               onClick={() => setShowRef((s) => !s)}
             >
               ?
@@ -988,45 +1000,35 @@ function FocusView({
 
       {bufferId && (
         <section>
-          {bufferTasks.length === 0 ? (
-            <div className="flex min-h-11 items-center gap-2 px-2">
-              <p className="shrink-0 text-[13px] text-zinc-500">Buffer</p>
-              <AddRow
-                inline
-                placeholder="＋ Quick add…"
-                hotkey="b"
-                sections={sections}
-                onAdd={(raw) => onAdd(raw, bufferId)}
-              />
-            </div>
-          ) : (
-            <>
-              <p className="mb-1 px-2 text-[13px] text-zinc-500">Buffer</p>
-              <ul className="space-y-0.5">
-                {bufferTasks.map((t) => (
-                  <TaskRow
-                    key={t.id}
-                    t={t}
-                    durations={durations}
-                    defaultMinutes={defaultMinutes}
-                    spentBy={spentBy}
-                    expanded={expandedId === t.id}
-                    onToggle={() => onToggle(t.id)}
-                    onStart={onStart}
-                    onComplete={() => onComplete(t)}
-                    onUpdate={onUpdate}
-                    onDuration={onDuration}
-                    onDelete={onDelete}
-                  />
-                ))}
-              </ul>
-              <AddRow
-                placeholder="＋ Quick add to Buffer…"
-                hotkey="b"
-                sections={sections}
-                onAdd={(raw) => onAdd(raw, bufferId)}
-              />
-            </>
+          <div className="flex items-center gap-2 px-2">
+            <p className="shrink-0 text-[13px] text-zinc-500">Buffer</p>
+            <AddRow
+              inline
+              placeholder="＋ Quick add…"
+              hotkey="b"
+              sections={sections}
+              onAdd={(raw) => onAdd(raw, bufferId)}
+            />
+          </div>
+          {bufferTasks.length > 0 && (
+            <ul className="mt-1 space-y-0.5">
+              {bufferTasks.map((t) => (
+                <TaskRow
+                  key={t.id}
+                  t={t}
+                  durations={durations}
+                  defaultMinutes={defaultMinutes}
+                  spentBy={spentBy}
+                  expanded={expandedId === t.id}
+                  onToggle={() => onToggle(t.id)}
+                  onStart={onStart}
+                  onComplete={() => onComplete(t)}
+                  onUpdate={onUpdate}
+                  onDuration={onDuration}
+                  onDelete={onDelete}
+                />
+              ))}
+            </ul>
           )}
         </section>
       )}
@@ -2509,6 +2511,13 @@ function RefPanel({ onClose }: { onClose: () => void }) {
           <strong className="text-zinc-200">Review daily.</strong> Planned vs actual, every evening.
           Calibration is the whole game.
         </li>
+      </ul>
+      <h3 className="mt-6 mb-2 text-[13px] font-semibold text-zinc-300">Shortcuts</h3>
+      <ul className="space-y-1 font-mono text-[12px] text-zinc-400">
+        <li><kbd className="text-zinc-200">?</kbd> — this panel</li>
+        <li><kbd className="text-zinc-200">N</kbd> — add to Focus</li>
+        <li><kbd className="text-zinc-200">B</kbd> — quick add to Buffer</li>
+        <li><kbd className="text-zinc-200">Space</kbd> — pause timer · <kbd className="text-zinc-200">Enter</kbd> — complete · <kbd className="text-zinc-200">Esc</kbd> — exit</li>
       </ul>
     </aside>
   );

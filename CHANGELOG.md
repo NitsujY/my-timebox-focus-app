@@ -10,6 +10,8 @@
   fine with the CPU to itself.
 - **Device screen-off timeout**: Settings → ESP32 companion display picks how long the idle clock stays lit (1/5/15/30 min or never). Pushed over the LAN relay and persisted on the device (NVS), so it survives reboots.
 - **Backlog quick-capture**: the add input sits at the top of the Backlog tab, always open and focused on entry. New tasks land directly beneath it (equal priority/due now sorts newest-first via `added_at`) with a brief highlight.
+- **Compact Buffer strip**: one-line header (label + inline quick-add) with tasks below; the separate bottom add row is gone.
+- **`?` shortcut**: toggles the "How it works" panel, which now also lists the keyboard shortcuts.
 
 ## v8 — Fast switching & overrun visibility
 
