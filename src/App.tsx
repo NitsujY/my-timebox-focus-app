@@ -140,7 +140,7 @@ async function flushQueue(token: string) {
 
 function fmt(sec: number) {
   const s = Math.max(0, Math.round(sec));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 }
 
 function alarm() {
@@ -2038,7 +2038,6 @@ function Timer({
   }, [paused, task.content]);
 
   const frac = Math.max(0, left / totalRef.current);
-  const C = 2 * Math.PI * 48;
 
   const logAndExit = (completed: boolean) => {
     const secs = elapsedRef.current;
@@ -2155,24 +2154,15 @@ function Timer({
           />
         </div>
       )}
-      <div className="relative flex h-[64vmin] w-[64vmin] items-center justify-center">
-        <svg viewBox="0 0 100 100" className="pointer-events-none absolute inset-0 h-full w-full -rotate-90">
-          <circle cx="50" cy="50" r="48" fill="none" stroke="#27272a" strokeWidth="0.75" />
-          <circle
-            cx="50"
-            cy="50"
-            r="48"
-            fill="none"
-            stroke={paused ? "#3f3f46" : "#f97316"}
-            strokeWidth="0.75"
-            strokeLinecap="round"
-            strokeDasharray={C}
-            strokeDashoffset={C * (1 - frac)}
-            className="transition-[stroke-dashoffset] duration-150"
+      <div className="relative flex items-center justify-center">
+        <div className="fixed inset-x-0 top-0 h-0.5 bg-zinc-800">
+          <div
+            className={`h-full transition-[width] duration-150 ${paused ? "bg-zinc-700" : "bg-orange-500"}`}
+            style={{ width: `${frac * 100}%` }}
           />
-        </svg>
+        </div>
         <button
-          className={`relative rounded-full p-[10vmin] font-mono text-[14vmin] leading-none font-bold tabular-nums outline-none transition-colors duration-150 ${
+          className={`relative rounded-full p-[5vmin] font-mono text-[min(19vh,23vw)] leading-none font-bold tabular-nums outline-none transition-colors duration-150 ${
             paused ? "text-zinc-600" : frac <= 0.1 ? "text-orange-500" : "text-zinc-100 hover:bg-zinc-900/60 active:bg-zinc-800/60"
           }`}
           title={paused ? "Resume (Space)" : "Pause (Space)"}
