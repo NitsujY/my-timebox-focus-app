@@ -58,7 +58,7 @@ type Task = {
   duration?: { amount: number; unit: string } | null;
   added_at?: string; // ISO — tie-breaker so newest lands on top
 };
-type Project = { id: string; name: string };
+type Project = { id: string; name: string; is_favorite?: boolean };
 type SectionMap = Record<string, string>; // lowercase section name -> id
 type Session = {
   task_id: string;
@@ -202,6 +202,7 @@ function parseAdd(raw: string, sections: SectionMap) {
 export default function App() {
   const [token, setToken] = useState(() => load("tb_token", ""));
   const [projectId, setProjectId] = useState(() => load("tb_project", ""));
+  const [projects, setProjects] = useState<Project[]>(() => load("tb_projects", []));
   const [tasks, setTasks] = useState<Task[]>([]);
   const tasksRef = useRef<Task[]>([]);
   tasksRef.current = tasks; // fresh snapshot for async rollback paths
@@ -297,10 +298,18 @@ export default function App() {
     if (!token || !projectId) return;
     try {
       await flushQueue(token);
-      const [sec, ts] = await Promise.all([
+      const [pr, sec, ts] = await Promise.all([
+        api(token, "/projects").catch(() => null),
         api(token, `/sections?project_id=${projectId}`),
         api(token, `/tasks?project_id=${projectId}`),
       ]);
+      if (pr) {
+        const plist = arr<Project>(pr)
+          .filter((p) => p.name !== "Inbox")
+          .sort((a, b) => Number(b.is_favorite ?? false) - Number(a.is_favorite ?? false));
+        save("tb_projects", plist);
+        setProjects(plist);
+      }
       const list = arr<SectionInfo>(sec);
       const map: SectionMap = {};
       for (const s of list) map[s.name.toLowerCase()] = s.id;
@@ -417,6 +426,38 @@ export default function App() {
       setTasks(prev);
       showToast("Move failed — rolled back");
     }
+  };
+
+  // move a task to another Todoist list (project), with undo back to original section/project
+  const moveToProject = async (t: Task, targetId: string) => {
+    const targetName = projects.find((p) => p.id === targetId)?.name ?? "list";
+    const fromProjectId = projectId;
+    const prev = tasksRef.current;
+    setExpandedId(null);
+    setTasks((ts) => ts.filter((x) => x.id !== t.id));
+    try {
+      await mutate(token, {
+        path: `/tasks/${t.id}/move`,
+        method: "POST",
+        body: { project_id: targetId },
+      });
+    } catch {
+      setTasks(prev);
+      showToast("Move failed — rolled back");
+      return;
+    }
+    showToast(`Moved to ${targetName}.`, async () => {
+      try {
+        await mutate(token, {
+          path: `/tasks/${t.id}/move`,
+          method: "POST",
+          body: t.section_id ? { section_id: t.section_id } : { project_id: fromProjectId },
+        });
+        setTasks((ts) => [...ts, t]);
+      } catch {
+        showToast("Undo failed");
+      }
+    });
   };
 
   const proFail = () => {
@@ -672,6 +713,7 @@ export default function App() {
     tasks.filter((t) => t.section_id == null || t.section_id === roles.backlog),
   );
   const doneTasks = tasks.filter((t) => t.section_id === roles.done);
+  const otherProjects = projects.filter((p) => p.id !== projectId);
   // a mapped section deleted/renamed upstream leaves a stale id after refresh re-detect
   const remapNeeded =
     sectionList.length > 0 &&
@@ -724,7 +766,7 @@ export default function App() {
           </div>
         </div>
         {/* project switcher row: free plan has ≤5 projects, so all of them fit as chips */}
-        <ProjectChips token={token} projectId={projectId} onProject={switchProject} />
+        <ProjectChips projects={projects} projectId={projectId} onProject={switchProject} />
       </header>
       <main className="mx-auto max-w-[640px] px-4 pt-8 pb-8">
         {error && <p className="mb-4 text-[13px] text-zinc-500">{error}</p>}
@@ -796,6 +838,8 @@ export default function App() {
                 spentBy={spentBy}
                 onToggle={toggleRow}
                 onMove={roles.focus ? (x) => moveTo(x, roles.focus!) : undefined}
+                onMoveProject={otherProjects.length ? moveToProject : undefined}
+                projects={otherProjects}
                 onComplete={completeWithLog}
                 onUpdate={updateTask}
                 onDuration={changeDuration}
@@ -822,6 +866,8 @@ export default function App() {
             onToggle={toggleRow}
             onMove={(t) => roles.focus && moveTo(t, roles.focus)}
             onDemote={roles.backlog ? (t) => moveTo(t, roles.backlog!) : undefined}
+            onMoveProject={otherProjects.length ? moveToProject : undefined}
+            projects={otherProjects}
             onAdd={addTask}
             onUpdate={updateTask}
             onDuration={changeDuration}
@@ -939,6 +985,8 @@ function FocusView({
   onToggle,
   onMove,
   onDemote,
+  onMoveProject,
+  projects,
   onAdd,
   onUpdate,
   onDuration,
@@ -962,6 +1010,8 @@ function FocusView({
   onToggle: (id: string) => void;
   onMove: (t: Task) => void;
   onDemote?: (t: Task) => void;
+  onMoveProject?: (t: Task, projectId: string) => void;
+  projects?: Project[];
   onAdd: (raw: string, fallbackSection?: string) => void;
   onUpdate: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
   onDuration: (t: Task, minutes: number) => void;
@@ -1022,6 +1072,10 @@ function FocusView({
                   expanded={expandedId === t.id}
                   onToggle={() => onToggle(t.id)}
                   onStart={onStart}
+                  onMove={focusId ? onMove : undefined}
+                  onDemote={onDemote}
+                  onMoveProject={onMoveProject}
+                  projects={projects}
                   onComplete={() => onComplete(t)}
                   onUpdate={onUpdate}
                   onDuration={onDuration}
@@ -1064,6 +1118,8 @@ function FocusView({
                 onStart={onStart}
                 onComplete={() => onComplete(t)}
                 onDemote={onDemote}
+                onMoveProject={onMoveProject}
+                projects={projects}
                 onUpdate={onUpdate}
                 onDuration={onDuration}
                 onDelete={onDelete}
@@ -1090,6 +1146,8 @@ function BacklogList({
   spentBy,
   onToggle,
   onMove,
+  onMoveProject,
+  projects,
   onComplete,
   onUpdate,
   onDuration,
@@ -1102,6 +1160,8 @@ function BacklogList({
   spentBy: Record<string, number>;
   onToggle: (id: string) => void;
   onMove?: (t: Task) => void;
+  onMoveProject?: (t: Task, projectId: string) => void;
+  projects?: Project[];
   onComplete: (t: Task) => void;
   onUpdate: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
   onDuration: (t: Task, minutes: number) => void;
@@ -1124,6 +1184,8 @@ function BacklogList({
             expanded={expandedId === t.id}
             onToggle={() => onToggle(t.id)}
             onMove={onMove}
+            onMoveProject={onMoveProject}
+            projects={projects}
             onComplete={() => onComplete(t)}
             onUpdate={onUpdate}
             onDuration={onDuration}
@@ -1150,6 +1212,8 @@ function TaskRow({
   defaultMinutes = 5,
   onMove,
   onDemote,
+  onMoveProject,
+  projects,
   onUpdate,
   onDuration,
   onDelete,
@@ -1165,6 +1229,8 @@ function TaskRow({
   defaultMinutes?: number;
   onMove?: (t: Task) => void;
   onDemote?: (t: Task) => void;
+  onMoveProject?: (t: Task, projectId: string) => void;
+  projects?: Project[];
   onUpdate: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
   onDuration: (t: Task, minutes: number) => void;
   onDelete: (t: Task) => void;
@@ -1252,6 +1318,8 @@ function TaskRow({
           onUpdate={onUpdate}
           onDuration={onDuration}
           onDemote={onDemote}
+          onMoveProject={onMoveProject}
+          projects={projects}
           onComplete={onComplete}
           onDelete={onDelete}
         />
@@ -1286,6 +1354,8 @@ function RowEditor({
   onUpdate,
   onDuration,
   onDemote,
+  onMoveProject,
+  projects,
   onComplete,
   onDelete,
 }: {
@@ -1299,6 +1369,8 @@ function RowEditor({
   onUpdate: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
   onDuration: (t: Task, minutes: number) => void;
   onDemote?: (t: Task) => void;
+  onMoveProject?: (t: Task, projectId: string) => void;
+  projects?: Project[];
   onComplete?: () => void;
   onDelete: (t: Task) => void;
 }) {
@@ -1400,6 +1472,29 @@ function RowEditor({
               <button className={btn} title="Move back to Backlog" onClick={() => onDemote(t)}>
                 ↓ Backlog
               </button>
+            )}
+            {onMoveProject && projects && projects.length > 0 && !t.id.startsWith("tmp-") && (
+              <label
+                className={`${btn} relative inline-flex cursor-pointer items-center`}
+                title="Move to another list"
+              >
+                <span>⇄ List</span>
+                <select
+                  aria-label="Move to another list"
+                  className="absolute inset-0 cursor-pointer opacity-0"
+                  value=""
+                  onChange={(e) => e.target.value && onMoveProject(t, e.target.value)}
+                >
+                  <option value="" disabled>
+                    Move to list…
+                  </option>
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
             )}
             {onComplete && (
               <button className={`${btn} text-orange-500`} onClick={onComplete}>
@@ -2795,31 +2890,14 @@ function ProjectSelect({
 // project switcher row: all non-Inbox projects as chips (free plan allows only 5, so they all fit;
 // paid plans get a horizontal scroll past that). One tap to switch, active project highlighted.
 function ProjectChips({
-  token,
+  projects: chips,
   projectId,
   onProject,
 }: {
-  token: string;
+  projects: Project[];
   projectId: string;
   onProject: (id: string) => void;
 }) {
-  const [projects, setProjects] = useState<(Project & { is_favorite?: boolean })[]>([]);
-  useEffect(() => {
-    let cancelled = false;
-    api(token, "/projects")
-      .then((d) => {
-        if (!cancelled) setProjects(arr<Project & { is_favorite?: boolean }>(d));
-      })
-      .catch(() => {}); // offline etc. — chips are optional chrome
-    return () => {
-      cancelled = true;
-    };
-  }, [token]);
-
-  // non-Inbox projects; favorites float to the front for quicker reach
-  const chips = projects
-    .filter((p) => p.name !== "Inbox")
-    .sort((a, b) => Number(b.is_favorite ?? false) - Number(a.is_favorite ?? false));
   if (chips.length < 2) return null; // nothing useful to switch between
   return (
     <div className="border-t border-zinc-800/60 bg-zinc-900/30">
