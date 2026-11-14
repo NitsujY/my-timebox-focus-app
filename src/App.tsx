@@ -9,6 +9,26 @@ import {
   deviceStop,
   deviceUpdate,
 } from "./deviceSerial";
+import {
+  createAndPromptOpenCodeSession,
+  dirToShortRepo,
+  fetchOpenCodeSessionSummary,
+  fetchOpenCodeSnapshot,
+  formatTaskDescription,
+  interruptOpenCodeSession,
+  invalidateSessionSummary,
+  KNOWN_REPOS,
+  parseTaskDescription,
+  replyOpenCodeForm,
+  replyOpenCodePermission,
+  resolveRepoDir,
+  sendOpenCodePrompt,
+  type OpenCodeLiveSession,
+  type SessionSummary,
+  type TaskMeta,
+  type TriageState,
+} from "./opencode";
+import { SimpleMarkdown } from "./markdown";
 
 const API = "https://api.todoist.com/api/v1";
 const PAGE = 50;
@@ -65,6 +85,9 @@ type Session = {
   task_name: string;
   planned_minutes: number;
   actual_minutes: number;
+  agent_minutes?: number;
+  opencode_sessions?: string[];
+  repo?: string;
   completed: boolean;
   timestamp: number;
   synced?: boolean; // comment posted/queued to Todoist
@@ -74,8 +97,15 @@ type Mutation = { path: string; method: string; body?: object };
 type CompletedItem = { id: string; content: string; completed_at: string };
 
 // comment text doubles as cross-device backup record (date included for backfills)
-const sessionComment = (s: Session) =>
-  `⏱ ${new Date(s.timestamp).toLocaleDateString(undefined, { month: "numeric", day: "numeric" })} · planned ${s.planned_minutes}m · actual ${s.actual_minutes}m · ${s.completed ? "✓ completed" : "abandoned"}`;
+const sessionComment = (s: Session) => {
+  const ai = s.agent_minutes ? ` · ai ${s.agent_minutes}m` : "";
+  const oc =
+    s.opencode_sessions && s.opencode_sessions.length > 0
+      ? ` · 🔗 ${s.opencode_sessions.join(", ")}`
+      : "";
+  const rp = s.repo ? ` (${s.repo})` : "";
+  return `⏱ ${new Date(s.timestamp).toLocaleDateString(undefined, { month: "numeric", day: "numeric" })} · planned ${s.planned_minutes}m · actual ${s.actual_minutes}m${ai} · ${s.completed ? "✓ completed" : "logged"}${oc}${rp}`;
+};
 
 const arr = <T,>(d: unknown): T[] =>
   Array.isArray(d) ? d : ((d as { results?: T[] }).results ?? []);
@@ -178,13 +208,21 @@ const pBar = (p: number) =>
         ? "border-l-zinc-700"
         : "border-l-zinc-800";
 
-// mini NL parse: "Fix VPN 15m #Focus p1" -> content + duration + section + priority
+// mini NL parse: "Fix VPN 15m #Focus p1 @eks-manifest // check ingress.yaml" -> content + duration + section + priority + repo + prompt
 // Todoist priority is inverted (4 = urgent), so p1..p4 maps to 4..1
 function parseAdd(raw: string, sections: SectionMap) {
-  let content = ` ${raw} `;
+  let text = raw;
+  let prompt: string | undefined;
+  const slashIdx = text.indexOf("//");
+  if (slashIdx !== -1) {
+    prompt = text.slice(slashIdx + 2).trim() || undefined;
+    text = text.slice(0, slashIdx);
+  }
+  let content = ` ${text} `;
   let duration: number | undefined;
   let priority: number | undefined;
   let sectionName: string | undefined;
+  let repo: string | undefined;
   content = content.replace(/\s(\d+)m(?=\s)/i, (_m, n) => {
     duration = +n;
     return " ";
@@ -196,7 +234,23 @@ function parseAdd(raw: string, sections: SectionMap) {
     priority = 5 - +n;
     return " ";
   });
-  return { content: content.trim().replace(/\s{2,}/g, " "), duration, priority, sectionName };
+  content = content.replace(/\s@([\w./-]+)(?=\s)/, (_m, r: string) => {
+    const match = KNOWN_REPOS.find(
+      (k) =>
+        k.label.toLowerCase() === r.toLowerCase() ||
+        k.label.toLowerCase().endsWith(`/${r.toLowerCase()}`),
+    );
+    repo = match ? match.label : r;
+    return " ";
+  });
+  return {
+    content: content.trim().replace(/\s{2,}/g, " "),
+    duration,
+    priority,
+    sectionName,
+    repo,
+    prompt,
+  };
 }
 
 export default function App() {
@@ -232,6 +286,76 @@ export default function App() {
   );
   const [showRef, setShowRef] = useState(false);
   const [error, setError] = useState("");
+
+  // --- OpenCode Flight Deck State ---
+  const [ocConnected, setOcConnected] = useState(false);
+  const [ocSessions, setOcSessions] = useState<OpenCodeLiveSession[]>([]);
+  const [drivingTaskId, setDrivingTaskId] = useState<string | null>(null);
+  const [humanSecBy, setHumanSecBy] = useState<Record<string, number>>(() =>
+    load("tb_human_sec", {}),
+  );
+  const [agentSecBy, setAgentSecBy] = useState<Record<string, number>>(() =>
+    load("tb_agent_sec", {}),
+  );
+  const [ignoredOcIds, setIgnoredOcIds] = useState<string[]>(() =>
+    load("tb_ignored_oc", []),
+  );
+
+  // Poll local OpenCode daemon every 3s + listen to SSE `/opencode-api/event`
+  const syncOpenCode = useCallback(async () => {
+    const snap = await fetchOpenCodeSnapshot();
+    setOcConnected(snap.connected);
+    if (snap.connected) setOcSessions(snap.sessions);
+  }, []);
+
+  useEffect(() => {
+    syncOpenCode();
+    const iv = setInterval(syncOpenCode, 3000);
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource("/opencode-api/event");
+      es.onmessage = () => {
+        syncOpenCode();
+      };
+    } catch {
+      /* SSE optional fallback to 3s polling */
+    }
+    return () => {
+      clearInterval(iv);
+      es?.close();
+    };
+  }, [syncOpenCode]);
+
+  // 1-second background ticker: increments humanSec on expanded task and agentSec on any task whose linked OpenCode session is `running`
+  useEffect(() => {
+    const iv = setInterval(() => {
+      if (expandedId) {
+        setHumanSecBy((prev) => {
+          const next = { ...prev, [expandedId]: (prev[expandedId] ?? 0) + 1 };
+          save("tb_human_sec", next);
+          return next;
+        });
+      }
+      const runningIds = new Set(
+        ocSessions.filter((s) => s.status === "running").map((s) => s.id),
+      );
+      if (runningIds.size > 0) {
+        const activeTasks = tasksRef.current.filter((t) => {
+          const meta = parseTaskDescription(t.description);
+          return meta.sessions.some((sid) => runningIds.has(sid));
+        });
+        if (activeTasks.length > 0) {
+          setAgentSecBy((prev) => {
+            const next = { ...prev };
+            for (const t of activeTasks) next[t.id] = (next[t.id] ?? 0) + 1;
+            save("tb_agent_sec", next);
+            return next;
+          });
+        }
+      }
+    }, 1000);
+    return () => clearInterval(iv);
+  }, [expandedId, ocSessions]);
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -467,12 +591,50 @@ export default function App() {
     showToast("Durations need Todoist Pro — timers still work locally");
   };
 
-  const addTask = async (raw: string, fallbackSection?: string) => {
+  const addTask = async (
+    raw: string,
+    fallbackSection?: string,
+    extra?: {
+      repo?: string;
+      prompt?: string;
+      note?: string;
+      sessions?: string[];
+      mode?: "save" | "drive" | "agent";
+    },
+  ) => {
     const p = parseAdd(raw, sections);
     if (!p.content) return;
     const sectionId = (p.sectionName && sections[p.sectionName.toLowerCase()]) || fallbackSection;
+    const repo = extra?.repo || p.repo || "";
+    const prompt = extra?.prompt || p.prompt || "";
+    const note = extra?.note || "";
+    const linkedSessions = extra?.sessions ? [...extra.sessions] : [];
+
+    // If launching OpenCode agent immediately on task creation
+    if (extra?.mode === "agent") {
+      try {
+        const sid = await createAndPromptOpenCodeSession({
+          title: p.content,
+          directory: resolveRepoDir(repo),
+          promptText: prompt || p.content,
+        });
+        linkedSessions.push(sid);
+        syncOpenCode();
+      } catch {
+        showToast("Couldn't reach local OpenCode daemon — saved task only");
+      }
+    }
+
+    const description = formatTaskDescription({
+      note,
+      prompt,
+      repo,
+      sessions: linkedSessions,
+    });
+
     const body = (withDur: boolean) => ({
       content: p.content,
+      ...(description ? { description } : {}),
       project_id: projectId,
       ...(sectionId ? { section_id: sectionId } : {}),
       ...(withDur && p.duration != null ? { duration: p.duration, duration_unit: "minute" } : {}),
@@ -481,16 +643,22 @@ export default function App() {
     const tmp: Task = {
       id: `tmp-${Date.now()}`,
       content: p.content,
+      description: description || null,
       priority: p.priority ?? 1,
       section_id: sectionId ?? null,
       duration: p.duration != null ? { amount: p.duration, unit: "minute" } : undefined,
       added_at: new Date().toISOString(),
     };
     setTasks((ts) => [...ts, tmp]);
+    if (extra?.mode === "drive") setDrivingTaskId(tmp.id);
+
     // swap the optimistic tmp id for the real one, or notes/edits hit POST /tasks/tmp-* -> 404
     const swap = (created: unknown) => {
-      if (created && typeof (created as Task).id === "string")
-        setTasks((ts) => ts.map((x) => (x.id === tmp.id ? (created as Task) : x)));
+      if (created && typeof (created as Task).id === "string") {
+        const real = created as Task;
+        setTasks((ts) => ts.map((x) => (x.id === tmp.id ? real : x)));
+        setDrivingTaskId((cur) => (cur === tmp.id ? real.id : cur));
+      }
     };
     try {
       swap(await mutate(token, { path: "/tasks", method: "POST", body: body(!noDuration) }));
@@ -591,23 +759,172 @@ export default function App() {
     }
   };
 
-  // completing from the list (timer never ran): log the planned time as actual,
-  // unless a session for this task was already logged today (avoid double-counting)
-  const completeWithLog = (t: Task) => {
-    const loggedToday = sessions.some(
-      (s) => s.task_id === t.id && new Date(s.timestamp).toDateString() === todayStr(),
-    );
-    if (!loggedToday) {
-      const mins = t.duration?.amount ?? prefs.defaultMinutes;
+  // Toggle human driving on a task (only 1 task can be driven at a time)
+  const toggleDrive = (t: Task) => {
+    setDrivingTaskId((cur) => {
+      const next = cur === t.id ? null : t.id;
+      if (next) showToast(`Driving "${t.content}"`);
+      return next;
+    });
+  };
+
+  // Park / flush current human & agent timer seconds into a Session log without completing
+  const parkTask = (t: Task) => {
+    if (drivingTaskId === t.id) setDrivingTaskId(null);
+    const hSec = humanSecBy[t.id] ?? 0;
+    const aSec = agentSecBy[t.id] ?? 0;
+    if (hSec >= 30 || aSec >= 30) {
+      const meta = parseTaskDescription(t.description);
+      const hMin = hSec > 0 ? Math.max(1, Math.round(hSec / 60)) : 0;
+      const aMin = aSec > 0 ? Math.max(1, Math.round(aSec / 60)) : 0;
       logSession({
         task_id: t.id,
         task_name: t.content,
-        planned_minutes: mins,
-        actual_minutes: mins,
+        planned_minutes: t.duration?.amount ?? prefs.defaultMinutes,
+        actual_minutes: hMin,
+        agent_minutes: aMin || undefined,
+        opencode_sessions: meta.sessions.length ? meta.sessions : undefined,
+        repo: meta.repo || undefined,
+        completed: false,
+        timestamp: Date.now(),
+      });
+      setHumanSecBy((prev) => {
+        const next = { ...prev };
+        delete next[t.id];
+        save("tb_human_sec", next);
+        return next;
+      });
+      setAgentSecBy((prev) => {
+        const next = { ...prev };
+        delete next[t.id];
+        save("tb_agent_sec", next);
+        return next;
+      });
+      showToast(`Parked · logged ${hMin}m${aMin ? ` · ${aMin}m ai` : ""}`);
+    } else {
+      showToast("Parked");
+    }
+  };
+
+  // Send prompt to OpenCode session (creates session if none linked yet) & switch task from Driving -> Agent
+  const handToAgent = async (t: Task, customPrompt?: string) => {
+    if (drivingTaskId === t.id) setDrivingTaskId(null);
+    const meta = parseTaskDescription(t.description);
+    const promptText = customPrompt?.trim() || meta.prompt || t.content;
+    const repoLabel = meta.repo; // Optional: empty means general `/Users/justinyu` workspace
+    const latestSid = meta.sessions[meta.sessions.length - 1];
+
+    try {
+      let sid = latestSid;
+      if (!sid) {
+        sid = await createAndPromptOpenCodeSession({
+          title: t.content,
+          directory: resolveRepoDir(repoLabel),
+          promptText,
+        });
+      } else {
+        await sendOpenCodePrompt(sid, promptText);
+      }
+      const nextSessions = Array.from(new Set([...meta.sessions, sid]));
+      invalidateSessionSummary(sid);
+      const nextDesc = formatTaskDescription({
+        note: meta.note,
+        prompt: customPrompt?.trim() ? customPrompt.trim() : meta.prompt,
+        repo: repoLabel,
+        sessions: nextSessions,
+      });
+      if (nextDesc !== (t.description ?? "")) {
+        await updateTask(t.id, { description: nextDesc });
+      }
+      syncOpenCode();
+      showToast(`Sent to OpenCode (${sid.slice(0, 10)})`);
+    } catch {
+      showToast("Couldn't reach local OpenCode daemon");
+    }
+  };
+
+  // Approve pending OpenCode tool permission inline
+  const approvePermission = async (t: Task) => {
+    const meta = parseTaskDescription(t.description);
+    const live = ocSessions.find(
+      (s) => meta.sessions.includes(s.id) && s.permission,
+    );
+    if (!live?.permission) return;
+    try {
+      await replyOpenCodePermission(live.id, live.permission.id, "once");
+      syncOpenCode();
+      showToast("Approved in OpenCode");
+    } catch {
+      showToast("Approval failed");
+    }
+  };
+
+  // Answer pending OpenCode question / option picker inline
+  const answerFormOption = async (t: Task, fieldKey: string, value: string, label: string) => {
+    const meta = parseTaskDescription(t.description);
+    const live = ocSessions.find((s) => meta.sessions.includes(s.id) && s.form);
+    if (!live?.form) return;
+    try {
+      await replyOpenCodeForm(live.id, live.form.id, fieldKey, value);
+      invalidateSessionSummary(live.id);
+      syncOpenCode();
+      showToast(`Selected "${label}" in OpenCode`);
+    } catch {
+      showToast("Couldn't submit option to OpenCode");
+    }
+  };
+
+  // completing from the list: interrupt any still-running OpenCode agent, keep OpenCode session history intact,
+  // and stamp session IDs + human/agent minutes into the Todoist task comment & session log.
+  const completeWithLog = (t: Task) => {
+    if (drivingTaskId === t.id) setDrivingTaskId(null);
+    const meta = parseTaskDescription(t.description);
+
+    // If any linked OpenCode session is still running, interrupt it so it stops burning tokens
+    for (const sid of meta.sessions) {
+      const live = ocSessions.find((s) => s.id === sid);
+      if (live?.status === "running") {
+        interruptOpenCodeSession(sid);
+      }
+    }
+
+    const hSec = humanSecBy[t.id] ?? 0;
+    const aSec = agentSecBy[t.id] ?? 0;
+    const hMin = hSec > 0 ? Math.max(1, Math.round(hSec / 60)) : 0;
+    const aMin = aSec > 0 ? Math.max(1, Math.round(aSec / 60)) : 0;
+    const planned = t.duration?.amount ?? prefs.defaultMinutes;
+
+    const loggedToday = sessions.some(
+      (s) => s.task_id === t.id && new Date(s.timestamp).toDateString() === todayStr(),
+    );
+
+    if (hMin > 0 || aMin > 0 || !loggedToday) {
+      logSession({
+        task_id: t.id,
+        task_name: t.content,
+        planned_minutes: planned,
+        actual_minutes: hMin > 0 ? hMin : loggedToday ? 0 : planned,
+        agent_minutes: aMin || undefined,
+        opencode_sessions: meta.sessions.length ? meta.sessions : undefined,
+        repo: meta.repo || undefined,
         completed: true,
         timestamp: Date.now(),
       });
     }
+
+    setHumanSecBy((prev) => {
+      const next = { ...prev };
+      delete next[t.id];
+      save("tb_human_sec", next);
+      return next;
+    });
+    setAgentSecBy((prev) => {
+      const next = { ...prev };
+      delete next[t.id];
+      save("tb_agent_sec", next);
+      return next;
+    });
+
     completeTask(t);
   };
 
@@ -714,6 +1031,29 @@ export default function App() {
   );
   const doneTasks = tasks.filter((t) => t.section_id === roles.done);
   const otherProjects = projects.filter((p) => p.id !== projectId);
+
+  // Unlinked OpenCode sessions active in the last 24h (and not already linked to any task or ignored)
+  const linkedSessionIds = useMemo(() => {
+    const s = new Set<string>(ignoredOcIds);
+    for (const t of tasks) {
+      for (const sid of parseTaskDescription(t.description).sessions) s.add(sid);
+    }
+    for (const sess of sessions) {
+      for (const sid of sess.opencode_sessions ?? []) s.add(sid);
+    }
+    return s;
+  }, [tasks, sessions, ignoredOcIds]);
+
+  const unlinkedOcSessions = useMemo(
+    () =>
+      ocSessions.filter(
+        (s) =>
+          !linkedSessionIds.has(s.id) &&
+          Date.now() - s.updatedAt < 24 * 3600_000,
+      ),
+    [ocSessions, linkedSessionIds],
+  );
+
   // a mapped section deleted/renamed upstream leaves a stale id after refresh re-detect
   const remapNeeded =
     sectionList.length > 0 &&
@@ -727,7 +1067,24 @@ export default function App() {
     <div className="min-h-screen">
       <header className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/90 backdrop-blur">
         <div className="mx-auto grid max-w-[640px] grid-cols-[auto_1fr_auto] items-center px-4 py-3 sm:grid-cols-[1fr_auto_1fr]">
-          <span className="hidden text-[15px] font-semibold sm:block">Timebox</span>
+          <div className="hidden items-center gap-2 sm:flex">
+            <span className="text-[15px] font-semibold">Timebox</span>
+            <span
+              className="inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 font-mono text-[11px] text-zinc-400"
+              title={
+                ocConnected
+                  ? `Connected to local OpenCode daemon (${ocSessions.length} sessions)`
+                  : "Local OpenCode daemon offline"
+              }
+            >
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  ocConnected ? "bg-orange-500" : "bg-zinc-600"
+                }`}
+              />
+              opencode
+            </span>
+          </div>
           <nav className="flex justify-center gap-1">
             {(["focus", "backlog", "review", "analysis"] as const).map((v) => (
               <button
@@ -818,14 +1175,28 @@ export default function App() {
             sessions={sessions}
             archived={archivedDay === todayStr() && doneTasks.length === 0}
             onArchiveAll={archiveAll}
+            onResumeTask={
+              roles.focus
+                ? (t) => {
+                    moveTo(t, roles.focus!);
+                    showToast(`Resumed "${t.content}" in Focus`);
+                  }
+                : undefined
+            }
           />
         ) : view === "backlog" ? (
           <section>
             <AddRow
               alwaysOpen
-              placeholder="＋ Add to Backlog…"
+              placeholder="＋ Add to Backlog… (@repo // prompt or Tab for details)"
               sections={sections}
-              onAdd={(raw) => addTask(raw, roles.backlog)}
+              onAdd={(raw, extra) =>
+                addTask(
+                  raw,
+                  extra?.mode && extra.mode !== "save" ? roles.focus ?? roles.backlog : roles.backlog,
+                  extra,
+                )
+              }
             />
             {backlogTasks.length === 0 ? (
               <p className="py-4 text-[13px] text-zinc-500">
@@ -836,7 +1207,12 @@ export default function App() {
                 tasks={backlogTasks}
                 expandedId={expandedId}
                 spentBy={spentBy}
+                ocSessions={ocSessions}
+                humanSecBy={humanSecBy}
                 onToggle={toggleRow}
+                onHandToAgent={handToAgent}
+                onApprove={approvePermission}
+                onAnswerForm={answerFormOption}
                 onMove={roles.focus ? (x) => moveTo(x, roles.focus!) : undefined}
                 onMoveProject={otherProjects.length ? moveToProject : undefined}
                 projects={otherProjects}
@@ -863,7 +1239,25 @@ export default function App() {
             defaultMinutes={prefs.defaultMinutes}
             spentBy={spentBy}
             expandedId={expandedId}
+            ocSessions={ocSessions}
+            unlinkedOcSessions={unlinkedOcSessions}
+            humanSecBy={humanSecBy}
             onToggle={toggleRow}
+            onHandToAgent={handToAgent}
+            onApprove={approvePermission}
+            onAnswerForm={answerFormOption}
+            onTrackOcSession={(s) => {
+              addTask(s.title, roles.focus, {
+                repo: s.repoShort,
+                sessions: [s.id],
+              });
+              showToast(`Tracked "${s.title}" in Focus`);
+            }}
+            onIgnoreOcSession={(sid) => {
+              const next = [...ignoredOcIds, sid];
+              setIgnoredOcIds(next);
+              save("tb_ignored_oc", next);
+            }}
             onMove={(t) => roles.focus && moveTo(t, roles.focus)}
             onDemote={roles.backlog ? (t) => moveTo(t, roles.backlog!) : undefined}
             onMoveProject={otherProjects.length ? moveToProject : undefined}
@@ -969,6 +1363,70 @@ function Connect({
   );
 }
 
+const TRIAGE_ORDER: Record<TriageState, number> = {
+  needs_you: 0,
+  working: 1,
+  queued: 2,
+};
+
+const TRIAGE_UI: Record<
+  TriageState,
+  {
+    label: string;
+    leftBar: string;
+    dot: string;
+    labelCls: string;
+  }
+> = {
+  needs_you: {
+    label: "Needs You",
+    leftBar: "border-l-orange-500 bg-zinc-900/60",
+    dot: "bg-orange-500",
+    labelCls: "text-orange-400 font-medium",
+  },
+  working: {
+    label: "Agent Working",
+    leftBar: "border-l-zinc-500",
+    dot: "bg-zinc-300 animate-pulse",
+    labelCls: "text-zinc-300",
+  },
+  queued: {
+    label: "Queued",
+    leftBar: "",
+    dot: "bg-zinc-600",
+    labelCls: "text-zinc-500",
+  },
+};
+
+function resolveTaskTriage(
+  t: Task,
+  ocSessions: OpenCodeLiveSession[],
+): { triage: TriageState; liveSession?: OpenCodeLiveSession; meta: TaskMeta } {
+  const meta = parseTaskDescription(t.description);
+  const linked = meta.sessions
+    .map((sid) => ocSessions.find((s) => s.id === sid))
+    .filter((s): s is OpenCodeLiveSession => Boolean(s));
+  const liveSession = linked[linked.length - 1];
+
+  if (!liveSession) {
+    return { triage: "queued", meta };
+  }
+  if (liveSession.status === "running") {
+    return { triage: "working", liveSession, meta };
+  }
+  // If session is asking a question (`question`), or finished and is idle (`ready` or `idle` while task is still in Focus),
+  // it needs your attention/steer to either continue or mark Done.
+  return { triage: "needs_you", liveSession, meta };
+}
+
+type AddExtra = {
+  repo?: string;
+  prompt?: string;
+  note?: string;
+  sessions?: string[];
+  mode?: "save" | "drive" | "agent";
+};
+
 function FocusView({
   focusTasks,
   bufferTasks,
@@ -982,7 +1440,15 @@ function FocusView({
   defaultMinutes,
   spentBy,
   expandedId,
+  ocSessions,
+  unlinkedOcSessions,
+  humanSecBy,
   onToggle,
+  onHandToAgent,
+  onApprove,
+  onAnswerForm,
+  onTrackOcSession,
+  onIgnoreOcSession,
   onMove,
   onDemote,
   onMoveProject,
@@ -1007,12 +1473,20 @@ function FocusView({
   defaultMinutes: number;
   spentBy: Record<string, number>;
   expandedId: string | null;
+  ocSessions: OpenCodeLiveSession[];
+  unlinkedOcSessions: OpenCodeLiveSession[];
+  humanSecBy: Record<string, number>;
   onToggle: (id: string) => void;
+  onHandToAgent: (t: Task, prompt?: string) => void;
+  onApprove: (t: Task) => void;
+  onAnswerForm: (t: Task, fieldKey: string, value: string, label: string) => void;
+  onTrackOcSession: (s: OpenCodeLiveSession) => void;
+  onIgnoreOcSession: (sid: string) => void;
   onMove: (t: Task) => void;
   onDemote?: (t: Task) => void;
   onMoveProject?: (t: Task, projectId: string) => void;
   projects?: Project[];
-  onAdd: (raw: string, fallbackSection?: string) => void;
+  onAdd: (raw: string, fallbackSection?: string, extra?: AddExtra) => void;
   onUpdate: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
   onDuration: (t: Task, minutes: number) => void;
   onDelete: (t: Task) => void;
@@ -1023,6 +1497,13 @@ function FocusView({
   const [dismissed, setDismissed] = useState(() => load("tb_plan_dismissed", ""));
   const showPlan =
     planBanner && focusTasks.length === 0 && backlogCount > 0 && dismissed !== todayStr();
+
+  // Bubble tasks that Need You to the top of Focus
+  const sortedFocus = [...focusTasks].sort((a, b) => {
+    const sa = resolveTaskTriage(a, ocSessions).triage;
+    const sb = resolveTaskTriage(b, ocSessions).triage;
+    return TRIAGE_ORDER[sa] - TRIAGE_ORDER[sb];
+  });
 
   return (
     <div className="space-y-6">
@@ -1054,10 +1535,10 @@ function FocusView({
             <p className="shrink-0 text-[13px] text-zinc-500">Buffer</p>
             <AddRow
               inline
-              placeholder="＋ Quick add…"
+              placeholder="＋ Quick add… (@repo // prompt)"
               hotkey="b"
               sections={sections}
-              onAdd={(raw) => onAdd(raw, bufferId)}
+              onAdd={(raw, extra) => onAdd(raw, bufferId, extra)}
             />
           </div>
           {bufferTasks.length > 0 && (
@@ -1069,8 +1550,13 @@ function FocusView({
                   durations={durations}
                   defaultMinutes={defaultMinutes}
                   spentBy={spentBy}
+                  ocSessions={ocSessions}
+                  humanSec={humanSecBy[t.id] ?? 0}
                   expanded={expandedId === t.id}
                   onToggle={() => onToggle(t.id)}
+                  onHandToAgent={(p) => onHandToAgent(t, p)}
+                  onApprove={() => onApprove(t)}
+                  onAnswerForm={(k, v, l) => onAnswerForm(t, k, v, l)}
                   onStart={onStart}
                   onMove={focusId ? onMove : undefined}
                   onDemote={onDemote}
@@ -1094,18 +1580,23 @@ function FocusView({
       )}
 
       <section>
-        <p className="mb-1 px-2 text-[13px] text-zinc-500">Focus</p>
-        {focusTasks.length === 0 ? (
+        <div className="mb-1 flex items-center justify-between px-2">
+          <p className="text-[13px] text-zinc-500">Focus</p>
+          <span className="text-[12px] text-zinc-600">
+            Sorted by what needs your attention first
+          </span>
+        </div>
+        {sortedFocus.length === 0 ? (
           <button
             className="block w-full py-8 text-center text-[13px] text-zinc-500"
             onClick={onGoBacklog}
           >
-            Focus holds today's top {cap} tasks. During a timebox, nothing else exists.
+            Focus holds today's top {cap} tasks.
             <span className="mt-1 block text-orange-500">Pull from Backlog →</span>
           </button>
         ) : (
           <ul className="space-y-0.5">
-            {focusTasks.map((t) => (
+            {sortedFocus.map((t) => (
               <TaskRow
                 key={t.id}
                 t={t}
@@ -1113,8 +1604,13 @@ function FocusView({
                 durations={durations}
                 defaultMinutes={defaultMinutes}
                 spentBy={spentBy}
+                ocSessions={ocSessions}
+                humanSec={humanSecBy[t.id] ?? 0}
                 expanded={expandedId === t.id}
                 onToggle={() => onToggle(t.id)}
+                onHandToAgent={(p) => onHandToAgent(t, p)}
+                onApprove={() => onApprove(t)}
+                onAnswerForm={(k, v, l) => onAnswerForm(t, k, v, l)}
                 onStart={onStart}
                 onComplete={() => onComplete(t)}
                 onDemote={onDemote}
@@ -1129,13 +1625,61 @@ function FocusView({
         )}
         {focusId && (
           <AddRow
-            placeholder="＋ Add to Focus…"
+            placeholder="＋ Add to Focus… (@repo // prompt or Tab for details)"
             hotkey="n"
             sections={sections}
-            onAdd={(raw) => onAdd(raw, focusId)}
+            onAdd={(raw, extra) => onAdd(raw, focusId, extra)}
           />
         )}
       </section>
+
+      {unlinkedOcSessions.length > 0 && (
+        <section className="border-t border-zinc-900 pt-3">
+          <p className="mb-1 px-2 text-[12px] text-zinc-500">
+            Unlinked OpenCode sessions (last 24h)
+          </p>
+          <ul className="space-y-0.5">
+            {unlinkedOcSessions.slice(0, 6).map((s) => (
+              <li
+                key={s.id}
+                className="flex min-h-9 items-center justify-between gap-2 rounded-md px-2 text-[13px] text-zinc-400 hover:bg-zinc-900"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span
+                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                      s.status === "running"
+                        ? "bg-zinc-300 animate-pulse"
+                        : "bg-orange-500"
+                    }`}
+                  />
+                  <span className="truncate text-zinc-300">{s.title}</span>
+                  {s.repoShort && (
+                    <span className="shrink-0 font-mono text-[11px] text-zinc-600">
+                      {s.repoShort}
+                    </span>
+                  )}
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <button
+                    onClick={() => onTrackOcSession(s)}
+                    className="text-[12px] text-zinc-400 hover:text-orange-500"
+                    title="Create a Todoist Focus task linked to this session"
+                  >
+                    ＋ Track
+                  </button>
+                  <button
+                    onClick={() => onIgnoreOcSession(s.id)}
+                    className="px-1 text-[12px] text-zinc-600 hover:text-zinc-400"
+                    title="Hide this session from Unlinked list (keeps session in OpenCode)"
+                  >
+                    ×
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </div>
   );
 }
@@ -1144,7 +1688,12 @@ function BacklogList({
   tasks,
   expandedId,
   spentBy,
+  ocSessions,
+  humanSecBy,
   onToggle,
+  onHandToAgent,
+  onApprove,
+  onAnswerForm,
   onMove,
   onMoveProject,
   projects,
@@ -1158,7 +1707,12 @@ function BacklogList({
   tasks: Task[];
   expandedId: string | null;
   spentBy: Record<string, number>;
+  ocSessions: OpenCodeLiveSession[];
+  humanSecBy: Record<string, number>;
   onToggle: (id: string) => void;
+  onHandToAgent: (t: Task, prompt?: string) => void;
+  onApprove: (t: Task) => void;
+  onAnswerForm: (t: Task, fieldKey: string, value: string, label: string) => void;
   onMove?: (t: Task) => void;
   onMoveProject?: (t: Task, projectId: string) => void;
   projects?: Project[];
@@ -1181,8 +1735,13 @@ function BacklogList({
             durations={durations}
             defaultMinutes={defaultMinutes}
             spentBy={spentBy}
+            ocSessions={ocSessions}
+            humanSec={humanSecBy[t.id] ?? 0}
             expanded={expandedId === t.id}
             onToggle={() => onToggle(t.id)}
+            onHandToAgent={(p) => onHandToAgent(t, p)}
+            onApprove={() => onApprove(t)}
+            onAnswerForm={(k, v, l) => onAnswerForm(t, k, v, l)}
             onMove={onMove}
             onMoveProject={onMoveProject}
             projects={projects}
@@ -1207,6 +1766,9 @@ function TaskRow({
   large,
   expanded,
   onToggle,
+  onHandToAgent,
+  onApprove,
+  onAnswerForm,
   onStart,
   onComplete,
   defaultMinutes = 5,
@@ -1219,11 +1781,16 @@ function TaskRow({
   onDelete,
   durations,
   spentBy,
+  ocSessions,
+  humanSec,
 }: {
   t: Task;
   large?: boolean;
   expanded: boolean;
   onToggle: () => void;
+  onHandToAgent: (prompt?: string) => void;
+  onApprove: () => void;
+  onAnswerForm: (fieldKey: string, value: string, label: string) => void;
   onStart?: (t: Task, minutes: number) => void;
   onComplete?: () => void;
   defaultMinutes?: number;
@@ -1236,10 +1803,11 @@ function TaskRow({
   onDelete: (t: Task) => void;
   durations: number[];
   spentBy: Record<string, number>;
+  ocSessions: OpenCodeLiveSession[];
+  humanSec: number;
 }) {
   const rootRef = useRef<HTMLLIElement>(null);
 
-  // collapse on tap-outside / Esc (collapse flushes via RowEditor unmount)
   useEffect(() => {
     if (!expanded) return;
     const down = (e: PointerEvent) => {
@@ -1256,33 +1824,78 @@ function TaskRow({
     };
   }, [expanded, onToggle]);
 
-  const spent = spentBy[t.id] ?? 0;
-  // planned minutes: the task estimate, else what ▶ would actually run (defaultMinutes)
+  const { triage, liveSession, meta } = resolveTaskTriage(t, ocSessions);
+  const ui = TRIAGE_UI[triage];
+  const hasQuestion = Boolean(liveSession?.form);
+  const needsApproval = Boolean(liveSession?.permission);
+
+  const activeSid = meta.sessions[meta.sessions.length - 1] ?? "";
+  const [summary, setSummary] = useState<SessionSummary | null>(null);
+
+  useEffect(() => {
+    if (!activeSid) {
+      setSummary(null);
+      return;
+    }
+    fetchOpenCodeSessionSummary(activeSid, liveSession?.updatedAt).then((res) => {
+      if (res) setSummary(res);
+    });
+  }, [activeSid, liveSession?.updatedAt, liveSession?.status, expanded]);
+
+  const spent = (spentBy[t.id] ?? 0) + Math.floor(humanSec / 60);
   const planned = t.duration?.amount ?? defaultMinutes;
   const over = spent > planned;
-  // chip: always "spent/planned" once any time is logged; bare estimate before that.
-  // "23/–" is never shown — the timer would run planned minutes, so that's the plan.
+
+  const repoShort = (meta.repo || liveSession?.repoShort || "").replace(/^vyond\//, "");
+
+  const latestReplyOneLine = summary?.lastAssistantText
+    ? summary.lastAssistantText
+        .replace(/```[\s\S]*?```/g, "")
+        .replace(/[*`#-]/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+    : "";
+
+  const formQuestionTitle =
+    liveSession?.form?.fields?.[0]?.title || liveSession?.form?.title || "";
+
+  // Single quiet sub-line under task title
+  const subline = hasQuestion
+    ? `Pick option: ${formQuestionTitle}`
+    : needsApproval && liveSession?.permission
+      ? `Blocked: ${liveSession.permission.action} ${liveSession.permission.resources.join(" ")}`
+      : triage === "working" && summary?.lastToolCall
+        ? `Running: ${summary.lastToolCall}`
+        : latestReplyOneLine || meta.note || meta.prompt.split("\n")[0] || "";
+
   const dur = (
-    <span className="shrink-0 font-mono text-[13px] tabular-nums text-zinc-500">
+    <div className="flex shrink-0 items-center gap-2 font-mono text-[12px] tabular-nums">
+      {(triage !== "queued" || liveSession) && (
+        <span className={`inline-flex items-center gap-1.5 text-[12px] ${ui.labelCls}`}>
+          <span className={`h-1.5 w-1.5 rounded-full ${ui.dot}`} />
+          {hasQuestion ? "Question" : ui.label}
+        </span>
+      )}
       {spent > 0 ? (
-        <>
+        <span className="text-zinc-500">
           <span className={over ? "text-orange-500" : "text-zinc-400"}>{spent}m/</span>
           {planned}m
-        </>
+        </span>
       ) : (
-        t.duration && `${t.duration.amount}m`
+        t.duration && <span className="text-zinc-500">{t.duration.amount}m</span>
       )}
-    </span>
+    </div>
   );
+
   const actions = (
-    <>
-      {onStart && (
+    <div className="flex shrink-0 items-center gap-1">
+      {!liveSession && !onMove && (
         <button
-          className="shrink-0 rounded px-2 py-1 text-orange-500 transition-colors duration-150 hover:bg-zinc-800"
-          title="Start timebox"
-          onClick={() => onStart(t, t.duration?.amount ?? defaultMinutes)}
+          className="shrink-0 rounded px-2 py-1 text-[12px] text-orange-500 transition-colors duration-150 hover:bg-zinc-800"
+          title="Launch OpenCode agent on this task"
+          onClick={() => onHandToAgent()}
         >
-          ▶
+          Run Agent →
         </button>
       )}
       {onMove && (
@@ -1294,7 +1907,7 @@ function TaskRow({
           →
         </button>
       )}
-    </>
+    </div>
   );
 
   return (
@@ -1303,7 +1916,7 @@ function TaskRow({
       className={`rounded-md border-l-2 transition-colors duration-150 ${
         expanded
           ? "border-l-orange-500 bg-zinc-900 ring-1 ring-zinc-700"
-          : `${pBar(t.priority)} hover:bg-zinc-900 active:bg-zinc-800`
+          : `${ui.leftBar || pBar(t.priority)} hover:bg-zinc-900 active:bg-zinc-800`
       } ${isNew(t) ? "row-new" : ""}`}
     >
       {expanded ? (
@@ -1314,9 +1927,18 @@ function TaskRow({
           actions={actions}
           durations={durations}
           defaultMinutes={defaultMinutes}
+          ocSessions={ocSessions}
+          liveSession={liveSession}
+          summary={summary}
           onClose={onToggle}
           onUpdate={onUpdate}
           onDuration={onDuration}
+          onHandToAgent={onHandToAgent}
+          onApprove={onApprove}
+          onAnswerForm={onAnswerForm}
+          onStartCountdown={
+            onStart ? () => onStart(t, t.duration?.amount ?? defaultMinutes) : undefined
+          }
           onDemote={onDemote}
           onMoveProject={onMoveProject}
           projects={projects}
@@ -1324,14 +1946,31 @@ function TaskRow({
           onDelete={onDelete}
         />
       ) : (
-        <div className={`flex items-center gap-2 px-2 ${large ? "min-h-14" : "min-h-11"}`}>
-          <button className="min-w-0 flex-1 text-left" onClick={onToggle}>
-            <span className={`block truncate ${large ? "text-[15px] font-medium" : "text-[14px]"}`}>
-              {t.content}
-            </span>
-            {t.description && (
-              <span className="block truncate text-[11px] text-zinc-500">
-                {t.description.split("\n")[0]}
+        <div className={`flex items-center gap-2.5 px-2.5 ${large ? "min-h-13" : "min-h-10"}`}>
+          <button className="min-w-0 flex-1 py-1.5 text-left" onClick={onToggle}>
+            <div className="flex items-center gap-2">
+              <span
+                className={`truncate ${
+                  large ? "text-[15px] font-medium text-zinc-100" : "text-[14px] text-zinc-200"
+                }`}
+              >
+                {t.content}
+              </span>
+              {repoShort && (
+                <span className="shrink-0 font-mono text-[11px] text-zinc-500">{repoShort}</span>
+              )}
+            </div>
+            {subline && (
+              <span
+                className={`block truncate text-[12px] ${
+                  hasQuestion || needsApproval
+                    ? "text-orange-400"
+                    : triage === "needs_you"
+                      ? "text-zinc-300"
+                      : "text-zinc-500"
+                }`}
+              >
+                {subline}
               </span>
             )}
           </button>
@@ -1350,9 +1989,16 @@ function RowEditor({
   actions,
   durations,
   defaultMinutes = 5,
+  ocSessions,
+  liveSession,
+  summary,
   onClose,
   onUpdate,
   onDuration,
+  onHandToAgent,
+  onApprove,
+  onAnswerForm,
+  onStartCountdown,
   onDemote,
   onMoveProject,
   projects,
@@ -1365,23 +2011,41 @@ function RowEditor({
   actions: ReactNode;
   durations: number[];
   defaultMinutes?: number;
+  ocSessions: OpenCodeLiveSession[];
+  liveSession?: OpenCodeLiveSession;
+  summary: SessionSummary | null;
   onClose: () => void;
   onUpdate: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
   onDuration: (t: Task, minutes: number) => void;
+  onHandToAgent: (prompt?: string) => void;
+  onApprove: () => void;
+  onAnswerForm: (fieldKey: string, value: string, label: string) => void;
+  onStartCountdown?: () => void;
   onDemote?: (t: Task) => void;
   onMoveProject?: (t: Task, projectId: string) => void;
   projects?: Project[];
   onComplete?: () => void;
   onDelete: (t: Task) => void;
 }) {
+  const initialMeta = useMemo(() => parseTaskDescription(t.description), [t.description]);
   const [title, setTitle] = useState(t.content);
-  const [desc, setDesc] = useState(t.description ?? "");
+  const [note, setNote] = useState(initialMeta.note);
+  const [prompt, setPrompt] = useState(initialMeta.prompt);
+  const [repo, setRepo] = useState(initialMeta.repo);
+  const [sessions, setSessions] = useState<string[]>(initialMeta.sessions);
   const [saveState, setSaveState] = useState<"" | "saving" | "saved">("");
   const [confirming, setConfirming] = useState(false);
+  const [showMeta, setShowMeta] = useState(false);
+  const [showCheckpoints, setShowCheckpoints] = useState(false);
+  const [replyText, setReplyText] = useState("");
+  const hasSessionOutput = Boolean(
+    liveSession || summary?.lastAssistantText || summary?.lastToolCall,
+  );
+
   const titleLive = useRef(title);
   titleLive.current = title;
-  const descLive = useRef(desc);
-  descLive.current = desc;
+  const metaLive = useRef<TaskMeta>({ note, prompt, repo, sessions });
+  metaLive.current = { note, prompt, repo, sessions };
   const tLive = useRef(t);
   tLive.current = t;
   const savedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -1399,33 +2063,53 @@ function RowEditor({
     }
   };
 
-  // refs keep this closure current, so the unmount flush never saves stale values
   const flush = () => {
     clearTimeout(debRef.current);
     const v = titleLive.current.trim();
     if (v && v !== tLive.current.content) persist({ content: v });
-    if (descLive.current !== (tLive.current.description ?? ""))
-      persist({ description: descLive.current });
+    const formattedDesc = formatTaskDescription(metaLive.current);
+    if (formattedDesc !== (tLive.current.description ?? "")) {
+      persist({ description: formattedDesc });
+    }
   };
   useEffect(() => () => flush(), []);
 
-  // auto-grow textarea
-  const descRef = useRef<HTMLTextAreaElement>(null);
+  const scheduleFlush = () => {
+    clearTimeout(debRef.current);
+    debRef.current = setTimeout(flush, 500);
+  };
+
+  const promptRef = useRef<HTMLTextAreaElement>(null);
+  const inputVal = hasSessionOutput ? replyText : prompt;
   useEffect(() => {
-    const el = descRef.current;
+    const el = promptRef.current;
     if (el) {
       el.style.height = "0";
-      el.style.height = `${el.scrollHeight}px`;
+      el.style.height = `${Math.max(44, el.scrollHeight)}px`;
     }
-  }, [desc]);
+  }, [inputVal, hasSessionOutput]);
+
+  const submitToAgent = () => {
+    flush();
+    if (hasSessionOutput) {
+      const msg = replyText.trim() || prompt.trim();
+      onHandToAgent(msg || undefined);
+      setReplyText("");
+    } else {
+      onHandToAgent(prompt);
+    }
+  };
+
+  const activeSid = sessions[sessions.length - 1] ?? "";
+  const turns = summary?.turns ?? [];
 
   return (
     <div>
-      {/* title morphs in place: same font/line-height as the collapsed button, so no layout shift */}
+      {/* title morphs in place */}
       <div
-        className={`flex items-center gap-2 px-2 ${large ? "min-h-14" : "min-h-11"}`}
+        className={`flex items-center gap-2.5 px-2.5 ${large ? "min-h-13" : "min-h-10"}`}
         onClick={(e) => {
-          if (!(e.target as HTMLElement).closest("input,button")) onClose();
+          if (!(e.target as HTMLElement).closest("input,button,select,textarea")) onClose();
         }}
       >
         <input
@@ -1436,8 +2120,7 @@ function RowEditor({
           value={title}
           onChange={(e) => {
             setTitle(e.target.value);
-            clearTimeout(debRef.current);
-            debRef.current = setTimeout(flush, 500);
+            scheduleFlush();
           }}
           onKeyDown={(e) => {
             if (e.key === "Enter") onClose();
@@ -1451,64 +2134,331 @@ function RowEditor({
         {dur}
         {actions}
       </div>
+
       <div className="row-expand">
-        <div className="space-y-2 px-2 pb-3">
-          <div className="border-t border-zinc-800" />
-          <textarea
-            ref={descRef}
-            className="w-full resize-none overflow-hidden bg-transparent font-mono text-[12px] leading-snug text-zinc-400 outline-none placeholder:text-zinc-600"
-            placeholder="Add notes…"
-            rows={2}
-            value={desc}
-            onChange={(e) => {
-              setDesc(e.target.value);
-              clearTimeout(debRef.current);
-              debRef.current = setTimeout(flush, 500);
-            }}
-          />
-          <div className="flex flex-wrap items-center gap-2">
-            <DurationChips t={t} durations={durations} defaultMinutes={defaultMinutes} onDuration={onDuration} />
-            {onDemote && (
-              <button className={btn} title="Move back to Backlog" onClick={() => onDemote(t)}>
-                ↓ Backlog
-              </button>
-            )}
-            {onMoveProject && projects && projects.length > 0 && !t.id.startsWith("tmp-") && (
-              <label
-                className={`${btn} relative inline-flex cursor-pointer items-center`}
-                title="Move to another list"
+        <div className="space-y-3 border-t border-zinc-800/80 px-3 pt-3 pb-3">
+          {/* 1. OpenCode Question / Option Picker (when agent calls `question` tool) */}
+          {liveSession?.form && (
+            <div className="space-y-2 rounded-md border border-orange-500/40 bg-zinc-950 p-3 text-[13px]">
+              {liveSession.form.fields.map((field) => (
+                <div key={field.key} className="space-y-2">
+                  <div className="font-medium text-zinc-100">
+                    {field.title || liveSession.form?.title}
+                  </div>
+                  {field.description && (
+                    <p className="text-[12px] text-zinc-400">{field.description}</p>
+                  )}
+                  {field.options && field.options.length > 0 && (
+                    <div className="grid gap-1.5 pt-0.5">
+                      {field.options.map((opt) => (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          onClick={() => onAnswerForm(field.key, opt.value, opt.label)}
+                          className="flex flex-col items-start rounded border border-zinc-800 bg-zinc-900/90 px-3 py-2 text-left transition-colors hover:border-orange-500/60 hover:bg-zinc-900"
+                        >
+                          <span className="text-[13px] font-medium text-zinc-100">
+                            {opt.label}
+                          </span>
+                          {opt.description && (
+                            <span className="text-[12px] text-zinc-400">
+                              {opt.description}
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Fallback if a tool permission is pending */}
+          {liveSession?.permission && (
+            <div className="flex items-center justify-between gap-2 rounded border border-orange-500/40 bg-zinc-950 px-3 py-2 text-[12px]">
+              <div className="min-w-0 truncate font-mono text-zinc-200">
+                <span className="text-orange-400">Allow {liveSession.permission.action}: </span>
+                {liveSession.permission.resources.join(" ")}
+              </div>
+              <button
+                onClick={onApprove}
+                className="shrink-0 rounded bg-orange-600 px-2.5 py-1 font-medium text-white hover:bg-orange-500"
               >
-                <span>⇄ List</span>
-                <select
-                  aria-label="Move to another list"
-                  className="absolute inset-0 cursor-pointer opacity-0"
-                  value=""
-                  onChange={(e) => e.target.value && onMoveProject(t, e.target.value)}
+                Allow
+              </button>
+            </div>
+          )}
+
+          {/* 2. Latest OpenCode Outcome (Markdown) + Collapsible Checkpoint History */}
+          {(summary?.lastAssistantText || summary?.lastToolCall) && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-[11px] text-zinc-500">
+                <span className="font-medium uppercase tracking-wider text-zinc-400">
+                  Latest Agent Outcome
+                </span>
+                {summary.lastToolCall && (
+                  <span className="max-w-64 truncate font-mono text-zinc-500">
+                    {summary.lastToolCall}
+                  </span>
+                )}
+              </div>
+
+              <div className="max-h-56 overflow-y-auto">
+                {summary.lastAssistantText ? (
+                  <SimpleMarkdown text={summary.lastAssistantText} />
+                ) : (
+                  <p className="font-mono text-[12px] text-zinc-500">
+                    Running {summary.lastToolCall}…
+                  </p>
+                )}
+              </div>
+
+              {turns.length > 1 && (
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowCheckpoints((s) => !s)}
+                    className="flex items-center gap-1.5 text-[12px] text-zinc-400 hover:text-zinc-200"
+                  >
+                    <span>{showCheckpoints ? "▾" : "▸"}</span>
+                    <span>{turns.length} session checkpoints (history)</span>
+                  </button>
+
+                  {showCheckpoints && (
+                    <ol className="mt-2 max-h-48 space-y-2 overflow-y-auto border-l border-zinc-800 pl-3 text-[12px]">
+                      {turns.map((turn) => (
+                        <li key={turn.id} className="space-y-0.5">
+                          <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-zinc-500">
+                            <span
+                              className={
+                                turn.role === "user"
+                                  ? "font-medium text-orange-400"
+                                  : "font-medium text-zinc-300"
+                              }
+                            >
+                              {turn.role === "user" ? "You steered" : "OpenCode"}
+                            </span>
+                            {turn.tools.slice(0, 2).map((tl, i) => (
+                              <span
+                                key={i}
+                                className="max-w-52 truncate rounded bg-zinc-800/80 px-1.5 py-0.2 font-mono text-[10px] text-zinc-400"
+                              >
+                                {tl}
+                              </span>
+                            ))}
+                          </div>
+                          {turn.text && (
+                            <p className="line-clamp-2 text-zinc-300">{turn.text}</p>
+                          )}
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 3. Unmistakable Framed Steer / Reply Box */}
+          <div className="rounded-md border border-zinc-700 bg-zinc-950 p-2.5 transition-colors focus-within:border-orange-500">
+            <div className="mb-1 flex items-center justify-between text-[11px] text-zinc-500">
+              <span className="font-medium text-zinc-400">
+                {hasSessionOutput ? "Steer Agent / Reply" : "Initial Agent Prompt"}
+              </span>
+              <span className="font-mono">⌘Enter to send</span>
+            </div>
+            <textarea
+              ref={promptRef}
+              className="w-full resize-none overflow-hidden bg-transparent text-[14px] leading-relaxed text-zinc-100 outline-none placeholder:text-zinc-600"
+              placeholder={
+                hasSessionOutput
+                  ? "Tell OpenCode what to do next…"
+                  : "Describe what OpenCode should do for this task…"
+              }
+              rows={2}
+              value={inputVal}
+              onChange={(e) => {
+                if (hasSessionOutput) {
+                  setReplyText(e.target.value);
+                } else {
+                  setPrompt(e.target.value);
+                  scheduleFlush();
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  submitToAgent();
+                }
+              }}
+            />
+            <div className="mt-1.5 flex items-center justify-end border-t border-zinc-900 pt-1.5">
+              <button
+                type="button"
+                onClick={submitToAgent}
+                className="rounded bg-orange-600 px-3 py-1 text-[12px] font-medium text-white hover:bg-orange-500"
+              >
+                {hasSessionOutput ? "Send Steer ⌘↵" : "Start Agent ⌘↵"}
+              </button>
+            </div>
+          </div>
+
+          {/* 4. Optional Settings Drawer (toggled via Options button) */}
+          {showMeta && (
+            <div className="space-y-2 border-t border-zinc-800/70 pt-2.5 text-[12px]">
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="flex items-center gap-1.5 text-zinc-400">
+                  <span className="text-zinc-500">Repo</span>
+                  <select
+                    value={repo}
+                    onChange={(e) => {
+                      setRepo(e.target.value);
+                      scheduleFlush();
+                    }}
+                    className="rounded border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-[12px] text-zinc-300 outline-none"
+                  >
+                    <option value="">None (~)</option>
+                    {KNOWN_REPOS.map((r) => (
+                      <option key={r.label} value={r.label}>
+                        {r.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="flex items-center gap-1.5 text-zinc-400">
+                  <span className="text-zinc-500">Session</span>
+                  <select
+                    value={activeSid}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      const next = val ? Array.from(new Set([...sessions, val])) : [];
+                      setSessions(next);
+                      const picked = ocSessions.find((s) => s.id === val);
+                      if (picked?.repoShort && !repo) setRepo(picked.repoShort);
+                      scheduleFlush();
+                    }}
+                    className="max-w-52 truncate rounded border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-[12px] text-zinc-300 outline-none"
+                  >
+                    <option value="">Auto-create</option>
+                    {ocSessions.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.id.slice(0, 10)} · {s.title.slice(0, 24)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <DurationChips
+                  t={t}
+                  durations={durations}
+                  defaultMinutes={defaultMinutes}
+                  onDuration={onDuration}
+                />
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  value={note}
+                  onChange={(e) => {
+                    setNote(e.target.value);
+                    scheduleFlush();
+                  }}
+                  placeholder="Next-step reminder…"
+                  className="flex-1 rounded border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-[13px] text-zinc-200 outline-none placeholder:text-zinc-600"
+                />
+                {hasSessionOutput && (
+                  <input
+                    value={prompt}
+                    onChange={(e) => {
+                      setPrompt(e.target.value);
+                      scheduleFlush();
+                    }}
+                    placeholder="Saved task spec / initial prompt…"
+                    className="flex-1 rounded border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-[13px] text-zinc-400 outline-none placeholder:text-zinc-600"
+                  />
+                )}
+                {onStartCountdown && (
+                  <button
+                    className={btn}
+                    title="Open classic fullscreen countdown timer"
+                    onClick={onStartCountdown}
+                  >
+                    ⏱ Timer
+                  </button>
+                )}
+                {onDemote && (
+                  <button className={btn} onClick={() => onDemote(t)}>
+                    ↓ Backlog
+                  </button>
+                )}
+                {onMoveProject && projects && projects.length > 0 && !t.id.startsWith("tmp-") && (
+                  <label className={`${btn} relative inline-flex cursor-pointer items-center`}>
+                    <span>⇄ List</span>
+                    <select
+                      aria-label="Move to another list"
+                      className="absolute inset-0 cursor-pointer opacity-0"
+                      value=""
+                      onChange={(e) => e.target.value && onMoveProject(t, e.target.value)}
+                    >
+                      <option value="" disabled>
+                        Move to list…
+                      </option>
+                      {projects.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                <button
+                  className={`text-[12px] ${
+                    confirming ? "text-red-500" : "text-zinc-600 hover:text-zinc-400"
+                  }`}
+                  onClick={() => (confirming ? onDelete(t) : setConfirming(true))}
                 >
-                  <option value="" disabled>
-                    Move to list…
-                  </option>
-                  {projects.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
+                  {confirming ? "Confirm delete" : "Delete"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* 5. Minimal Bottom Bar */}
+          <div className="flex items-center justify-between pt-0.5 text-[12px]">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowMeta((s) => !s)}
+                className="text-zinc-500 hover:text-zinc-300"
+              >
+                {showMeta
+                  ? "Hide options"
+                  : [repo ? repo.replace(/^vyond\//, "") : null, activeSid ? activeSid.slice(0, 8) : null]
+                      .filter(Boolean)
+                      .join(" · ") || "Options"}
+              </button>
+              {activeSid && (
+                <button
+                  type="button"
+                  onClick={() => navigator.clipboard?.writeText(`opencode -s ${activeSid}`)}
+                  title={`Copy "opencode -s ${activeSid}"`}
+                  className="rounded border border-zinc-800 px-1.5 py-0.5 font-mono text-[11px] text-zinc-400 hover:text-zinc-200"
+                >
+                  Open in CLI ↗
+                </button>
+              )}
+            </div>
+
             {onComplete && (
-              <button className={`${btn} text-orange-500`} onClick={onComplete}>
-                ✓ Complete
+              <button
+                onClick={onComplete}
+                className="rounded border border-zinc-700 px-2.5 py-1 text-[12px] text-zinc-200 hover:border-orange-500 hover:text-orange-400"
+              >
+                ✓ Mark Done
               </button>
             )}
-            <button
-              className={`ml-auto text-[13px] transition-colors duration-150 ${
-                confirming ? "text-red-500" : "text-zinc-600 hover:text-zinc-400"
-              }`}
-              onClick={() => (confirming ? onDelete(t) : setConfirming(true))}
-            >
-              {confirming ? "Click again to confirm" : "Delete"}
-            </button>
           </div>
         </div>
       </div>
@@ -1561,11 +2511,15 @@ function AddRow({
   alwaysOpen?: boolean;
   inline?: boolean;
   sections: SectionMap;
-  onAdd: (raw: string) => void;
+  onAdd: (raw: string, extra?: AddExtra) => void;
 }) {
   const [open, setOpen] = useState(!!alwaysOpen);
   const [v, setV] = useState("");
+  const [showDetails, setShowDetails] = useState(false);
+  const [promptText, setPromptText] = useState("");
+  const [pickedRepo, setPickedRepo] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const promptRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     if (!hotkey) return;
@@ -1590,12 +2544,19 @@ function AddRow({
   }, [open]);
 
   const parsed = parseAdd(v, sections);
-  const submit = () => {
+  const submit = (mode: "save" | "drive" | "agent" = "save") => {
     const raw = v.trim();
-    if (raw) {
-      onAdd(raw);
-      setV("");
-    }
+    if (!raw) return;
+    const combinedPrompt = [parsed.prompt, promptText.trim()].filter(Boolean).join("\n");
+    const repo = parsed.repo || (showDetails ? pickedRepo : "");
+    onAdd(raw, {
+      repo: repo || undefined,
+      prompt: combinedPrompt || undefined,
+      mode,
+    });
+    setV("");
+    setPromptText("");
+    if (!alwaysOpen) setShowDetails(false);
   };
 
   if (!open)
@@ -1609,44 +2570,156 @@ function AddRow({
     );
   return (
     <div className={inline ? "min-w-0 flex-1 py-1" : "py-1"}>
-      <input
-        ref={inputRef}
-        className={input}
-        placeholder={placeholder}
-        value={v}
-        onChange={(e) => setV(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            submit();
-          } else if (e.key === "Escape") {
-            setV("");
-            if (!alwaysOpen) setOpen(false);
-          }
-        }}
-        onBlur={() => {
-          if (!alwaysOpen) setOpen(false);
-        }}
-      />
+      <div className="flex items-center gap-1.5">
+        <input
+          ref={inputRef}
+          className={input}
+          placeholder={placeholder}
+          value={v}
+          onChange={(e) => setV(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Tab" && !e.shiftKey && !inline && !showDetails && v.trim()) {
+              e.preventDefault();
+              setShowDetails(true);
+              setTimeout(() => promptRef.current?.focus(), 20);
+            } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              submit("agent");
+            } else if (e.key === "Enter") {
+              e.preventDefault();
+              submit("save");
+            } else if (e.key === "Escape") {
+              setV("");
+              setShowDetails(false);
+              if (!alwaysOpen) setOpen(false);
+            }
+          }}
+          onBlur={() => {
+            if (!alwaysOpen && !showDetails && !v.trim()) setOpen(false);
+          }}
+        />
+        {!inline && (
+          <button
+            type="button"
+            onClick={() => setShowDetails((s) => !s)}
+            className="shrink-0 rounded-md border border-zinc-800 px-2.5 py-2 text-[12px] text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
+            title="Add OpenCode prompt / description & repo (Tab)"
+          >
+            {showDetails ? "Hide" : "＋ Prompt"}
+          </button>
+        )}
+      </div>
+
       {v.trim() &&
-        (parsed.duration != null || parsed.sectionName || parsed.priority != null) && (
-        <div className="mt-1 flex flex-wrap gap-1 font-mono text-[11px] text-zinc-500">
-          <span className="rounded border border-zinc-800 px-1.5 py-0.5">
-            {parsed.content || "…"}
-          </span>
-          {parsed.duration != null && (
-            <span className="rounded border border-zinc-800 px-1.5 py-0.5">{parsed.duration}m</span>
-          )}
-          {parsed.sectionName && (
+        (parsed.duration != null ||
+          parsed.sectionName ||
+          parsed.priority != null ||
+          parsed.repo ||
+          parsed.prompt) && (
+          <div className="mt-1 flex flex-wrap gap-1 font-mono text-[11px] text-zinc-500">
             <span className="rounded border border-zinc-800 px-1.5 py-0.5">
-              #{parsed.sectionName}
+              {parsed.content || "…"}
             </span>
-          )}
-          {parsed.priority != null && (
-            <span className="rounded border border-zinc-800 px-1.5 py-0.5">
-              p{5 - parsed.priority}
+            {parsed.duration != null && (
+              <span className="rounded border border-zinc-800 px-1.5 py-0.5">
+                {parsed.duration}m
+              </span>
+            )}
+            {parsed.sectionName && (
+              <span className="rounded border border-zinc-800 px-1.5 py-0.5">
+                #{parsed.sectionName}
+              </span>
+            )}
+            {parsed.priority != null && (
+              <span className="rounded border border-zinc-800 px-1.5 py-0.5">
+                p{5 - parsed.priority}
+              </span>
+            )}
+            {parsed.repo && (
+              <span className="rounded border border-zinc-800 px-1.5 py-0.5 text-zinc-300">
+                @{parsed.repo}
+              </span>
+            )}
+            {parsed.prompt && (
+              <span className="rounded border border-zinc-800 px-1.5 py-0.5 text-orange-400">
+                +prompt
+              </span>
+            )}
+          </div>
+        )}
+
+      {showDetails && !inline && (
+        <div className="mt-1.5 space-y-2 rounded-md border border-zinc-800 bg-zinc-900/90 p-2.5 text-[12px]">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="mr-1 text-zinc-500">Repo (optional):</span>
+            <button
+              type="button"
+              onClick={() => setPickedRepo("")}
+              className={`rounded px-2 py-0.5 font-mono text-[11px] transition-colors ${
+                pickedRepo === ""
+                  ? "bg-zinc-200 font-medium text-zinc-950"
+                  : "bg-zinc-800/70 text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              None (~)
+            </button>
+            {KNOWN_REPOS.map((r) => {
+              const short = r.label.replace(/^vyond\//, "");
+              const active = pickedRepo === r.label;
+              return (
+                <button
+                  key={r.label}
+                  type="button"
+                  onClick={() => setPickedRepo(r.label)}
+                  className={`rounded px-2 py-0.5 font-mono text-[11px] transition-colors ${
+                    active
+                      ? "bg-zinc-200 font-medium text-zinc-950"
+                      : "bg-zinc-800/70 text-zinc-400 hover:text-zinc-200"
+                  }`}
+                >
+                  {short}
+                </button>
+              );
+            })}
+          </div>
+          <textarea
+            ref={promptRef}
+            rows={2}
+            value={promptText}
+            onChange={(e) => setPromptText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                submit("agent");
+              }
+            }}
+            placeholder="Todoist description / OpenCode prompt (files, constraints, next step)…"
+            className="w-full resize-none rounded border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 font-mono text-[12px] leading-relaxed text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-zinc-700"
+          />
+          <div className="flex items-center justify-between pt-0.5">
+            <span className="text-[11px] text-zinc-500">
+              Saved to Todoist description · ⌘Enter to launch agent
             </span>
-          )}
+            <div className="flex items-center gap-1.5">
+              <button type="button" onClick={() => submit("save")} className={btn}>
+                Save only
+              </button>
+              <button
+                type="button"
+                onClick={() => submit("drive")}
+                className="rounded border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-[12px] text-zinc-200 hover:bg-zinc-700"
+              >
+                Add & Drive
+              </button>
+              <button
+                type="button"
+                onClick={() => submit("agent")}
+                className="rounded bg-orange-600 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-orange-500"
+              >
+                Add & Run Agent →
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -1658,32 +2731,38 @@ function Review({
   sessions,
   archived,
   onArchiveAll,
+  onResumeTask,
 }: {
   tasks: Task[];
   sessions: Session[];
   archived: boolean;
   onArchiveAll: () => void;
+  onResumeTask?: (t: Task) => void;
 }) {
   const ts = sessions.filter((s) => new Date(s.timestamp).toDateString() === todayStr());
   const focused = ts.reduce((a, s) => a + s.actual_minutes, 0);
+  const agentTotal = ts.reduce((a, s) => a + (s.agent_minutes ?? 0), 0);
   const completed = ts.filter((s) => s.completed).length;
-  const planned = ts.reduce((a, s) => a + s.planned_minutes, 0);
-  const accuracy = planned ? Math.round((focused / planned) * 100) : 0;
   const actualFor = (id: string) => {
     const n = ts.filter((s) => s.task_id === id).reduce((a, s) => a + s.actual_minutes, 0);
     return n || null;
   };
-  // planned: sum of each timer start's planned minutes; falls back to the task estimate
-  // only when nothing was logged today
-  const plannedFor = (id: string) => {
-    const n = ts.filter((s) => s.task_id === id).reduce((a, s) => a + s.planned_minutes, 0);
+  const agentFor = (id: string) => {
+    const n = ts.filter((s) => s.task_id === id).reduce((a, s) => a + (s.agent_minutes ?? 0), 0);
     return n || null;
+  };
+  const ocSessionsFor = (t: Task) => {
+    const fromDesc = parseTaskDescription(t.description).sessions;
+    const fromLogs = ts
+      .filter((s) => s.task_id === t.id)
+      .flatMap((s) => s.opencode_sessions ?? []);
+    return Array.from(new Set([...fromDesc, ...fromLogs]));
   };
 
   const stats: [string, string][] = [
-    [`${focused}m`, "focused today"],
+    [`${focused}m`, "you driving today"],
+    [`${agentTotal}m`, "agent runtime"],
     [String(completed), "completed"],
-    [`${accuracy}%`, "planned vs actual"],
   ];
 
   return (
@@ -1700,8 +2779,7 @@ function Review({
         <p className="py-16 text-center text-[20px] font-semibold">Day complete ✓</p>
       ) : tasks.length === 0 ? (
         <p className="text-[13px] text-zinc-500">
-          Come back tonight: planned vs actual time, side by side. Most people underestimate by 50%
-          — are you the exception?
+          Completed tasks appear here with their human driving time, agent runtime, and preserved OpenCode session links.
         </p>
       ) : (
         <>
@@ -1709,30 +2787,55 @@ function Review({
             <thead>
               <tr className="border-b border-zinc-800 text-[13px] text-zinc-500">
                 <th className="py-2 font-normal">Task</th>
-                <th className="w-16 py-2 text-right font-normal">Planned</th>
-                <th className="w-16 py-2 text-right font-normal">Actual</th>
-                <th className="w-14 py-2 text-right font-normal">Δ</th>
+                <th className="w-28 py-2 text-right font-normal">OpenCode</th>
+                <th className="w-16 py-2 text-right font-normal">You</th>
+                <th className="w-16 py-2 text-right font-normal">Agent</th>
+                {onResumeTask && <th className="w-16 py-2 text-right font-normal"></th>}
               </tr>
             </thead>
             <tbody>
               {tasks.map((t) => {
                 const a = actualFor(t.id);
-                const p = plannedFor(t.id) ?? t.duration?.amount;
-                const d = a != null && p != null ? a - p : null;
+                const ai = agentFor(t.id);
+                const sids = ocSessionsFor(t);
+                const lastSid = sids[sids.length - 1];
                 return (
                   <tr key={t.id} className="border-b border-zinc-800/60">
                     <td className="truncate py-2 pr-2 text-[15px]" title={t.content}>
                       {t.content}
                     </td>
-                    <td className="py-2 text-right font-mono text-[13px] tabular-nums text-zinc-500">
-                      {p != null ? `${p}m` : "—"}
+                    <td className="py-2 text-right font-mono text-[12px] text-zinc-400">
+                      {lastSid ? (
+                        <button
+                          onClick={() => {
+                            navigator.clipboard?.writeText(`opencode -s ${lastSid}`);
+                          }}
+                          title={`Copy "opencode -s ${lastSid}" to resume session in terminal`}
+                          className="rounded border border-zinc-800 px-1.5 py-0.5 hover:border-zinc-700 hover:text-zinc-200"
+                        >
+                          {lastSid.slice(0, 8)} ↗
+                        </button>
+                      ) : (
+                        <span className="text-zinc-600">—</span>
+                      )}
                     </td>
-                    <td className="py-2 text-right font-mono text-[13px] tabular-nums text-zinc-500">
+                    <td className="py-2 text-right font-mono text-[13px] tabular-nums text-zinc-400">
                       {a != null ? `${a}m` : "—"}
                     </td>
                     <td className="py-2 text-right font-mono text-[13px] tabular-nums text-zinc-500">
-                      {d != null ? `${d > 0 ? "+" : ""}${d}m` : "—"}
+                      {ai != null ? `${ai}m` : "—"}
                     </td>
+                    {onResumeTask && (
+                      <td className="py-2 text-right">
+                        <button
+                          onClick={() => onResumeTask(t)}
+                          className="text-[12px] text-zinc-500 hover:text-orange-500"
+                          title="Move back to Focus with linked OpenCode session history intact"
+                        >
+                          Resume
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 );
               })}
