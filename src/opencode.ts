@@ -88,7 +88,7 @@ export const DEFAULT_SERVERS: OpenCodeServer[] = [
         dir: "/home/ubuntu/vyond/qa-autotest-account-pool",
       },
     ],
-    enabled: true,
+    enabled: false,
   },
   {
     id: "homelab",
@@ -100,7 +100,7 @@ export const DEFAULT_SERVERS: OpenCodeServer[] = [
       { label: "my-timebox-focus-app", dir: "/workspace/my-timebox-focus-app" },
       { label: "homelab/infra", dir: "/workspace/infra" },
     ],
-    enabled: true,
+    enabled: false,
   },
 ];
 
@@ -157,9 +157,13 @@ export function loadOpenCodeConfig(): OpenCodeConfig {
       // Backfill repos on existing servers and seed default devbox/homelab if only single uncustomized local exists
       const mapped = parsed.servers.map((s) => {
         const preset = DEFAULT_SERVERS.find((d) => d.id === s.id);
+        const isUnconfiguredSample =
+          (s.id === "devbox" && s.endpoint === "https://devbox.vyond.ts.net/api") ||
+          (s.id === "homelab" && s.endpoint === "https://homelab.tailnet.ts.net/api");
         return {
           ...preset,
           ...s,
+          enabled: isUnconfiguredSample ? false : s.enabled ?? preset?.enabled ?? true,
           repos: s.repos && s.repos.length > 0 ? s.repos : preset?.repos ?? KNOWN_REPOS,
         };
       });
@@ -274,16 +278,13 @@ let autoDiscoveredLocal: { endpoint?: string; password?: string; checkedAt: numb
 
 export async function discoverLocalBridge(force = false): Promise<LocalBridgeHealth | null> {
   if (typeof window === "undefined") return null;
+  if (window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
+    return null;
+  }
   if (!force && autoDiscoveredLocal && Date.now() - autoDiscoveredLocal.checkedAt < 15_000) {
     return null;
   }
-  const candidates = [
-    "http://localhost:5173/opencode-api/health",
-    "http://127.0.0.1:5173/opencode-api/health",
-  ];
-  if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
-    candidates.unshift("/opencode-api/health");
-  }
+  const candidates = ["/opencode-api/health"];
   for (const url of candidates) {
     try {
       const ctrl = new AbortController();
@@ -468,7 +469,9 @@ export async function verifyAllOpenCodeServers(
   override?: Partial<OpenCodeConfig>,
 ): Promise<Record<string, OpenCodeVerifyResult>> {
   const cfg = { ...loadOpenCodeConfig(), ...override };
-  const list = cfg.servers.length > 0 ? cfg.servers : DEFAULT_SERVERS;
+  const list = (cfg.servers.length > 0 ? cfg.servers : DEFAULT_SERVERS).filter(
+    (s) => s.enabled !== false,
+  );
   const results = await Promise.all(list.map((s) => verifyServerConnection(s)));
   const map: Record<string, OpenCodeVerifyResult> = {};
   for (const r of results) map[r.serverId] = r;

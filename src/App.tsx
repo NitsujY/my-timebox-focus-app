@@ -131,6 +131,7 @@ const input =
   "w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-[15px] outline-none placeholder:text-zinc-600 focus:border-zinc-700";
 
 async function api(token: string, path: string, method = "GET", body?: object) {
+  const cleanPassed = token.trim();
   const call = (t: string) =>
     fetch(API + path, {
       method,
@@ -140,8 +141,11 @@ async function api(token: string, path: string, method = "GET", body?: object) {
       },
       body: body ? JSON.stringify(body) : undefined,
     });
-  let res = await call(load("tb_token", token)); // storage may hold a fresher token than state
-  if (res.status === 401 && load("tb_refresh", ""))
+  // Only prefer localStorage token if the caller didn't pass a different explicit token
+  const stored = load("tb_token", "").trim();
+  const effectiveToken = cleanPassed || stored;
+  let res = await call(effectiveToken);
+  if (res.status === 401 && load("tb_refresh", "") && effectiveToken === stored)
     res = await call(await refreshToken()); // OAuth token expired — refresh & retry once
   if (!res.ok) throw new Error(`${res.status} ${path}`);
   return res.status === 204 ? null : res.json();
@@ -416,15 +420,20 @@ export default function App() {
   );
 
   useEffect(() => {
+    if (!token || !projectId) return;
     syncOpenCode();
     void runVerifyOpenCode();
     const iv = setInterval(syncOpenCode, 3000);
     let es: EventSource | null = null;
     try {
-      es = new EventSource(getOpenCodeEventUrl());
-      es.onmessage = () => {
-        syncOpenCode();
-      };
+      const eventUrl = getOpenCodeEventUrl();
+      // Only open unauthenticated EventSource for same-origin /opencode-api bridge
+      if (eventUrl.startsWith("/")) {
+        es = new EventSource(eventUrl);
+        es.onmessage = () => {
+          syncOpenCode();
+        };
+      }
     } catch {
       /* SSE optional fallback to 3s polling */
     }
@@ -432,7 +441,7 @@ export default function App() {
       clearInterval(iv);
       es?.close();
     };
-  }, [syncOpenCode, runVerifyOpenCode, ocConfig.defaultServerId, ocConfig.servers]);
+  }, [token, projectId, syncOpenCode, runVerifyOpenCode, ocConfig.defaultServerId, ocConfig.servers]);
 
   // 1-second background ticker: increments humanSec on expanded task and agentSec on any task whose linked OpenCode session is `running`
   useEffect(() => {
@@ -1609,12 +1618,19 @@ function Connect({
       const pick = ps.find((p) => !p.is_inbox_project && !p.inbox_project && p.name !== "Inbox") ?? ps[0];
       if (pick) onDone(cleanToken, pick.id);
       else setProjects(ps); // no projects at all — show the (empty) list
-    } catch {
-      setErr(
-        cleanToken === "JejvYTz1123-qJKgdA9DAvgetYODwYef18yrTw99Kb8"
-          ? "That's your OpenCode password — paste your Todoist API token here (or click Connect with Todoist above)."
-          : "Couldn't load projects — check the Todoist API token and your connection, then retry",
-      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (cleanToken === "JejvYTz1123-qJKgdA9DAvgetYODwYef18yrTw99Kb8") {
+        setErr(
+          "That's your OpenCode password — paste your Todoist API token here (or click Connect with Todoist above).",
+        );
+      } else if (msg.startsWith("401 ") || msg.startsWith("403 ")) {
+        setErr(
+          `Todoist rejected the token (${msg}). Get your personal API token at Todoist Settings → Integrations → Developer, or click "Connect with Todoist" above.`,
+        );
+      } else {
+        setErr(`Couldn't load projects (${msg}) — check your connection and retry`);
+      }
     }
   };
 
