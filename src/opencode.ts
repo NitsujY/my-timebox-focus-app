@@ -1,12 +1,380 @@
 export type TriageState =
   | "needs_you" // Agent asked a question / form option, OR finished turn and is waiting for your steer
   | "working" // OpenCode agent is actively generating / running tools
-  | "queued"; // Idle / manual task / not currently running an agent
+  | "queued"; // Idle / manual task / or queued for OpenCode agent
+
+export type OpenCodeRepo = {
+  label: string;
+  dir: string;
+};
+
+export type OpenCodeServer = {
+  /** Short slug used in Todoist `[opencode:srv=<id>]` and `~<id>` quick-add syntax */
+  id: string;
+  /** Display label, e.g. "MacBook Local", "Cloud Devbox", "Home Server" */
+  name: string;
+  /** Empty = `/opencode-api` (local Vite bridge), or remote URL e.g. `https://devbox.ts.net/api` */
+  endpoint: string;
+  /** Optional Basic auth password when connecting directly to `opencode serve` */
+  password?: string;
+  /** Default workspace directory on that server (e.g. `/Users/justinyu` or `/home/ubuntu`) */
+  defaultDir?: string;
+  /** Projects / repositories available on this execution server */
+  repos?: OpenCodeRepo[];
+  /** Whether to poll this server for live sessions */
+  enabled?: boolean;
+};
+
+export type OpenCodeConfig = {
+  /** Legacy primary endpoint (mirrored to default server) */
+  endpoint: string;
+  /** Legacy primary password (mirrored to default server) */
+  password: string;
+  /** When true and a target OpenCode server is connected, automatically start tasks marked `queue=1` */
+  autoRunQueued: boolean;
+  /** Default execution server ID when a task doesn't specify `srv=...` */
+  defaultServerId: string;
+  /** Configured execution servers (local laptop, remote devboxes, homelab, etc.) */
+  servers: OpenCodeServer[];
+};
+
+export const DEFAULT_WORKSPACE_DIR = "/Users/justinyu";
+
+export const KNOWN_REPOS: OpenCodeRepo[] = [
+  { label: "vyond/devops", dir: "/Users/justinyu/Develop/vyond/devops" },
+  { label: "vyond/eks-manifest", dir: "/Users/justinyu/Develop/vyond/eks-manifest" },
+  {
+    label: "vyond/qa-autotest-account-pool",
+    dir: "/Users/justinyu/Develop/vyond/qa-autotest-account-pool",
+  },
+  { label: "vyond/turbo", dir: "/Users/justinyu/Develop/vyond/turbo" },
+  { label: "vyond/next", dir: "/Users/justinyu/Develop/vyond/next" },
+  {
+    label: "vyond/devops-software-review-hub",
+    dir: "/Users/justinyu/Develop/vyond/devops-software-review-hub",
+  },
+  {
+    label: "vyond/devops-ai-helper",
+    dir: "/Users/justinyu/Develop/vyond/devops-ai-helper",
+  },
+  {
+    label: "my-timebox-focus-app",
+    dir: "/Users/justinyu/Develop/my-diy-random-thing/my-timebox-focus-app",
+  },
+];
+
+export const DEFAULT_SERVERS: OpenCodeServer[] = [
+  {
+    id: "local",
+    name: "MacBook Local",
+    endpoint: "",
+    password: "",
+    defaultDir: DEFAULT_WORKSPACE_DIR,
+    repos: KNOWN_REPOS,
+    enabled: true,
+  },
+  {
+    id: "devbox",
+    name: "Cloud Devbox",
+    endpoint: "https://devbox.vyond.ts.net/api",
+    password: "",
+    defaultDir: "/home/ubuntu/vyond",
+    repos: [
+      { label: "vyond/devops", dir: "/home/ubuntu/vyond/devops" },
+      { label: "vyond/eks-manifest", dir: "/home/ubuntu/vyond/eks-manifest" },
+      { label: "vyond/turbo", dir: "/home/ubuntu/vyond/turbo" },
+      {
+        label: "vyond/qa-autotest-account-pool",
+        dir: "/home/ubuntu/vyond/qa-autotest-account-pool",
+      },
+    ],
+    enabled: true,
+  },
+  {
+    id: "homelab",
+    name: "Home Server",
+    endpoint: "https://homelab.tailnet.ts.net/api",
+    password: "",
+    defaultDir: "/workspace",
+    repos: [
+      { label: "my-timebox-focus-app", dir: "/workspace/my-timebox-focus-app" },
+      { label: "homelab/infra", dir: "/workspace/infra" },
+    ],
+    enabled: true,
+  },
+];
+
+export const DEFAULT_OC_CONFIG: OpenCodeConfig = {
+  endpoint: "",
+  password: "",
+  autoRunQueued: true,
+  defaultServerId: "local",
+  servers: DEFAULT_SERVERS,
+};
+
+const OC_CFG_KEY = "tb_oc_config";
+
+export function loadOpenCodeConfig(): OpenCodeConfig {
+  try {
+    const raw = localStorage.getItem(OC_CFG_KEY);
+    if (!raw) return { ...DEFAULT_OC_CONFIG, servers: [...DEFAULT_SERVERS] };
+    const parsed = JSON.parse(raw) as Partial<OpenCodeConfig>;
+    let servers: OpenCodeServer[];
+    if (Array.isArray(parsed.servers) && parsed.servers.length > 0) {
+      // Backfill repos on existing servers and seed default devbox/homelab if only single uncustomized local exists
+      const mapped = parsed.servers.map((s) => {
+        const preset = DEFAULT_SERVERS.find((d) => d.id === s.id);
+        return {
+          ...preset,
+          ...s,
+          repos: s.repos && s.repos.length > 0 ? s.repos : preset?.repos ?? KNOWN_REPOS,
+        };
+      });
+      if (mapped.length === 1 && mapped[0].id === "local") {
+        servers = [mapped[0], ...DEFAULT_SERVERS.slice(1)];
+      } else {
+        servers = mapped;
+      }
+    } else {
+      servers = [
+        {
+          ...DEFAULT_SERVERS[0],
+          endpoint: parsed.endpoint ?? "",
+          password: parsed.password ?? "",
+        },
+        ...DEFAULT_SERVERS.slice(1),
+      ];
+    }
+    const defaultServerId =
+      parsed.defaultServerId && servers.some((s) => s.id === parsed.defaultServerId)
+        ? parsed.defaultServerId
+        : servers[0].id;
+    const primary = servers.find((s) => s.id === defaultServerId) ?? servers[0];
+    return {
+      endpoint: primary.endpoint ?? "",
+      password: primary.password ?? "",
+      autoRunQueued: parsed.autoRunQueued ?? true,
+      defaultServerId,
+      servers,
+    };
+  } catch {
+    return { ...DEFAULT_OC_CONFIG, servers: [...DEFAULT_SERVERS] };
+  }
+}
+
+export function saveOpenCodeConfig(cfg: OpenCodeConfig): void {
+  try {
+    localStorage.setItem(OC_CFG_KEY, JSON.stringify(cfg));
+  } catch {
+    /* ignore quota errors */
+  }
+}
+
+export function resolveServer(serverId?: string, cfg?: OpenCodeConfig): OpenCodeServer {
+  const effective = cfg ?? loadOpenCodeConfig();
+  const list = effective.servers.length > 0 ? effective.servers : DEFAULT_SERVERS;
+  if (serverId?.trim()) {
+    const clean = serverId.trim().replace(/^~/, "").toLowerCase();
+    const hit = list.find(
+      (s) => s.id.toLowerCase() === clean || s.name.toLowerCase() === clean,
+    );
+    if (hit) return hit;
+  }
+  return list.find((s) => s.id === effective.defaultServerId) ?? list[0];
+}
+
+export function resolveOpenCodeBase(rawEndpoint?: string): string {
+  const clean = (rawEndpoint ?? loadOpenCodeConfig().endpoint).trim().replace(/\/+$/, "");
+  if (!clean) return "/opencode-api";
+  if (clean.endsWith("/opencode-api") || clean.endsWith("/api")) return clean;
+  try {
+    const u = new URL(clean);
+    if (u.pathname === "" || u.pathname === "/") {
+      return `${clean}/opencode-api`;
+    }
+  } catch {
+    /* relative path */
+  }
+  return clean;
+}
+
+function buildServerHeaders(srv: OpenCodeServer, jsonBody = false): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (jsonBody) headers["Content-Type"] = "application/json";
+  if (srv.password?.trim()) {
+    headers["Authorization"] = `Basic ${btoa(`opencode:${srv.password.trim()}`)}`;
+  }
+  return headers;
+}
+
+export function getOpenCodeEventUrl(serverId?: string): string {
+  const srv = resolveServer(serverId);
+  return `${resolveOpenCodeBase(srv.endpoint)}/event`;
+}
+
+export type OpenCodeVerifyResult = {
+  serverId: string;
+  serverName: string;
+  ok: boolean;
+  endpoint: string;
+  sessionCount: number;
+  activeCount: number;
+  latencyMs: number;
+  error?: string;
+  checkedAt: number;
+};
+
+export async function verifyServerConnection(
+  srv: OpenCodeServer,
+): Promise<OpenCodeVerifyResult> {
+  const base = resolveOpenCodeBase(srv.endpoint);
+  const start = performance.now();
+
+  if (
+    typeof window !== "undefined" &&
+    window.location.protocol === "https:" &&
+    base.startsWith("http://")
+  ) {
+    return {
+      serverId: srv.id,
+      serverName: srv.name,
+      ok: false,
+      endpoint: base,
+      sessionCount: 0,
+      activeCount: 0,
+      latencyMs: 0,
+      error:
+        "Blocked by browser Mixed Content (HTTPS page requires https:// endpoint e.g. Tailscale Serve / Cloudflare Tunnel, or open app via http://).",
+      checkedAt: Date.now(),
+    };
+  }
+
+  try {
+    const headers = buildServerHeaders(srv);
+    const [sesRes, actRes] = await Promise.all([
+      fetch(`${base}/session?limit=30&order=desc`, { headers }),
+      fetch(`${base}/session/active`, { headers }).catch(() => null),
+    ]);
+    const latencyMs = Math.max(1, Math.round(performance.now() - start));
+
+    if (!sesRes.ok) {
+      let detail = `HTTP ${sesRes.status}`;
+      try {
+        const errJson = (await sesRes.json()) as { error?: string };
+        if (errJson?.error) detail = `${detail} — ${errJson.error}`;
+      } catch {
+        /* ignore non-json */
+      }
+      return {
+        serverId: srv.id,
+        serverName: srv.name,
+        ok: false,
+        endpoint: base,
+        sessionCount: 0,
+        activeCount: 0,
+        latencyMs,
+        error: detail,
+        checkedAt: Date.now(),
+      };
+    }
+
+    const sesJson = (await sesRes.json()) as { data?: OpenCodeSessionInfo[] };
+    const actJson =
+      actRes && actRes.ok
+        ? ((await actRes.json()) as { data?: Record<string, { type: string }> })
+        : { data: {} };
+
+    return {
+      serverId: srv.id,
+      serverName: srv.name,
+      ok: true,
+      endpoint: base,
+      sessionCount: (sesJson.data ?? []).length,
+      activeCount: Object.keys(actJson.data ?? {}).length,
+      latencyMs,
+      checkedAt: Date.now(),
+    };
+  } catch (e) {
+    const latencyMs = Math.max(1, Math.round(performance.now() - start));
+    return {
+      serverId: srv.id,
+      serverName: srv.name,
+      ok: false,
+      endpoint: base,
+      sessionCount: 0,
+      activeCount: 0,
+      latencyMs,
+      error:
+        e instanceof Error
+          ? `Unreachable (${e.message})`
+          : "Unreachable — check endpoint URL, Tailscale/LAN, or CORS",
+      checkedAt: Date.now(),
+    };
+  }
+}
+
+export async function verifyAllOpenCodeServers(
+  override?: Partial<OpenCodeConfig>,
+): Promise<Record<string, OpenCodeVerifyResult>> {
+  const cfg = { ...loadOpenCodeConfig(), ...override };
+  const list = cfg.servers.length > 0 ? cfg.servers : DEFAULT_SERVERS;
+  const results = await Promise.all(list.map((s) => verifyServerConnection(s)));
+  const map: Record<string, OpenCodeVerifyResult> = {};
+  for (const r of results) map[r.serverId] = r;
+  return map;
+}
+
+export async function verifyOpenCodeConnection(
+  override?: Partial<OpenCodeConfig>,
+): Promise<OpenCodeVerifyResult> {
+  const cfg = { ...loadOpenCodeConfig(), ...override };
+  const srv = resolveServer(cfg.defaultServerId, cfg);
+  return verifyServerConnection(srv);
+}
+
+export type OpenCodeModelRef = {
+  id: string;
+  providerID: string;
+  variant?: string;
+};
+
+export type OpenCodeModelOption = {
+  /** Combined `providerID/id` key */
+  key: string;
+  providerID: string;
+  id: string;
+  name: string;
+  isDefault?: boolean;
+};
+
+export function formatModelKey(ref?: OpenCodeModelRef | null): string {
+  if (!ref?.providerID || !ref?.id) return "";
+  return `${ref.providerID}/${ref.id}`;
+}
+
+export function parseModelKey(key?: string): OpenCodeModelRef | undefined {
+  const clean = (key ?? "").trim();
+  const slash = clean.indexOf("/");
+  if (slash <= 0 || slash === clean.length - 1) return undefined;
+  return {
+    providerID: clean.slice(0, slash),
+    id: clean.slice(slash + 1),
+  };
+}
+
+export function shortModelLabel(key?: string, options?: OpenCodeModelOption[]): string {
+  if (!key) return "";
+  const hit = options?.find((m) => m.key === key);
+  if (hit) return hit.name;
+  const slash = key.indexOf("/");
+  return slash !== -1 ? key.slice(slash + 1) : key;
+}
 
 export type OpenCodeSessionInfo = {
   id: string;
   title?: string;
   agent?: string;
+  model?: OpenCodeModelRef;
   cost?: number;
   outcome?: string;
   time: {
@@ -55,6 +423,9 @@ export type OpenCodeLiveSession = {
   title: string;
   directory: string;
   repoShort: string;
+  serverId: string;
+  serverName: string;
+  modelKey?: string;
   status: "running" | "question" | "ready" | "idle";
   updatedAt: number;
   busyAt?: number;
@@ -65,30 +436,10 @@ export type OpenCodeLiveSession = {
   permission?: OpenCodePermissionRequest;
 };
 
-export const KNOWN_REPOS: { label: string; dir: string }[] = [
-  { label: "vyond/devops", dir: "/Users/justinyu/Develop/vyond/devops" },
-  { label: "vyond/eks-manifest", dir: "/Users/justinyu/Develop/vyond/eks-manifest" },
-  {
-    label: "vyond/qa-autotest-account-pool",
-    dir: "/Users/justinyu/Develop/vyond/qa-autotest-account-pool",
-  },
-  { label: "vyond/turbo", dir: "/Users/justinyu/Develop/vyond/turbo" },
-  { label: "vyond/next", dir: "/Users/justinyu/Develop/vyond/next" },
-  {
-    label: "vyond/devops-software-review-hub",
-    dir: "/Users/justinyu/Develop/vyond/devops-software-review-hub",
-  },
-  {
-    label: "vyond/devops-ai-helper",
-    dir: "/Users/justinyu/Develop/vyond/devops-ai-helper",
-  },
-  {
-    label: "my-timebox-focus-app",
-    dir: "/Users/justinyu/Develop/my-diy-random-thing/my-timebox-focus-app",
-  },
-];
-
-export const DEFAULT_WORKSPACE_DIR = "/Users/justinyu";
+export function getServerRepos(serverId?: string, cfg?: OpenCodeConfig): OpenCodeRepo[] {
+  const srv = resolveServer(serverId, cfg);
+  return srv.repos && srv.repos.length > 0 ? srv.repos : KNOWN_REPOS;
+}
 
 export function dirToShortRepo(dir?: string): string {
   if (!dir || dir === DEFAULT_WORKSPACE_DIR) return "";
@@ -98,35 +449,58 @@ export function dirToShortRepo(dir?: string): string {
   return parts.slice(-2).join("/");
 }
 
-export function resolveRepoDir(repoToken?: string): string {
-  if (!repoToken || !repoToken.trim()) return DEFAULT_WORKSPACE_DIR;
+export function resolveRepoDir(repoToken?: string, serverId?: string): string {
+  const srv = resolveServer(serverId);
+  const srvRoot = srv.defaultDir?.trim() || DEFAULT_WORKSPACE_DIR;
+  if (!repoToken || !repoToken.trim()) return srvRoot;
   if (repoToken.startsWith("/")) return repoToken;
   const clean = repoToken.replace(/^@/, "").toLowerCase();
-  const hit = KNOWN_REPOS.find(
-    (r) =>
-      r.label.toLowerCase() === clean ||
-      r.label.toLowerCase().endsWith(`/${clean}`) ||
-      r.dir.toLowerCase().endsWith(`/${clean}`),
-  );
-  return hit ? hit.dir : `/Users/justinyu/Develop/vyond/${clean}`;
+  const srvRepos = getServerRepos(srv.id);
+  const hit =
+    srvRepos.find(
+      (r) =>
+        r.label.toLowerCase() === clean ||
+        r.label.toLowerCase().endsWith(`/${clean}`) ||
+        r.dir.toLowerCase().endsWith(`/${clean}`),
+    ) ??
+    KNOWN_REPOS.find(
+      (r) =>
+        r.label.toLowerCase() === clean ||
+        r.label.toLowerCase().endsWith(`/${clean}`) ||
+        r.dir.toLowerCase().endsWith(`/${clean}`),
+    );
+  if (hit) {
+    if (srvRoot !== DEFAULT_WORKSPACE_DIR && hit.dir.startsWith(DEFAULT_WORKSPACE_DIR)) {
+      return hit.dir.replace(DEFAULT_WORKSPACE_DIR, srvRoot.replace(/\/+$/, ""));
+    }
+    return hit.dir;
+  }
+  return `${srvRoot.replace(/\/+$/, "")}/${clean}`;
 }
 
 export type TaskMeta = {
   note: string;
   prompt: string;
   repo: string;
+  server?: string;
+  model?: string;
   sessions: string[];
+  queued?: boolean;
 };
 
 const META_RE = /\[opencode:([^\]]+)\]\s*$/;
 
 export function parseTaskDescription(desc?: string | null): TaskMeta {
   const raw = (desc ?? "").trim();
-  if (!raw) return { note: "", prompt: "", repo: "", sessions: [] };
+  if (!raw)
+    return { note: "", prompt: "", repo: "", server: "", model: "", sessions: [], queued: false };
 
   let body = raw;
   let repo = "";
+  let server = "";
+  let model = "";
   let sessions: string[] = [];
+  let queued = false;
 
   const match = body.match(META_RE);
   if (match) {
@@ -141,6 +515,12 @@ export function parseTaskDescription(desc?: string | null): TaskMeta {
           .filter(Boolean);
       } else if (p.startsWith("repo=")) {
         repo = p.slice(5).trim();
+      } else if (p.startsWith("srv=")) {
+        server = p.slice(4).trim();
+      } else if (p.startsWith("model=")) {
+        model = p.slice(6).trim();
+      } else if (p === "queue=1" || p === "queued=1") {
+        queued = true;
       }
     }
   }
@@ -151,19 +531,25 @@ export function parseTaskDescription(desc?: string | null): TaskMeta {
       note: notePart.trim(),
       prompt: promptParts.join("\n---\n").trim(),
       repo,
+      server,
+      model,
       sessions,
+      queued,
     };
   }
 
   const lines = body.split("\n");
   if (lines.length === 1) {
-    return { note: lines[0].trim(), prompt: "", repo, sessions };
+    return { note: lines[0].trim(), prompt: "", repo, server, model, sessions, queued };
   }
   return {
     note: lines[0].trim(),
     prompt: lines.slice(1).join("\n").trim(),
     repo,
+    server,
+    model,
     sessions,
+    queued,
   };
 }
 
@@ -181,11 +567,20 @@ export function formatTaskDescription(meta: TaskMeta): string {
   }
 
   const tags: string[] = [];
+  if (meta.server?.trim()) {
+    tags.push(`srv=${meta.server.trim()}`);
+  }
+  if (meta.model?.trim()) {
+    tags.push(`model=${meta.model.trim()}`);
+  }
   if (meta.sessions.length > 0) {
     tags.push(`ses=${Array.from(new Set(meta.sessions)).join(",")}`);
   }
   if (meta.repo.trim()) {
     tags.push(`repo=${meta.repo.trim()}`);
+  }
+  if (meta.queued) {
+    tags.push("queue=1");
   }
   if (tags.length > 0) {
     parts.push(`[opencode:${tags.join(" ")}]`);
@@ -194,19 +589,81 @@ export function formatTaskDescription(meta: TaskMeta): string {
   return parts.join("\n").trim();
 }
 
-// Fetch live state from the Vite `/opencode-api` proxy (including `/form` questions!)
-export async function fetchOpenCodeSnapshot(): Promise<{
-  connected: boolean;
-  sessions: OpenCodeLiveSession[];
-}> {
+const serverModelsCache = new Map<string, { fetchedAt: number; models: OpenCodeModelOption[] }>();
+
+async function fetchServerModels(srv: OpenCodeServer): Promise<OpenCodeModelOption[]> {
+  const cached = serverModelsCache.get(srv.id);
+  if (cached && Date.now() - cached.fetchedAt < 60_000) {
+    return cached.models;
+  }
+  const base = resolveOpenCodeBase(srv.endpoint);
+  const headers = buildServerHeaders(srv);
   try {
-    const [sesRes, actRes, formRes, permRes] = await Promise.all([
-      fetch("/opencode-api/session?limit=30&order=desc"),
-      fetch("/opencode-api/session/active"),
-      fetch("/opencode-api/form"),
-      fetch("/opencode-api/permission/request"),
+    const [modRes, defRes] = await Promise.all([
+      fetch(`${base}/model`, { headers }),
+      fetch(`${base}/model/default`, { headers }).catch(() => null),
     ]);
-    if (!sesRes.ok) return { connected: false, sessions: [] };
+    if (!modRes.ok) return cached?.models ?? [];
+    const modJson = (await modRes.json()) as {
+      data?: Array<{
+        id: string;
+        providerID: string;
+        name: string;
+        type?: string;
+        enabled?: boolean;
+      }>;
+    };
+    const defJson =
+      defRes && defRes.ok
+        ? ((await defRes.json()) as { data?: { id?: string; providerID?: string } })
+        : null;
+    const defKey =
+      defJson?.data?.providerID && defJson?.data?.id
+        ? `${defJson.data.providerID}/${defJson.data.id}`
+        : "";
+
+    const raw = modJson.data ?? [];
+    const models: OpenCodeModelOption[] = raw
+      .filter((m) => m.enabled !== false && (!m.type || m.type === "chat"))
+      .map((m) => {
+        const key = `${m.providerID}/${m.id}`;
+        return {
+          key,
+          providerID: m.providerID,
+          id: m.id,
+          name: m.name || m.id,
+          isDefault: key === defKey,
+        };
+      });
+
+    models.sort((a, b) => {
+      if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    serverModelsCache.set(srv.id, { fetchedAt: Date.now(), models });
+    return models;
+  } catch {
+    return cached?.models ?? [];
+  }
+}
+
+async function fetchSingleServerSnapshot(srv: OpenCodeServer): Promise<{
+  ok: boolean;
+  sessions: OpenCodeLiveSession[];
+  models: OpenCodeModelOption[];
+}> {
+  const base = resolveOpenCodeBase(srv.endpoint);
+  const headers = buildServerHeaders(srv);
+  try {
+    const [sesRes, actRes, formRes, permRes, models] = await Promise.all([
+      fetch(`${base}/session?limit=30&order=desc`, { headers }),
+      fetch(`${base}/session/active`, { headers }),
+      fetch(`${base}/form`, { headers }),
+      fetch(`${base}/permission/request`, { headers }),
+      fetchServerModels(srv),
+    ]);
+    if (!sesRes.ok) return { ok: false, sessions: [], models: [] };
 
     const sesJson = (await sesRes.json()) as { data?: OpenCodeSessionInfo[] };
     const actJson = actRes.ok
@@ -249,6 +706,9 @@ export async function fetchOpenCodeSnapshot(): Promise<{
         title: s.title?.trim() || "Untitled session",
         directory,
         repoShort: dirToShortRepo(directory),
+        serverId: srv.id,
+        serverName: srv.name,
+        modelKey: formatModelKey(s.model) || undefined,
         status,
         updatedAt: s.time?.updated ?? s.time?.created ?? Date.now(),
         busyAt: s.time?.busy,
@@ -260,42 +720,134 @@ export async function fetchOpenCodeSnapshot(): Promise<{
       };
     });
 
-    return { connected: true, sessions: list };
+    return { ok: true, sessions: list, models };
   } catch {
-    return { connected: false, sessions: [] };
+    return { ok: false, sessions: [], models: [] };
   }
+}
+
+// Fetch live state across all enabled OpenCode servers in parallel
+export async function fetchOpenCodeSnapshot(): Promise<{
+  connected: boolean;
+  serverOnlineById: Record<string, boolean>;
+  modelsByServer: Record<string, OpenCodeModelOption[]>;
+  sessions: OpenCodeLiveSession[];
+}> {
+  const cfg = loadOpenCodeConfig();
+  const enabledServers = (cfg.servers.length > 0 ? cfg.servers : DEFAULT_SERVERS).filter(
+    (s) => s.enabled !== false,
+  );
+  if (enabledServers.length === 0) {
+    return { connected: false, serverOnlineById: {}, modelsByServer: {}, sessions: [] };
+  }
+
+  const results = await Promise.all(
+    enabledServers.map(async (srv) => ({
+      srv,
+      res: await fetchSingleServerSnapshot(srv),
+    })),
+  );
+
+  const serverOnlineById: Record<string, boolean> = {};
+  const modelsByServer: Record<string, OpenCodeModelOption[]> = {};
+  const allSessions: OpenCodeLiveSession[] = [];
+  let anyConnected = false;
+
+  for (const { srv, res } of results) {
+    serverOnlineById[srv.id] = res.ok;
+    if (res.ok) {
+      anyConnected = true;
+      modelsByServer[srv.id] = res.models;
+      allSessions.push(...res.sessions);
+    }
+  }
+
+  allSessions.sort((a, b) => b.updatedAt - a.updatedAt);
+
+  return {
+    connected: anyConnected,
+    serverOnlineById,
+    modelsByServer,
+    sessions: allSessions,
+  };
 }
 
 export async function createAndPromptOpenCodeSession(opts: {
   title: string;
   directory: string;
   promptText: string;
+  serverId?: string;
+  modelKey?: string;
 }): Promise<string> {
-  const createRes = await fetch("/opencode-api/session", {
+  const srv = resolveServer(opts.serverId);
+  const base = resolveOpenCodeBase(srv.endpoint);
+  const modelRef = parseModelKey(opts.modelKey);
+  const createRes = await fetch(`${base}/session`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: buildServerHeaders(srv, true),
     body: JSON.stringify({
       title: opts.title,
       location: { directory: opts.directory },
+      ...(modelRef ? { model: modelRef } : {}),
     }),
   });
-  if (!createRes.ok) throw new Error(`Create session failed: ${createRes.status}`);
+  if (!createRes.ok) throw new Error(`Create session on ${srv.name} failed: ${createRes.status}`);
   const created = (await createRes.json()) as { data: { id: string } };
   const sessionID = created.data.id;
 
   if (opts.promptText.trim()) {
-    await sendOpenCodePrompt(sessionID, opts.promptText.trim());
+    await sendOpenCodePrompt(sessionID, opts.promptText.trim(), srv.id);
   }
   return sessionID;
 }
 
-export async function sendOpenCodePrompt(sessionID: string, text: string): Promise<void> {
-  const res = await fetch(`/opencode-api/session/${sessionID}/prompt`, {
+export async function renameOpenCodeSession(
+  sessionID: string,
+  title: string,
+  serverId?: string,
+): Promise<void> {
+  const cleanTitle = title.trim();
+  if (!sessionID || !cleanTitle) return;
+  const srv = resolveServer(serverId);
+  const base = resolveOpenCodeBase(srv.endpoint);
+  const res = await fetch(`${base}/session/${sessionID}`, {
+    method: "PATCH",
+    headers: buildServerHeaders(srv, true),
+    body: JSON.stringify({ title: cleanTitle }),
+  });
+  if (!res.ok) throw new Error(`Rename session on ${srv.name} failed: ${res.status}`);
+}
+
+export async function switchOpenCodeSessionModel(
+  sessionID: string,
+  modelKey: string,
+  serverId?: string,
+): Promise<void> {
+  const modelRef = parseModelKey(modelKey);
+  if (!sessionID || !modelRef) return;
+  const srv = resolveServer(serverId);
+  const base = resolveOpenCodeBase(srv.endpoint);
+  const res = await fetch(`${base}/session/${sessionID}/model`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: buildServerHeaders(srv, true),
+    body: JSON.stringify({ model: modelRef }),
+  });
+  if (!res.ok) throw new Error(`Switch model on ${srv.name} failed: ${res.status}`);
+}
+
+export async function sendOpenCodePrompt(
+  sessionID: string,
+  text: string,
+  serverId?: string,
+): Promise<void> {
+  const srv = resolveServer(serverId);
+  const base = resolveOpenCodeBase(srv.endpoint);
+  const res = await fetch(`${base}/session/${sessionID}/prompt`, {
+    method: "POST",
+    headers: buildServerHeaders(srv, true),
     body: JSON.stringify({ text }),
   });
-  if (!res.ok) throw new Error(`Prompt failed: ${res.status}`);
+  if (!res.ok) throw new Error(`Prompt on ${srv.name} failed: ${res.status}`);
 }
 
 // Reply to an OpenCode question form (when the agent asks you to pick an option)
@@ -304,36 +856,48 @@ export async function replyOpenCodeForm(
   formID: string,
   fieldKey: string,
   value: string | string[],
+  serverId?: string,
 ): Promise<void> {
-  const res = await fetch(`/opencode-api/session/${sessionID}/form/${formID}/reply`, {
+  const srv = resolveServer(serverId);
+  const base = resolveOpenCodeBase(srv.endpoint);
+  const res = await fetch(`${base}/session/${sessionID}/form/${formID}/reply`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: buildServerHeaders(srv, true),
     body: JSON.stringify({
       answer: { [fieldKey]: value },
     }),
   });
-  if (!res.ok) throw new Error(`Form reply failed: ${res.status}`);
+  if (!res.ok) throw new Error(`Form reply on ${srv.name} failed: ${res.status}`);
 }
 
 export async function replyOpenCodePermission(
   sessionID: string,
   requestID: string,
   decision: "once" | "always" | "reject" = "once",
+  serverId?: string,
 ): Promise<void> {
+  const srv = resolveServer(serverId);
+  const base = resolveOpenCodeBase(srv.endpoint);
   const res = await fetch(
-    `/opencode-api/session/${sessionID}/permission/${requestID}/reply`,
+    `${base}/session/${sessionID}/permission/${requestID}/reply`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: buildServerHeaders(srv, true),
       body: JSON.stringify({ decision }),
     },
   );
-  if (!res.ok) throw new Error(`Permission reply failed: ${res.status}`);
+  if (!res.ok) throw new Error(`Permission reply on ${srv.name} failed: ${res.status}`);
 }
 
-export async function interruptOpenCodeSession(sessionID: string): Promise<void> {
-  await fetch(`/opencode-api/session/${sessionID}/interrupt`, {
+export async function interruptOpenCodeSession(
+  sessionID: string,
+  serverId?: string,
+): Promise<void> {
+  const srv = resolveServer(serverId);
+  const base = resolveOpenCodeBase(srv.endpoint);
+  await fetch(`${base}/session/${sessionID}/interrupt`, {
     method: "POST",
+    headers: buildServerHeaders(srv),
   }).catch(() => {});
 }
 
@@ -361,13 +925,18 @@ export function invalidateSessionSummary(sessionID: string) {
 export async function fetchOpenCodeSessionSummary(
   sessionID: string,
   knownUpdatedAt = 0,
+  serverId?: string,
 ): Promise<SessionSummary | null> {
   const cached = summaryCache.get(sessionID);
   if (cached && knownUpdatedAt > 0 && cached.updatedAt >= knownUpdatedAt) {
     return cached.summary;
   }
+  const srv = resolveServer(serverId);
+  const base = resolveOpenCodeBase(srv.endpoint);
   try {
-    const res = await fetch(`/opencode-api/session/${sessionID}/message?limit=30`);
+    const res = await fetch(`${base}/session/${sessionID}/message?limit=30`, {
+      headers: buildServerHeaders(srv),
+    });
     if (!res.ok) return cached?.summary ?? null;
     const json = (await res.json()) as {
       data?: Array<{

@@ -41,11 +41,26 @@ function opencodeBridgePlugin(): Plugin {
     name: "opencode-local-bridge",
     configureServer(server) {
       server.middlewares.use("/opencode-api", async (req, res) => {
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept");
+        if (req.method === "OPTIONS") {
+          res.statusCode = 204;
+          res.end();
+          return;
+        }
+
         const svc = resolveService();
         if (!svc) {
           res.statusCode = 503;
           res.setHeader("Content-Type", "application/json");
           res.end(JSON.stringify({ error: "OpenCode service not running" }));
+          return;
+        }
+        if (req.url === "/health" || req.url?.startsWith("/health?")) {
+          res.statusCode = 200;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ ok: true, upstream: svc.base }));
           return;
         }
         const targetUrl = `${svc.base}/api${req.url || ""}`;

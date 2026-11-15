@@ -5,7 +5,8 @@ import type { ReactNode } from "react";
  * Follows taste-skill typography & nesting rules:
  * - No nested boxes inside cards (only hairlines & subtle inline code tint)
  * - High-contrast readable prose (`text-zinc-200`, `leading-relaxed`)
- * - Proper fenced code blocks, inline code, bullet/numbered lists, bold, links, and headings
+ * - Proper fenced code blocks, GFM tables, `<br>` line breaks, inline code,
+ *   bullet/numbered lists, bold, italic, links, blockquotes, and headings
  */
 export function SimpleMarkdown({ text }: { text: string }) {
   if (!text.trim()) return null;
@@ -48,6 +49,32 @@ function splitCodeBlocks(raw: string): Array<{ type: "prose" | "code"; content: 
   return parts;
 }
 
+type TableAlign = "left" | "center" | "right";
+
+function isTableSeparatorLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) return false;
+  const cells = parseTableCells(trimmed);
+  return cells.length > 0 && cells.every((c) => /^:?-{3,}:?$/.test(c.trim()));
+}
+
+function parseTableAlignments(line: string): TableAlign[] {
+  return parseTableCells(line.trim()).map((c) => {
+    const t = c.trim();
+    if (t.startsWith(":") && t.endsWith(":")) return "center";
+    if (t.endsWith(":")) return "right";
+    return "left";
+  });
+}
+
+function parseTableCells(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|")) s = s.slice(0, -1);
+  // Split on unescaped pipes
+  return s.split(/(?<!\\)\|/).map((c) => c.replace(/\\\|/g, "|").trim());
+}
+
 function ProseBlock({ text }: { text: string }) {
   const lines = text.split("\n");
   const elements: ReactNode[] = [];
@@ -66,16 +93,90 @@ function ProseBlock({ text }: { text: string }) {
     listItems = [];
   };
 
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i].trim();
     if (!line) {
       flushList();
+      i++;
+      continue;
+    }
+
+    // Horizontal rule
+    if (/^(---|\*\*\*|___)\s*$/.test(line)) {
+      flushList();
+      elements.push(<hr key={k++} className="border-zinc-800/80" />);
+      i++;
+      continue;
+    }
+
+    // GFM Table detection: current line has `|` and next line is a separator row (`|---|---|`)
+    const nextLine = i + 1 < lines.length ? lines[i + 1].trim() : "";
+    if (line.includes("|") && isTableSeparatorLine(nextLine)) {
+      flushList();
+      const headers = parseTableCells(line);
+      const alignments = parseTableAlignments(nextLine);
+      i += 2;
+      const rows: string[][] = [];
+      while (i < lines.length) {
+        const rowLine = lines[i].trim();
+        if (!rowLine || !rowLine.includes("|")) break;
+        if (isTableSeparatorLine(rowLine)) {
+          i++;
+          continue;
+        }
+        rows.push(parseTableCells(rowLine));
+        i++;
+      }
+
+      const alignCls = (colIdx: number) => {
+        const a = alignments[colIdx] ?? "left";
+        return a === "right" ? "text-right" : a === "center" ? "text-center" : "text-left";
+      };
+
+      elements.push(
+        <div key={k++} className="overflow-x-auto rounded border border-zinc-800/80">
+          <table className="w-full border-collapse text-[13px] leading-snug">
+            <thead>
+              <tr className="border-b border-zinc-800 bg-zinc-900/70 text-zinc-200">
+                {headers.map((h, colIdx) => (
+                  <th
+                    key={colIdx}
+                    className={`px-2.5 py-1.5 font-medium ${alignCls(colIdx)} ${
+                      colIdx > 0 ? "border-l border-zinc-800/60" : ""
+                    }`}
+                  >
+                    {renderInline(h)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-800/60">
+              {rows.map((r, rIdx) => (
+                <tr key={rIdx} className="hover:bg-zinc-900/30">
+                  {headers.map((_, colIdx) => (
+                    <td
+                      key={colIdx}
+                      className={`px-2.5 py-1.5 align-top text-zinc-300 ${alignCls(colIdx)} ${
+                        colIdx > 0 ? "border-l border-zinc-800/40" : ""
+                      }`}
+                    >
+                      {renderInline(r[colIdx] ?? "")}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
       continue;
     }
 
     const bulletMatch = line.match(/^[-*•]\s+(.*)$/) || line.match(/^\d+\.\s+(.*)$/);
     if (bulletMatch) {
       listItems.push(bulletMatch[1]);
+      i++;
       continue;
     }
 
@@ -88,6 +189,21 @@ function ProseBlock({ text }: { text: string }) {
           {renderInline(headingMatch[1])}
         </p>,
       );
+      i++;
+      continue;
+    }
+
+    const quoteMatch = line.match(/^>\s?(.*)$/);
+    if (quoteMatch) {
+      elements.push(
+        <blockquote
+          key={k++}
+          className="border-l-2 border-zinc-700 pl-3 text-[13px] text-zinc-400"
+        >
+          {renderInline(quoteMatch[1])}
+        </blockquote>,
+      );
+      i++;
       continue;
     }
 
@@ -96,6 +212,7 @@ function ProseBlock({ text }: { text: string }) {
         {renderInline(line)}
       </p>,
     );
+    i++;
   }
 
   flushList();
@@ -103,6 +220,20 @@ function ProseBlock({ text }: { text: string }) {
 }
 
 function renderInline(text: string): ReactNode[] {
+  // First split on <br>, <br/>, <br /> (case-insensitive) so HTML line breaks become real <br />
+  const brParts = text.split(/<br\s*\/?>/gi);
+  if (brParts.length > 1) {
+    const combined: ReactNode[] = [];
+    brParts.forEach((part, idx) => {
+      if (idx > 0) combined.push(<br key={`br-${idx}`} />);
+      combined.push(...renderInlineTokens(part, `p${idx}-`));
+    });
+    return combined;
+  }
+  return renderInlineTokens(text, "");
+}
+
+function renderInlineTokens(text: string, keyPrefix: string): ReactNode[] {
   const out: ReactNode[] = [];
   // Match `code` or **bold** or [label](url)
   const tokenRe = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/g;
@@ -118,7 +249,7 @@ function renderInline(text: string): ReactNode[] {
     if (tok.startsWith("`")) {
       out.push(
         <code
-          key={idx++}
+          key={`${keyPrefix}${idx++}`}
           className="rounded bg-zinc-800/80 px-1.5 py-0.5 font-mono text-[12px] text-zinc-200"
         >
           {tok.slice(1, -1)}
@@ -126,7 +257,7 @@ function renderInline(text: string): ReactNode[] {
       );
     } else if (tok.startsWith("**")) {
       out.push(
-        <strong key={idx++} className="font-semibold text-zinc-100">
+        <strong key={`${keyPrefix}${idx++}`} className="font-semibold text-zinc-100">
           {tok.slice(2, -2)}
         </strong>,
       );
@@ -135,7 +266,7 @@ function renderInline(text: string): ReactNode[] {
       if (lm) {
         out.push(
           <a
-            key={idx++}
+            key={`${keyPrefix}${idx++}`}
             href={lm[2]}
             target="_blank"
             rel="noreferrer"
