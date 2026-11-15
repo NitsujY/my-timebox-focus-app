@@ -116,6 +116,39 @@ const OC_CFG_KEY = "tb_oc_config";
 
 export function loadOpenCodeConfig(): OpenCodeConfig {
   try {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const urlPass = params.get("oc_pass") || params.get("oc_password");
+      const urlEndpoint = params.get("oc_endpoint");
+      if (urlPass || urlEndpoint) {
+        const rawExisting = localStorage.getItem(OC_CFG_KEY);
+        const parsedExisting = rawExisting
+          ? (JSON.parse(rawExisting) as Partial<OpenCodeConfig>)
+          : {};
+        const list =
+          Array.isArray(parsedExisting.servers) && parsedExisting.servers.length > 0
+            ? parsedExisting.servers
+            : DEFAULT_SERVERS.map((s) => ({ ...s }));
+        const localSrv = list.find((s) => s.id === "local") ?? list[0];
+        if (localSrv) {
+          if (urlPass) localSrv.password = urlPass.trim();
+          if (urlEndpoint) localSrv.endpoint = urlEndpoint.trim();
+        }
+        saveOpenCodeConfig({
+          endpoint: localSrv?.endpoint ?? "",
+          password: localSrv?.password ?? "",
+          autoRunQueued: parsedExisting.autoRunQueued ?? true,
+          defaultServerId: parsedExisting.defaultServerId ?? "local",
+          servers: list,
+        });
+        params.delete("oc_pass");
+        params.delete("oc_password");
+        params.delete("oc_endpoint");
+        const nextQuery = params.toString();
+        const cleanUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
+        window.history.replaceState({}, "", cleanUrl);
+      }
+    }
     const raw = localStorage.getItem(OC_CFG_KEY);
     if (!raw) return { ...DEFAULT_OC_CONFIG, servers: [...DEFAULT_SERVERS] };
     const parsed = JSON.parse(raw) as Partial<OpenCodeConfig>;
@@ -244,13 +277,18 @@ export async function discoverLocalBridge(force = false): Promise<LocalBridgeHea
   if (!force && autoDiscoveredLocal && Date.now() - autoDiscoveredLocal.checkedAt < 15_000) {
     return null;
   }
-  const candidates = ["http://127.0.0.1:5173/opencode-api/health"];
+  const candidates = [
+    "http://localhost:5173/opencode-api/health",
+    "http://127.0.0.1:5173/opencode-api/health",
+  ];
   if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
     candidates.unshift("/opencode-api/health");
   }
   for (const url of candidates) {
     try {
-      const res = await fetch(url);
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 1200);
+      const res = await fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(timer));
       if (!res.ok) continue;
       const data = (await res.json()) as LocalBridgeHealth;
       if (data?.ok) {
