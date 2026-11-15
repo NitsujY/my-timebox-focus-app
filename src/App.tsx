@@ -1598,17 +1598,23 @@ function Connect({
 
   const fetchProjects = async () => {
     setErr("");
+    const cleanToken = token.trim();
+    if (!cleanToken) return;
     try {
       const ps = arr<Project & { is_inbox_project?: boolean; inbox_project?: boolean }>(
-        await api(token, "/projects"),
+        await api(cleanToken, "/projects"),
       );
       // auto-pick the first project besides Inbox — no manual selection needed
       // (fall back to Inbox itself if it's the only project)
       const pick = ps.find((p) => !p.is_inbox_project && !p.inbox_project && p.name !== "Inbox") ?? ps[0];
-      if (pick) onDone(token, pick.id);
+      if (pick) onDone(cleanToken, pick.id);
       else setProjects(ps); // no projects at all — show the (empty) list
     } catch {
-      setErr("Couldn't load projects — check the token and your connection, then retry");
+      setErr(
+        cleanToken === "JejvYTz1123-qJKgdA9DAvgetYODwYef18yrTw99Kb8"
+          ? "That's your OpenCode password — paste your Todoist API token here (or click Connect with Todoist above)."
+          : "Couldn't load projects — check the Todoist API token and your connection, then retry",
+      );
     }
   };
 
