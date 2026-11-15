@@ -367,6 +367,8 @@ export default function App() {
         }
         setOcServerOnlineById(onlineMap);
         setOcConnected(anyOk);
+        // Sync React state in case discoverLocalBridge() populated the local password in localStorage
+        setOcConfig(loadOpenCodeConfig());
         if (anyOk) await syncOpenCode();
         const cfg = { ...loadOpenCodeConfig(), ...override };
         const defSrv = resolveServer(cfg.defaultServerId, cfg);
@@ -4728,11 +4730,9 @@ function SettingsPage({
                         <input
                           className={`${input} py-1.5 font-mono text-[12px]`}
                           placeholder="http://127.0.0.1:49374/api or http://127.0.0.1:5173/opencode-api"
-                          defaultValue={srv.endpoint}
-                          onBlur={(e) => {
-                            if (e.target.value.trim() !== srv.endpoint) {
-                              updateServerField(srv.id, { endpoint: e.target.value.trim() });
-                            }
+                          value={srv.endpoint}
+                          onChange={(e) => {
+                            updateServerField(srv.id, { endpoint: e.target.value.trim() });
                           }}
                         />
                       </div>
@@ -4743,13 +4743,11 @@ function SettingsPage({
                         <input
                           className={`${input} py-1.5 font-mono text-[12px]`}
                           placeholder="/Users/justinyu"
-                          defaultValue={srv.defaultDir ?? "/Users/justinyu"}
-                          onBlur={(e) => {
-                            if (e.target.value.trim() !== (srv.defaultDir ?? "")) {
-                              updateServerField(srv.id, {
-                                defaultDir: e.target.value.trim() || "/Users/justinyu",
-                              });
-                            }
+                          value={srv.defaultDir ?? "/Users/justinyu"}
+                          onChange={(e) => {
+                            updateServerField(srv.id, {
+                              defaultDir: e.target.value.trim() || "/Users/justinyu",
+                            });
                           }}
                         />
                       </div>
@@ -4762,12 +4760,10 @@ function SettingsPage({
                       <input
                         type="password"
                         className={`${input} py-1.5 font-mono text-[12px]`}
-                        placeholder="Leave empty for local Vite bridge"
-                        defaultValue={srv.password ?? ""}
-                        onBlur={(e) => {
-                          if (e.target.value.trim() !== (srv.password ?? "")) {
-                            updateServerField(srv.id, { password: e.target.value.trim() });
-                          }
+                        placeholder="Paste password from ~/.config/opencode/service.json"
+                        value={srv.password ?? ""}
+                        onChange={(e) => {
+                          updateServerField(srv.id, { password: e.target.value.trim() });
                         }}
                       />
                     </div>

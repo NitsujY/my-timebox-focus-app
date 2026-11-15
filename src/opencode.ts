@@ -228,11 +228,64 @@ export function resolveOpenCodeBase(rawEndpoint?: string): string {
   return clean;
 }
 
+export type LocalBridgeHealth = {
+  ok: boolean;
+  upstream?: string | null;
+  apiEndpoint?: string | null;
+  bridgeEndpoint?: string | null;
+  password?: string | null;
+  cors?: string | string[] | null;
+};
+
+let autoDiscoveredLocal: { endpoint?: string; password?: string; checkedAt: number } | null = null;
+
+export async function discoverLocalBridge(force = false): Promise<LocalBridgeHealth | null> {
+  if (typeof window === "undefined") return null;
+  if (!force && autoDiscoveredLocal && Date.now() - autoDiscoveredLocal.checkedAt < 15_000) {
+    return null;
+  }
+  const candidates = ["http://127.0.0.1:5173/opencode-api/health"];
+  if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
+    candidates.unshift("/opencode-api/health");
+  }
+  for (const url of candidates) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const data = (await res.json()) as LocalBridgeHealth;
+      if (data?.ok) {
+        autoDiscoveredLocal = {
+          endpoint: data.apiEndpoint || "http://127.0.0.1:49374/api",
+          password: data.password || undefined,
+          checkedAt: Date.now(),
+        };
+        // Persist password into local server config if missing so direct 49374 works even after Vite stops
+        if (data.password) {
+          const cfg = loadOpenCodeConfig();
+          const localSrv = cfg.servers.find((s) => s.id === "local");
+          if (localSrv && !localSrv.password?.trim()) {
+            localSrv.password = data.password;
+            if (cfg.defaultServerId === "local") cfg.password = data.password;
+            saveOpenCodeConfig(cfg);
+          }
+        }
+        return data;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  autoDiscoveredLocal = { checkedAt: Date.now() };
+  return null;
+}
+
 function buildServerHeaders(srv: OpenCodeServer, jsonBody = false): Record<string, string> {
   const headers: Record<string, string> = {};
   if (jsonBody) headers["Content-Type"] = "application/json";
-  if (srv.password?.trim()) {
-    headers["Authorization"] = `Basic ${btoa(`opencode:${srv.password.trim()}`)}`;
+  const pwd =
+    srv.password?.trim() || (srv.id === "local" ? autoDiscoveredLocal?.password?.trim() : "");
+  if (pwd) {
+    headers["Authorization"] = `Basic ${btoa(`opencode:${pwd}`)}`;
   }
   return headers;
 }
@@ -257,6 +310,9 @@ export type OpenCodeVerifyResult = {
 export async function verifyServerConnection(
   srv: OpenCodeServer,
 ): Promise<OpenCodeVerifyResult> {
+  if (srv.id === "local" && !srv.password?.trim()) {
+    await discoverLocalBridge();
+  }
   const base = resolveOpenCodeBase(srv.endpoint);
   const start = performance.now();
 
@@ -360,9 +416,11 @@ export async function verifyServerConnection(
       activeCount: 0,
       latencyMs,
       error:
-        e instanceof Error
-          ? `Unreachable (${e.message})`
-          : "Unreachable — check endpoint URL, Tailscale/LAN, or CORS",
+        base.includes("127.0.0.1:49374") || base.includes("localhost:49374")
+          ? `Unreachable or blocked by CORS — run: opencode service set cors ${typeof window !== "undefined" ? window.location.origin : "https://todolist-md.com"} && opencode service start`
+          : e instanceof Error
+            ? `Unreachable (${e.message})`
+            : "Unreachable — check endpoint URL, Tailscale/LAN, or CORS",
       checkedAt: Date.now(),
     };
   }
@@ -708,6 +766,9 @@ async function fetchSingleServerSnapshot(srv: OpenCodeServer): Promise<{
   sessions: OpenCodeLiveSession[];
   models: OpenCodeModelOption[];
 }> {
+  if (srv.id === "local" && !srv.password?.trim()) {
+    await discoverLocalBridge();
+  }
   const base = resolveOpenCodeBase(srv.endpoint);
   const headers = buildServerHeaders(srv);
   try {
