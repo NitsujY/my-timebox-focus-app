@@ -4672,11 +4672,12 @@ function SettingsPage({
                 </div>
 
                 <div className="mt-1 font-mono text-[11px] text-zinc-500">
-                  {srv.endpoint.trim() ? resolvedBase : "/opencode-api (local bridge)"} ·{" "}
+                  {resolvedBase}
+                  {!srv.endpoint.trim() && resolvedBase === "/opencode-api" ? " (local bridge)" : ""} ·{" "}
                   {srv.defaultDir || "/Users/justinyu"}
                 </div>
 
-                {vRes && !vRes.ok && vRes.error && isEditing && (
+                {vRes && !vRes.ok && vRes.error && (
                   <p className="mt-2 rounded border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 font-mono text-[11px] text-zinc-400">
                     {vRes.error}
                   </p>
@@ -4726,7 +4727,7 @@ function SettingsPage({
                         </label>
                         <input
                           className={`${input} py-1.5 font-mono text-[12px]`}
-                          placeholder="/opencode-api or https://host/api"
+                          placeholder="http://127.0.0.1:49374/api or http://127.0.0.1:5173/opencode-api"
                           defaultValue={srv.endpoint}
                           onBlur={(e) => {
                             if (e.target.value.trim() !== srv.endpoint) {

@@ -50,19 +50,40 @@ function opencodeBridgePlugin(): Plugin {
           return;
         }
 
+      if (req.url === "/health" || req.url?.startsWith("/health?")) {
         const svc = resolveService();
-        if (!svc) {
-          res.statusCode = 503;
-          res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify({ error: "OpenCode service not running" }));
-          return;
+        const cfgPath = join(homedir(), ".config", "opencode", "service.json");
+        let serviceCfg: { password?: string; cors?: string | string[] } = {};
+        try {
+          serviceCfg = JSON.parse(readFileSync(cfgPath, "utf8")) as {
+            password?: string;
+            cors?: string | string[];
+          };
+        } catch {
+          /* ignore */
         }
-        if (req.url === "/health" || req.url?.startsWith("/health?")) {
-          res.statusCode = 200;
-          res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify({ ok: true, upstream: svc.base }));
-          return;
-        }
+        res.statusCode = svc ? 200 : 503;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            ok: Boolean(svc),
+            upstream: svc?.base ?? null,
+            apiEndpoint: svc ? `${svc.base}/api` : null,
+            bridgeEndpoint: `http://127.0.0.1:${server.config.server.port || 5173}/opencode-api`,
+            password: serviceCfg.password ?? null,
+            cors: serviceCfg.cors ?? null,
+          }),
+        );
+        return;
+      }
+
+      const svc = resolveService();
+      if (!svc) {
+        res.statusCode = 503;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ error: "OpenCode service not running" }));
+        return;
+      }
         const targetUrl = `${svc.base}/api${req.url || ""}`;
         try {
           const chunks: Buffer[] = [];

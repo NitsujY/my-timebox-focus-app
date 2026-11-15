@@ -183,14 +183,44 @@ export function resolveServer(serverId?: string, cfg?: OpenCodeConfig): OpenCode
   return list.find((s) => s.id === effective.defaultServerId) ?? list[0];
 }
 
+export function isLocalLoopbackHttp(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return (
+      u.protocol === "http:" &&
+      (u.hostname === "127.0.0.1" ||
+        u.hostname === "localhost" ||
+        u.hostname === "::1" ||
+        u.hostname === "[::1]")
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function resolveOpenCodeBase(rawEndpoint?: string): string {
   const clean = (rawEndpoint ?? loadOpenCodeConfig().endpoint).trim().replace(/\/+$/, "");
-  if (!clean) return "/opencode-api";
+  if (!clean) {
+    // On static HTTPS hosts (e.g. GitHub Pages), default empty local endpoint to the standard macOS/Linux OpenCode daemon port
+    if (
+      typeof window !== "undefined" &&
+      window.location.protocol === "https:" &&
+      window.location.hostname !== "localhost" &&
+      window.location.hostname !== "127.0.0.1"
+    ) {
+      return "http://127.0.0.1:49374/api";
+    }
+    return "/opencode-api";
+  }
   if (clean.endsWith("/opencode-api") || clean.endsWith("/api")) return clean;
   try {
     const u = new URL(clean);
     if (u.pathname === "" || u.pathname === "/") {
-      return `${clean}/opencode-api`;
+      // Vite dev server uses /opencode-api; opencode serve & remote tunnels use /api
+      if (u.port === "5173" || u.port === "4173") {
+        return `${clean}/opencode-api`;
+      }
+      return `${clean}/api`;
     }
   } catch {
     /* relative path */
@@ -233,7 +263,7 @@ export async function verifyServerConnection(
   if (
     typeof window !== "undefined" &&
     window.location.protocol === "https:" &&
-    base.startsWith("http://")
+    base.startsWith("/opencode-api")
   ) {
     return {
       serverId: srv.id,
@@ -244,7 +274,27 @@ export async function verifyServerConnection(
       activeCount: 0,
       latencyMs: 0,
       error:
-        "Blocked by browser Mixed Content (HTTPS page requires https:// endpoint e.g. Tailscale Serve / Cloudflare Tunnel, or open app via http://).",
+        "Empty endpoint uses /opencode-api (Vite dev server only). On GitHub Pages, set Endpoint URL to http://127.0.0.1:49374/api (with password + CORS) or http://127.0.0.1:5173/opencode-api.",
+      checkedAt: Date.now(),
+    };
+  }
+
+  if (
+    typeof window !== "undefined" &&
+    window.location.protocol === "https:" &&
+    base.startsWith("http://") &&
+    !isLocalLoopbackHttp(base)
+  ) {
+    return {
+      serverId: srv.id,
+      serverName: srv.name,
+      ok: false,
+      endpoint: base,
+      sessionCount: 0,
+      activeCount: 0,
+      latencyMs: 0,
+      error:
+        "Blocked by browser Mixed Content (non-loopback HTTP endpoint requires https:// e.g. Tailscale Serve / Cloudflare Tunnel, or open app via http://).",
       checkedAt: Date.now(),
     };
   }
@@ -259,11 +309,16 @@ export async function verifyServerConnection(
 
     if (!sesRes.ok) {
       let detail = `HTTP ${sesRes.status}`;
-      try {
-        const errJson = (await sesRes.json()) as { error?: string };
-        if (errJson?.error) detail = `${detail} — ${errJson.error}`;
-      } catch {
-        /* ignore non-json */
+      if (sesRes.status === 401) {
+        detail =
+          "HTTP 401 Unauthorized — click Edit and paste your OpenCode password from ~/.config/opencode/service.json";
+      } else {
+        try {
+          const errJson = (await sesRes.json()) as { error?: string };
+          if (errJson?.error) detail = `${detail} — ${errJson.error}`;
+        } catch {
+          /* ignore non-json */
+        }
       }
       return {
         serverId: srv.id,
