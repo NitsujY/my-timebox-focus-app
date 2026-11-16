@@ -298,6 +298,7 @@ export default function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const tasksRef = useRef<Task[]>([]);
   tasksRef.current = tasks; // fresh snapshot for async rollback paths
+  const tmpIdMapRef = useRef<Map<string, string>>(new Map());
   const [sections, setSections] = useState<SectionMap>(() => load("tb_sections", {}));
   const [sectionList, setSectionList] = useState<SectionInfo[]>(() => load("tb_section_list", []));
   const [roles, setRoles] = useState<RoleMap>(() => load("tb_roles", {}));
@@ -580,7 +581,33 @@ export default function App() {
         save("tb_roles", next);
         return next;
       });
-      if (!pendingWrites && Date.now() - lastWriteAt > 2000) setTasks(arr<Task>(ts));
+      if (!pendingWrites && Date.now() - lastWriteAt > 2000) {
+        const fetched = arr<Task>(ts);
+        setTasks((prev) => {
+          const prevById = new Map(prev.map((x) => [x.id, x]));
+          const tmpTasks = prev.filter((x) => x.id.startsWith("tmp-"));
+          const merged = fetched.map((remoteTask) => {
+            const localTask = prevById.get(remoteTask.id);
+            if (!localTask) return remoteTask;
+            const localMeta = parseTaskDescription(localTask.description);
+            const remoteMeta = parseTaskDescription(remoteTask.description);
+            if (localMeta.sessions.length > 0 && remoteMeta.sessions.length === 0) {
+              return {
+                ...remoteTask,
+                description: formatTaskDescription({
+                  ...remoteMeta,
+                  server: remoteMeta.server || localMeta.server,
+                  model: remoteMeta.model || localMeta.model,
+                  repo: remoteMeta.repo || localMeta.repo,
+                  sessions: localMeta.sessions,
+                }),
+              };
+            }
+            return remoteTask;
+          });
+          return [...merged, ...tmpTasks];
+        });
+      }
       setError("");
     } catch (e) {
       setError(
@@ -756,7 +783,9 @@ export default function App() {
             modelKey: model || undefined,
           });
           linkedSessions.push(sid);
-          syncOpenCode();
+          void syncOpenCode();
+          window.setTimeout(() => void syncOpenCode(), 900);
+          window.setTimeout(() => void syncOpenCode(), 2200);
         } catch {
           queuedForAgent = true;
           showToast(`"${serverId}" unreachable — queued in Todoist`);
@@ -797,12 +826,43 @@ export default function App() {
     setTasks((ts) => [...ts, tmp]);
     if (extra?.mode === "drive") setDrivingTaskId(tmp.id);
 
-    // swap the optimistic tmp id for the real one, or notes/edits hit POST /tasks/tmp-* -> 404
+    // swap the optimistic tmp id for the real one, preserving any local edits / session links added while in-flight
     const swap = (created: unknown) => {
       if (created && typeof (created as Task).id === "string") {
         const real = created as Task;
-        setTasks((ts) => ts.map((x) => (x.id === tmp.id ? real : x)));
+        tmpIdMapRef.current.set(tmp.id, real.id);
+        const latestLocal = tasksRef.current.find((x) => x.id === tmp.id);
+        const mergedContent = latestLocal?.content ?? real.content;
+        const mergedDesc = latestLocal?.description ?? real.description;
+        setTasks((ts) =>
+          ts.map((x) =>
+            x.id === tmp.id
+              ? {
+                  ...real,
+                  content: mergedContent,
+                  description: mergedDesc,
+                  duration: x.duration ?? real.duration,
+                  section_id: x.section_id ?? real.section_id,
+                }
+              : x,
+          ),
+        );
         setDrivingTaskId((cur) => (cur === tmp.id ? real.id : cur));
+        setExpandedId((cur) => (cur === tmp.id ? real.id : cur));
+        if (
+          latestLocal &&
+          (latestLocal.content !== tmp.content ||
+            (latestLocal.description ?? "") !== (tmp.description ?? ""))
+        ) {
+          void mutate(token, {
+            path: `/tasks/${real.id}`,
+            method: "POST",
+            body: {
+              content: latestLocal.content,
+              description: latestLocal.description ?? "",
+            },
+          }).catch(() => {});
+        }
       }
     };
     try {
@@ -842,11 +902,16 @@ export default function App() {
 
   // partial update, optimistic + rollback; rethrows so the editor can clear its indicator
   const updateTask = async (id: string, fields: { content?: string; description?: string }) => {
+    const resolvedId = tmpIdMapRef.current.get(id) ?? id;
     const prev = tasksRef.current;
-    const existingTask = prev.find((x) => x.id === id);
-    setTasks((ts) => ts.map((x) => (x.id === id ? { ...x, ...fields } : x)));
+    const existingTask = prev.find((x) => x.id === resolvedId || x.id === id);
+    setTasks((ts) =>
+      ts.map((x) => (x.id === resolvedId || x.id === id ? { ...x, ...fields } : x)),
+    );
+    // If task creation POST /tasks is still in flight, swap() will persist the updated fields once real ID arrives
+    if (resolvedId.startsWith("tmp-")) return;
     try {
-      await mutate(token, { path: `/tasks/${id}`, method: "POST", body: fields });
+      await mutate(token, { path: `/tasks/${resolvedId}`, method: "POST", body: fields });
       if (fields.content && existingTask && fields.content !== existingTask.content) {
         const meta = parseTaskDescription(fields.description ?? existingTask.description);
         for (const sid of meta.sessions) {
@@ -965,11 +1030,22 @@ export default function App() {
   // Send prompt to OpenCode session on the task's assigned server (creates session if none linked yet).
   // If that server is offline (e.g. on mobile), queues the task in Todoist (`srv=<id> queue=1`).
   const handToAgent = useCallback(
-    async (t: Task, customPrompt?: string, serverOverride?: string, modelOverride?: string) => {
-      if (drivingTaskId === t.id) setDrivingTaskId(null);
-      const meta = parseTaskDescription(t.description);
-      const promptText = customPrompt?.trim() || meta.prompt || t.content;
-      const repoLabel = meta.repo;
+    async (
+      t: Task,
+      customPrompt?: string,
+      serverOverride?: string,
+      modelOverride?: string,
+      repoOverride?: string,
+      noteOverride?: string,
+    ) => {
+      const resolvedId = tmpIdMapRef.current.get(t.id) ?? t.id;
+      const currentTask =
+        tasksRef.current.find((x) => x.id === resolvedId || x.id === t.id) ?? t;
+      if (drivingTaskId === currentTask.id || drivingTaskId === t.id) setDrivingTaskId(null);
+      const meta = parseTaskDescription(currentTask.description);
+      const effectiveNote = noteOverride ?? meta.note;
+      const repoLabel = repoOverride ?? meta.repo;
+      const promptText = customPrompt?.trim() || meta.prompt || currentTask.content;
       const latestSid = meta.sessions[meta.sessions.length - 1];
       const existingLive = latestSid ? ocSessions.find((s) => s.id === latestSid) : undefined;
       const targetSrv = resolveServer(
@@ -979,11 +1055,11 @@ export default function App() {
       const serverId = targetSrv.id;
       const modelKey = modelOverride ?? meta.model ?? existingLive?.modelKey ?? "";
 
+      let sid = latestSid;
       try {
-        let sid = latestSid;
         if (!sid) {
           sid = await createAndPromptOpenCodeSession({
-            title: t.content,
+            title: currentTask.content,
             directory: resolveRepoDir(repoLabel, serverId),
             promptText,
             serverId,
@@ -995,25 +1071,9 @@ export default function App() {
           }
           await sendOpenCodePrompt(sid, promptText, serverId);
         }
-        const nextSessions = Array.from(new Set([...meta.sessions, sid]));
-        invalidateSessionSummary(sid);
-        const nextDesc = formatTaskDescription({
-          note: meta.note,
-          prompt: customPrompt?.trim() ? customPrompt.trim() : meta.prompt,
-          repo: repoLabel,
-          server: serverId,
-          model: modelKey || undefined,
-          sessions: nextSessions,
-          queued: false,
-        });
-        if (nextDesc !== (t.description ?? "")) {
-          await updateTask(t.id, { description: nextDesc });
-        }
-        syncOpenCode();
-        showToast(`Sent to ${serverId} (${sid.slice(0, 10)})`);
       } catch {
         const nextDesc = formatTaskDescription({
-          note: meta.note,
+          note: effectiveNote,
           prompt: customPrompt?.trim() ? customPrompt.trim() : meta.prompt,
           repo: repoLabel,
           server: serverId,
@@ -1021,10 +1081,34 @@ export default function App() {
           sessions: meta.sessions,
           queued: true,
         });
-        if (nextDesc !== (t.description ?? "")) {
-          await updateTask(t.id, { description: nextDesc }).catch(() => {});
+        if (nextDesc !== (currentTask.description ?? "")) {
+          await updateTask(currentTask.id, { description: nextDesc }).catch(() => {});
         }
         showToast(`"${serverId}" offline — queued in Todoist`);
+        return;
+      }
+
+      const freshId = tmpIdMapRef.current.get(t.id) ?? resolvedId;
+      const freshTask =
+        tasksRef.current.find((x) => x.id === freshId || x.id === t.id) ?? currentTask;
+      const freshMeta = parseTaskDescription(freshTask.description);
+      const nextSessions = Array.from(new Set([...meta.sessions, ...freshMeta.sessions, sid]));
+      invalidateSessionSummary(sid);
+      const nextDesc = formatTaskDescription({
+        note: noteOverride ?? freshMeta.note ?? effectiveNote,
+        prompt: !latestSid && customPrompt?.trim() ? customPrompt.trim() : freshMeta.prompt || meta.prompt,
+        repo: repoOverride ?? (freshMeta.repo || repoLabel),
+        server: serverId,
+        model: modelKey || undefined,
+        sessions: nextSessions,
+        queued: false,
+      });
+      void syncOpenCode();
+      window.setTimeout(() => void syncOpenCode(), 900);
+      window.setTimeout(() => void syncOpenCode(), 2200);
+      showToast(`Sent to ${serverId} (${sid.slice(0, 10)})`);
+      if (nextDesc !== (freshTask.description ?? "")) {
+        await updateTask(freshTask.id, { description: nextDesc }).catch(() => {});
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1834,7 +1918,14 @@ function FocusView({
   onOpenOcSettings: () => void;
   humanSecBy: Record<string, number>;
   onToggle: (id: string) => void;
-  onHandToAgent: (t: Task, prompt?: string, serverId?: string, model?: string) => void;
+  onHandToAgent: (
+    t: Task,
+    prompt?: string,
+    serverId?: string,
+    model?: string,
+    repo?: string,
+    note?: string,
+  ) => void;
   onApprove: (t: Task) => void;
   onAnswerForm: (t: Task, fieldKey: string, value: string, label: string) => void;
   onTrackOcSession: (s: OpenCodeLiveSession) => void;
@@ -1953,7 +2044,7 @@ function FocusView({
                   humanSec={humanSecBy[t.id] ?? 0}
                   expanded={expandedId === t.id}
                   onToggle={() => onToggle(t.id)}
-                  onHandToAgent={(p, srvId, mdl) => onHandToAgent(t, p, srvId, mdl)}
+                  onHandToAgent={(p, srvId, mdl, rp, nt) => onHandToAgent(t, p, srvId, mdl, rp, nt)}
                   onApprove={() => onApprove(t)}
                   onAnswerForm={(k, v, l) => onAnswerForm(t, k, v, l)}
                   onStart={onStart}
@@ -2012,7 +2103,7 @@ function FocusView({
                 humanSec={humanSecBy[t.id] ?? 0}
                 expanded={expandedId === t.id}
                 onToggle={() => onToggle(t.id)}
-                onHandToAgent={(p, srvId, mdl) => onHandToAgent(t, p, srvId, mdl)}
+                onHandToAgent={(p, srvId, mdl, rp, nt) => onHandToAgent(t, p, srvId, mdl, rp, nt)}
                 onApprove={() => onApprove(t)}
                 onAnswerForm={(k, v, l) => onAnswerForm(t, k, v, l)}
                 onStart={onStart}
@@ -2134,7 +2225,14 @@ function BacklogList({
   ocSessions: OpenCodeLiveSession[];
   humanSecBy: Record<string, number>;
   onToggle: (id: string) => void;
-  onHandToAgent: (t: Task, prompt?: string, serverId?: string, model?: string) => void;
+  onHandToAgent: (
+    t: Task,
+    prompt?: string,
+    serverId?: string,
+    model?: string,
+    repo?: string,
+    note?: string,
+  ) => void;
   onApprove: (t: Task) => void;
   onAnswerForm: (t: Task, fieldKey: string, value: string, label: string) => void;
   onMove?: (t: Task) => void;
@@ -2168,7 +2266,7 @@ function BacklogList({
             humanSec={humanSecBy[t.id] ?? 0}
             expanded={expandedId === t.id}
             onToggle={() => onToggle(t.id)}
-            onHandToAgent={(p, srvId, mdl) => onHandToAgent(t, p, srvId, mdl)}
+            onHandToAgent={(p, srvId, mdl, rp, nt) => onHandToAgent(t, p, srvId, mdl, rp, nt)}
             onApprove={() => onApprove(t)}
             onAnswerForm={(k, v, l) => onAnswerForm(t, k, v, l)}
             onMove={onMove}
@@ -2222,7 +2320,13 @@ function TaskRow({
   large?: boolean;
   expanded: boolean;
   onToggle: () => void;
-  onHandToAgent: (prompt?: string, serverId?: string, model?: string) => void;
+  onHandToAgent: (
+    prompt?: string,
+    serverId?: string,
+    model?: string,
+    repo?: string,
+    note?: string,
+  ) => void;
   onApprove: () => void;
   onAnswerForm: (fieldKey: string, value: string, label: string) => void;
   onStart?: (t: Task, minutes: number) => void;
@@ -2307,10 +2411,30 @@ function TaskRow({
       setSummary(null);
       return;
     }
-    fetchOpenCodeSessionSummary(activeSid, liveSession?.updatedAt, assignedServerId).then((res) => {
-      if (res) setSummary(res);
-    });
-  }, [activeSid, liveSession?.updatedAt, liveSession?.status, expanded, assignedServerId]);
+    let cancelled = false;
+    const loadSummary = () => {
+      fetchOpenCodeSessionSummary(activeSid, liveSession?.updatedAt, assignedServerId).then(
+        (res) => {
+          if (!cancelled && res) setSummary(res);
+        },
+      );
+    };
+    loadSummary();
+    const shouldPoll =
+      liveSession?.status === "running" || !summary?.lastAssistantText;
+    const iv = shouldPoll ? window.setInterval(loadSummary, 1500) : undefined;
+    return () => {
+      cancelled = true;
+      if (iv) window.clearInterval(iv);
+    };
+  }, [
+    activeSid,
+    liveSession?.updatedAt,
+    liveSession?.status,
+    expanded,
+    assignedServerId,
+    summary?.lastAssistantText,
+  ]);
 
   const spent = (spentBy[t.id] ?? 0) + Math.floor(humanSec / 60);
   const planned = t.duration?.amount ?? defaultMinutes;
@@ -2555,7 +2679,13 @@ function RowEditor({
   onClose: () => void;
   onUpdate: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
   onDuration: (t: Task, minutes: number) => void;
-  onHandToAgent: (prompt?: string, serverId?: string, model?: string) => void;
+  onHandToAgent: (
+    prompt?: string,
+    serverId?: string,
+    model?: string,
+    repo?: string,
+    note?: string,
+  ) => void;
   onApprove: () => void;
   onAnswerForm: (fieldKey: string, value: string, label: string) => void;
   onStartCountdown?: () => void;
@@ -2585,11 +2715,35 @@ function RowEditor({
     liveSession || summary?.lastAssistantText || summary?.lastToolCall,
   );
 
+  const unlinkedExplicitlyRef = useRef(false);
+
   useEffect(() => {
     if (liveSession?.modelKey && !model) {
       setModel(liveSession.modelKey);
     }
   }, [liveSession?.modelKey, model]);
+
+  useEffect(() => {
+    if (initialMeta.sessions.length > 0 && !unlinkedExplicitlyRef.current) {
+      setSessions((prev) => {
+        const merged = Array.from(new Set([...prev, ...initialMeta.sessions]));
+        return merged.length === prev.length && merged.every((x, i) => x === prev[i])
+          ? prev
+          : merged;
+      });
+    }
+    setQueued(Boolean(initialMeta.queued));
+    if (initialMeta.server && initialMeta.server !== server) {
+      setServer(initialMeta.server);
+    }
+    if (initialMeta.model && !model) {
+      setModel(initialMeta.model);
+    }
+    if (initialMeta.repo && !repo) {
+      setRepo(initialMeta.repo);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialMeta]);
 
   const titleLive = useRef(title);
   titleLive.current = title;
@@ -2616,7 +2770,14 @@ function RowEditor({
     clearTimeout(debRef.current);
     const v = titleLive.current.trim();
     if (v && v !== tLive.current.content) persist({ content: v });
-    const formattedDesc = formatTaskDescription(metaLive.current);
+    const latestDescMeta = parseTaskDescription(tLive.current.description);
+    const mergedSessions = unlinkedExplicitlyRef.current
+      ? metaLive.current.sessions
+      : Array.from(new Set([...metaLive.current.sessions, ...latestDescMeta.sessions]));
+    const formattedDesc = formatTaskDescription({
+      ...metaLive.current,
+      sessions: mergedSessions,
+    });
     if (formattedDesc !== (tLive.current.description ?? "")) {
       persist({ description: formattedDesc });
     }
@@ -2646,7 +2807,12 @@ function RowEditor({
   const isTargetServerOnline = ocServerOnlineById[server] ?? ocConnected;
   const targetLabel = repo ? `${server}/${shortRepo(repo)}` : server;
 
-  const activeSid = sessions[sessions.length - 1] ?? "";
+  const activeSid =
+    sessions[sessions.length - 1] ??
+    (!unlinkedExplicitlyRef.current
+      ? initialMeta.sessions[initialMeta.sessions.length - 1]
+      : "") ??
+    "";
   const turns = summary?.turns ?? [];
 
   const handleModelChange = (nextModel: string) => {
@@ -2659,13 +2825,16 @@ function RowEditor({
   };
 
   const submitToAgent = () => {
-    flush();
+    clearTimeout(debRef.current);
+    unlinkedExplicitlyRef.current = false;
+    const v = titleLive.current.trim();
+    if (v && v !== tLive.current.content) persist({ content: v });
     if (hasSessionOutput) {
       const msg = replyText.trim() || prompt.trim();
-      onHandToAgent(msg || undefined, server, model || undefined);
+      onHandToAgent(msg || undefined, server, model || undefined, repo, note);
       setReplyText("");
     } else {
-      onHandToAgent(prompt, server, model || undefined);
+      onHandToAgent(prompt, server, model || undefined, repo, note);
     }
   };
 
@@ -3124,8 +3293,10 @@ function RowEditor({
                       value={activeSid}
                       onChange={(e) => {
                         const val = e.target.value;
+                        unlinkedExplicitlyRef.current = !val;
                         const next = val ? Array.from(new Set([...sessions, val])) : [];
                         setSessions(next);
+                        metaLive.current = { ...metaLive.current, sessions: next };
                         const picked = ocSessions.find((s) => s.id === val);
                         if (picked?.repoShort && !repo) setRepo(picked.repoShort);
                         if (picked?.serverId) setServer(picked.serverId);
@@ -3135,6 +3306,11 @@ function RowEditor({
                       className="max-w-52 truncate rounded border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-[11px] text-zinc-300 outline-none"
                     >
                       <option value="">Auto-create</option>
+                      {activeSid && !ocSessions.some((s) => s.id === activeSid) && (
+                        <option value={activeSid}>
+                          [{server}] {activeSid.slice(0, 10)}
+                        </option>
+                      )}
                       {ocSessions.map((s) => (
                         <option key={s.id} value={s.id}>
                           [{s.serverId}] {s.id.slice(0, 10)} · {s.title.slice(0, 22)}

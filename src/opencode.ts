@@ -763,11 +763,32 @@ export function parseTaskDescription(desc?: string | null): TaskMeta {
     }
   }
 
+  if (body === "---") {
+    return { note: "", prompt: "", repo, server, model, sessions, queued };
+  }
+
+  if (body.startsWith("---\n")) {
+    const rest = body.slice(4).replace(/^(---\n)+/, "").trim();
+    return {
+      note: "",
+      prompt: rest,
+      repo,
+      server,
+      model,
+      sessions,
+      queued,
+    };
+  }
+
   if (body.includes("\n---\n")) {
     const [notePart, ...promptParts] = body.split("\n---\n");
+    const cleanNote = notePart.trim() === "---" ? "" : notePart.trim();
     return {
-      note: notePart.trim(),
-      prompt: promptParts.join("\n---\n").trim(),
+      note: cleanNote,
+      prompt: promptParts
+        .filter((p) => p.trim() !== "---")
+        .join("\n---\n")
+        .trim(),
       repo,
       server,
       model,
@@ -1164,7 +1185,10 @@ export type SessionSummary = {
 const summaryCache = new Map<string, { updatedAt: number; summary: SessionSummary }>();
 
 export function invalidateSessionSummary(sessionID: string) {
-  summaryCache.delete(sessionID);
+  const existing = summaryCache.get(sessionID);
+  if (existing) {
+    summaryCache.set(sessionID, { updatedAt: 0, summary: existing.summary });
+  }
 }
 
 export async function fetchOpenCodeSessionSummary(
@@ -1173,7 +1197,12 @@ export async function fetchOpenCodeSessionSummary(
   serverId?: string,
 ): Promise<SessionSummary | null> {
   const cached = summaryCache.get(sessionID);
-  if (cached && knownUpdatedAt > 0 && cached.updatedAt >= knownUpdatedAt) {
+  if (
+    cached &&
+    cached.summary.lastAssistantText &&
+    knownUpdatedAt > 0 &&
+    cached.updatedAt >= knownUpdatedAt
+  ) {
     return cached.summary;
   }
   const srv = resolveServer(serverId);
@@ -1187,6 +1216,9 @@ export async function fetchOpenCodeSessionSummary(
       data?: Array<{
         id?: string;
         type?: string;
+        text?: string;
+        metadata?: { displayText?: string };
+        error?: { message?: string };
         time?: { created?: number; completed?: number };
         content?: Array<{
           type?: string;
@@ -1198,16 +1230,28 @@ export async function fetchOpenCodeSessionSummary(
     };
     const msgs = json.data ?? [];
     let lastAssistantText = "";
+    let lastErrorText = "";
     let lastToolCall: string | undefined;
     let updatedAt = knownUpdatedAt;
     const rawTurns: SessionTurn[] = [];
 
     for (const m of msgs) {
+      const msgTime = m.time?.completed ?? m.time?.created ?? 0;
+      if (msgTime > updatedAt) updatedAt = msgTime;
+
+      if (!lastErrorText && m.error?.message?.trim()) {
+        lastErrorText = `⚠️ ${m.error.message.trim()}`;
+      }
+
       if (m.type !== "assistant" && m.type !== "user") continue;
-      if (!updatedAt && m.time?.created) updatedAt = m.time.created;
 
       const textParts: string[] = [];
       const tools: string[] = [];
+
+      if (m.type === "user") {
+        const directUserText = (m.text || m.metadata?.displayText || "").trim();
+        if (directUserText) textParts.push(directUserText);
+      }
 
       for (const part of m.content ?? []) {
         if (part.type === "text" && part.text?.trim()) {
@@ -1236,6 +1280,10 @@ export async function fetchOpenCodeSessionSummary(
       }
     }
 
+    if (!lastAssistantText) {
+      lastAssistantText = lastErrorText || cached?.summary.lastAssistantText || "";
+    }
+
     const turns = rawTurns.slice(0, 20).reverse();
 
     const summary: SessionSummary = {
@@ -1244,7 +1292,10 @@ export async function fetchOpenCodeSessionSummary(
       turns,
       updatedAt,
     };
-    summaryCache.set(sessionID, { updatedAt: updatedAt || Date.now(), summary });
+    summaryCache.set(sessionID, {
+      updatedAt: lastAssistantText ? updatedAt : 0,
+      summary,
+    });
     return summary;
   } catch {
     return cached?.summary ?? null;
