@@ -9,9 +9,12 @@ import { join } from "node:path";
 
 // Local OpenCode daemon bridge: discovers `opencode service status` + `~/.config/opencode/service.json`
 // and proxies `/opencode-api/*` -> `http://127.0.0.1:<port>/api/*` with Basic auth.
+// Also proxies `/opencode-homelab-api/*` -> `http://192.168.50.74:4096/api/*` (homelab CT 105).
 function opencodeBridgePlugin(): Plugin {
   let cachedBase = "";
   let cachedAt = 0;
+  let cachedHomelabPass: string | null = null;
+  let cachedHomelabAt = 0;
 
   function resolveService(): { base: string; auth: string } | null {
     try {
@@ -37,9 +40,84 @@ function opencodeBridgePlugin(): Plugin {
     }
   }
 
+  function resolveHomelab(): { base: string; password: string | null; auth: string } {
+    const base = "http://192.168.50.74:4096";
+    if (cachedHomelabPass === null || Date.now() - cachedHomelabAt > 60_000) {
+      try {
+        const out = execSync(
+          'ssh -o BatchMode=yes -o ConnectTimeout=2 opencode "grep ^OPENCODE_PASSWORD= /etc/opencode/opencode.env | cut -d= -f2-"',
+          { encoding: "utf8", timeout: 2500 },
+        ).trim();
+        cachedHomelabPass = out || "";
+        cachedHomelabAt = Date.now();
+      } catch {
+        cachedHomelabPass = cachedHomelabPass ?? "";
+        cachedHomelabAt = Date.now();
+      }
+    }
+    const auth = cachedHomelabPass
+      ? "Basic " + Buffer.from(`opencode:${cachedHomelabPass}`).toString("base64")
+      : "";
+    return { base, password: cachedHomelabPass || null, auth };
+  }
+
   return {
     name: "opencode-local-bridge",
     configureServer(server) {
+      server.middlewares.use("/opencode-homelab-api", async (req, res) => {
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept");
+        if (req.method === "OPTIONS") {
+          res.statusCode = 204;
+          res.end();
+          return;
+        }
+        const hl = resolveHomelab();
+        const targetUrl = `${hl.base}/api${req.url || ""}`;
+        try {
+          const chunks: Buffer[] = [];
+          if (req.method !== "GET" && req.method !== "HEAD") {
+            for await (const chunk of req) chunks.push(Buffer.from(chunk));
+          }
+          const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
+          const authHeader =
+            (typeof req.headers.authorization === "string" && req.headers.authorization) || hl.auth;
+          const upstream = await fetch(targetUrl, {
+            method: req.method || "GET",
+            headers: {
+              ...(authHeader ? { Authorization: authHeader } : {}),
+              ...(body ? { "Content-Type": "application/json" } : {}),
+              Accept: req.headers.accept || "application/json",
+            },
+            body,
+          });
+          res.statusCode = upstream.status;
+          const ct = upstream.headers.get("content-type");
+          if (ct) res.setHeader("Content-Type", ct);
+
+          if (ct?.includes("text/event-stream") && upstream.body) {
+            res.setHeader("Cache-Control", "no-cache");
+            res.setHeader("Connection", "keep-alive");
+            const reader = upstream.body.getReader();
+            req.on("close", () => reader.cancel().catch(() => {}));
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              res.write(Buffer.from(value));
+            }
+            res.end();
+          } else {
+            const text = await upstream.text();
+            res.end(text);
+          }
+        } catch (err) {
+          res.statusCode = 502;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: String(err) }));
+        }
+      });
+
       server.middlewares.use("/opencode-api", async (req, res) => {
         res.setHeader("Access-Control-Allow-Origin", "*");
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
@@ -52,6 +130,8 @@ function opencodeBridgePlugin(): Plugin {
 
       if (req.url === "/health" || req.url?.startsWith("/health?")) {
         const svc = resolveService();
+        const hl = resolveHomelab();
+        const port = server.config.server.port || 5173;
         const cfgPath = join(homedir(), ".config", "opencode", "service.json");
         let serviceCfg: { password?: string; cors?: string | string[] } = {};
         try {
@@ -62,16 +142,23 @@ function opencodeBridgePlugin(): Plugin {
         } catch {
           /* ignore */
         }
-        res.statusCode = svc ? 200 : 503;
+        res.statusCode = 200;
         res.setHeader("Content-Type", "application/json");
         res.end(
           JSON.stringify({
             ok: Boolean(svc),
             upstream: svc?.base ?? null,
             apiEndpoint: svc ? `${svc.base}/api` : null,
-            bridgeEndpoint: `http://127.0.0.1:${server.config.server.port || 5173}/opencode-api`,
+            bridgeEndpoint: `http://localhost:${port}/opencode-api`,
             password: serviceCfg.password ?? null,
             cors: serviceCfg.cors ?? null,
+            homelab: {
+              upstream: hl.base,
+              apiEndpoint: "http://opencode:4096/api",
+              bridgeEndpoint: `http://localhost:${port}/opencode-homelab-api`,
+              tailscaleEndpoint: "https://opencode-homelab.taila12039.ts.net/api",
+              password: hl.password,
+            },
           }),
         );
         return;
@@ -133,6 +220,9 @@ function opencodeBridgePlugin(): Plugin {
 export default defineConfig({
   // ponytail: relative base so Pages works under any repo name
   base: "./",
+  server: {
+    host: true,
+  },
   plugins: [
     opencodeBridgePlugin(),
     react(),

@@ -357,6 +357,8 @@ export default function App() {
     }
   }, []);
 
+  const verifyDebounceRef = useRef<number | null>(null);
+
   const runVerifyOpenCode = useCallback(
     async (override?: Partial<OpenCodeConfig>): Promise<OpenCodeVerifyResult> => {
       setOcVerifying(true);
@@ -371,8 +373,11 @@ export default function App() {
         }
         setOcServerOnlineById(onlineMap);
         setOcConnected(anyOk);
-        // Sync React state in case discoverLocalBridge() populated the local password in localStorage
-        setOcConfig(loadOpenCodeConfig());
+        // Sync React state only if discoverLocalBridge() actually changed saved config in localStorage
+        setOcConfig((cur) => {
+          const fresh = loadOpenCodeConfig();
+          return JSON.stringify(fresh) === JSON.stringify(cur) ? cur : fresh;
+        });
         if (anyOk) await syncOpenCode();
         const cfg = { ...loadOpenCodeConfig(), ...override };
         const defSrv = resolveServer(cfg.defaultServerId, cfg);
@@ -412,7 +417,12 @@ export default function App() {
           password: patch.password ?? primary?.password ?? cur.password,
         };
         saveOpenCodeConfig(next);
-        void runVerifyOpenCode(next);
+        if (verifyDebounceRef.current) {
+          window.clearTimeout(verifyDebounceRef.current);
+        }
+        verifyDebounceRef.current = window.setTimeout(() => {
+          void runVerifyOpenCode(next);
+        }, 400);
         return next;
       });
     },
@@ -441,7 +451,7 @@ export default function App() {
       clearInterval(iv);
       es?.close();
     };
-  }, [token, projectId, syncOpenCode, runVerifyOpenCode, ocConfig.defaultServerId, ocConfig.servers]);
+  }, [token, projectId, syncOpenCode, runVerifyOpenCode, ocConfig.defaultServerId]);
 
   // 1-second background ticker: increments humanSec on expanded task and agentSec on any task whose linked OpenCode session is `running`
   useEffect(() => {

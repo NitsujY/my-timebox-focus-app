@@ -93,14 +93,14 @@ export const DEFAULT_SERVERS: OpenCodeServer[] = [
   {
     id: "homelab",
     name: "Home Server",
-    endpoint: "https://homelab.tailnet.ts.net/api",
+    endpoint: "http://opencode:4096/api",
     password: "",
     defaultDir: "/workspace",
     repos: [
       { label: "my-timebox-focus-app", dir: "/workspace/my-timebox-focus-app" },
       { label: "homelab/infra", dir: "/workspace/infra" },
     ],
-    enabled: false,
+    enabled: true,
   },
 ];
 
@@ -157,13 +157,19 @@ export function loadOpenCodeConfig(): OpenCodeConfig {
       // Backfill repos on existing servers and seed default devbox/homelab if only single uncustomized local exists
       const mapped = parsed.servers.map((s) => {
         const preset = DEFAULT_SERVERS.find((d) => d.id === s.id);
+        const isLegacyHomelabSample =
+          s.id === "homelab" && s.endpoint === "https://homelab.tailnet.ts.net/api";
         const isUnconfiguredSample =
-          (s.id === "devbox" && s.endpoint === "https://devbox.vyond.ts.net/api") ||
-          (s.id === "homelab" && s.endpoint === "https://homelab.tailnet.ts.net/api");
+          s.id === "devbox" && s.endpoint === "https://devbox.vyond.ts.net/api";
         return {
           ...preset,
           ...s,
-          enabled: isUnconfiguredSample ? false : s.enabled ?? preset?.enabled ?? true,
+          endpoint: isLegacyHomelabSample ? "http://opencode:4096/api" : s.endpoint,
+          enabled: isUnconfiguredSample
+            ? false
+            : isLegacyHomelabSample
+              ? true
+              : s.enabled ?? preset?.enabled ?? true,
           repos: s.repos && s.repos.length > 0 ? s.repos : preset?.repos ?? KNOWN_REPOS,
         };
       });
@@ -235,6 +241,18 @@ export function isLocalLoopbackHttp(url: string): boolean {
   }
 }
 
+export function isHomelabEndpoint(url: string): boolean {
+  const lower = url.toLowerCase();
+  return (
+    lower.includes("opencode:4096") ||
+    lower.includes("192.168.50.74") ||
+    lower.includes("100.107.128.96") ||
+    lower.includes("opencode-homelab") ||
+    lower.includes("homelab.tailnet.ts.net") ||
+    lower.includes("/opencode-homelab-api")
+  );
+}
+
 export function resolveOpenCodeBase(rawEndpoint?: string): string {
   const clean = (rawEndpoint ?? loadOpenCodeConfig().endpoint).trim().replace(/\/+$/, "");
   if (!clean) {
@@ -249,7 +267,30 @@ export function resolveOpenCodeBase(rawEndpoint?: string): string {
     }
     return "/opencode-api";
   }
-  if (clean.endsWith("/opencode-api") || clean.endsWith("/api")) return clean;
+
+  // Route Homelab LAN HTTP endpoints via local Vite bridge (when available) or Tailscale HTTPS (when on https:)
+  if (typeof window !== "undefined" && isHomelabEndpoint(clean) && clean.startsWith("http://")) {
+    const isLocalVite =
+      (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") &&
+      (window.location.port === "5173" || window.location.port === "4173");
+    if (isLocalVite) {
+      return "/opencode-homelab-api";
+    }
+    if (window.location.protocol === "https:") {
+      if (autoDiscoveredLocal?.homelabBridgeEndpoint) {
+        return autoDiscoveredLocal.homelabBridgeEndpoint;
+      }
+      return "https://opencode-homelab.taila12039.ts.net/api";
+    }
+  }
+
+  if (
+    clean.endsWith("/opencode-api") ||
+    clean.endsWith("/opencode-homelab-api") ||
+    clean.endsWith("/api")
+  ) {
+    return clean;
+  }
   try {
     const u = new URL(clean);
     if (u.pathname === "" || u.pathname === "/") {
@@ -272,42 +313,75 @@ export type LocalBridgeHealth = {
   bridgeEndpoint?: string | null;
   password?: string | null;
   cors?: string | string[] | null;
+  homelab?: {
+    upstream?: string | null;
+    apiEndpoint?: string | null;
+    bridgeEndpoint?: string | null;
+    tailscaleEndpoint?: string | null;
+    password?: string | null;
+  } | null;
 };
 
-let autoDiscoveredLocal: { endpoint?: string; password?: string; checkedAt: number } | null = null;
+let autoDiscoveredLocal: {
+  endpoint?: string;
+  password?: string;
+  homelabPassword?: string;
+  homelabBridgeEndpoint?: string;
+  checkedAt: number;
+} | null = null;
 
 export async function discoverLocalBridge(force = false): Promise<LocalBridgeHealth | null> {
   if (typeof window === "undefined") return null;
-  if (window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
-    return null;
-  }
   if (!force && autoDiscoveredLocal && Date.now() - autoDiscoveredLocal.checkedAt < 15_000) {
     return null;
   }
-  const candidates = ["/opencode-api/health"];
+  const isLocalHost =
+    window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+  const candidates = isLocalHost
+    ? ["/opencode-api/health"]
+    : [
+        "http://localhost:5173/opencode-api/health",
+        "http://127.0.0.1:5173/opencode-api/health",
+      ];
   for (const url of candidates) {
     try {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 1200);
+      const timer = setTimeout(() => ctrl.abort(), 1500);
       const res = await fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(timer));
       if (!res.ok) continue;
       const data = (await res.json()) as LocalBridgeHealth;
-      if (data?.ok) {
+      if (data && (data.ok || data.homelab)) {
         autoDiscoveredLocal = {
           endpoint: data.apiEndpoint || "http://127.0.0.1:49374/api",
           password: data.password || undefined,
+          homelabPassword: data.homelab?.password || undefined,
+          homelabBridgeEndpoint:
+            data.homelab?.bridgeEndpoint || "http://localhost:5173/opencode-homelab-api",
           checkedAt: Date.now(),
         };
-        // Persist password into local server config if missing so direct 49374 works even after Vite stops
+        const cfg = loadOpenCodeConfig();
+        let mutated = false;
         if (data.password) {
-          const cfg = loadOpenCodeConfig();
           const localSrv = cfg.servers.find((s) => s.id === "local");
           if (localSrv && !localSrv.password?.trim()) {
             localSrv.password = data.password;
             if (cfg.defaultServerId === "local") cfg.password = data.password;
-            saveOpenCodeConfig(cfg);
+            mutated = true;
           }
         }
+        if (data.homelab?.password) {
+          for (const srv of cfg.servers) {
+            if (
+              (srv.id === "homelab" || isHomelabEndpoint(srv.endpoint)) &&
+              !srv.password?.trim()
+            ) {
+              srv.password = data.homelab.password;
+              if (cfg.defaultServerId === srv.id) cfg.password = data.homelab.password;
+              mutated = true;
+            }
+          }
+        }
+        if (mutated) saveOpenCodeConfig(cfg);
         return data;
       }
     } catch {
@@ -321,8 +395,14 @@ export async function discoverLocalBridge(force = false): Promise<LocalBridgeHea
 function buildServerHeaders(srv: OpenCodeServer, jsonBody = false): Record<string, string> {
   const headers: Record<string, string> = {};
   if (jsonBody) headers["Content-Type"] = "application/json";
+  const isHomelab = srv.id === "homelab" || isHomelabEndpoint(srv.endpoint);
   const pwd =
-    srv.password?.trim() || (srv.id === "local" ? autoDiscoveredLocal?.password?.trim() : "");
+    srv.password?.trim() ||
+    (srv.id === "local"
+      ? autoDiscoveredLocal?.password?.trim()
+      : isHomelab
+        ? autoDiscoveredLocal?.homelabPassword?.trim()
+        : "");
   if (pwd) {
     headers["Authorization"] = `Basic ${btoa(`opencode:${pwd}`)}`;
   }
@@ -349,7 +429,11 @@ export type OpenCodeVerifyResult = {
 export async function verifyServerConnection(
   srv: OpenCodeServer,
 ): Promise<OpenCodeVerifyResult> {
-  if (srv.id === "local" && !srv.password?.trim()) {
+  if (
+    (srv.id === "local" || srv.id === "homelab" || isHomelabEndpoint(srv.endpoint)) &&
+    (!srv.password?.trim() ||
+      (typeof window !== "undefined" && window.location.protocol === "https:"))
+  ) {
     await discoverLocalBridge();
   }
   const base = resolveOpenCodeBase(srv.endpoint);
@@ -807,7 +891,11 @@ async function fetchSingleServerSnapshot(srv: OpenCodeServer): Promise<{
   sessions: OpenCodeLiveSession[];
   models: OpenCodeModelOption[];
 }> {
-  if (srv.id === "local" && !srv.password?.trim()) {
+  if (
+    (srv.id === "local" || srv.id === "homelab" || isHomelabEndpoint(srv.endpoint)) &&
+    (!srv.password?.trim() ||
+      (typeof window !== "undefined" && window.location.protocol === "https:"))
+  ) {
     await discoverLocalBridge();
   }
   const base = resolveOpenCodeBase(srv.endpoint);
