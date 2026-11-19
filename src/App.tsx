@@ -1575,6 +1575,7 @@ export default function App() {
           <section>
             <AddRow
               alwaysOpen
+              disableAgentAction
               ocConnected={ocConnected}
               ocServers={ocConfig.servers}
               ocServerOnlineById={ocServerOnlineById}
@@ -1585,8 +1586,8 @@ export default function App() {
               onAdd={(raw, extra) =>
                 addTask(
                   raw,
-                  extra?.mode && extra.mode !== "save" ? roles.focus ?? roles.backlog : roles.backlog,
-                  extra,
+                  roles.backlog,
+                  { ...extra, mode: "save" },
                 )
               }
             />
@@ -3424,6 +3425,7 @@ function AddRow({
   hotkey,
   alwaysOpen,
   inline,
+  disableAgentAction = false,
   ocConnected = false,
   ocServers = [],
   ocServerOnlineById = {},
@@ -3436,6 +3438,7 @@ function AddRow({
   hotkey?: string;
   alwaysOpen?: boolean;
   inline?: boolean;
+  disableAgentAction?: boolean;
   ocConnected?: boolean;
   ocServers?: OpenCodeServer[];
   ocServerOnlineById?: Record<string, boolean>;
@@ -3548,7 +3551,7 @@ function AddRow({
               setTimeout(() => promptRef.current?.focus(), 20);
             } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
               e.preventDefault();
-              submit("agent");
+              submit(disableAgentAction ? "save" : "agent");
             } else if (e.key === "Enter") {
               e.preventDefault();
               submit("save");
@@ -3654,7 +3657,7 @@ function AddRow({
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault();
-                submit("agent");
+                submit(disableAgentAction ? "save" : "agent");
               }
             }}
             placeholder={`Prompt for ${targetLabel}…`}
@@ -3663,7 +3666,9 @@ function AddRow({
 
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="font-mono text-[11px] text-zinc-500">
-              {isTargetServerOnline
+              {disableAgentAction
+                ? "Enter or ⌘Enter saves to Backlog"
+                : isTargetServerOnline
                 ? `${effectiveServerId} online · ⌘Enter runs agent`
                 : `${effectiveServerId} offline · ⌘Enter queues in Todoist`}
             </span>
@@ -3671,15 +3676,17 @@ function AddRow({
               <button type="button" onClick={() => submit("save")} className={btn}>
                 Save task
               </button>
-              <button
-                type="button"
-                onClick={() => submit("agent")}
-                className="rounded bg-orange-600 px-3 py-1 text-[12px] font-medium text-white hover:bg-orange-500"
-              >
-                {isTargetServerOnline
-                  ? `Run on ${targetLabel} ⌘↵`
-                  : `Queue for ${targetLabel} ⌘↵`}
-              </button>
+              {!disableAgentAction && (
+                <button
+                  type="button"
+                  onClick={() => submit("agent")}
+                  className="rounded bg-orange-600 px-3 py-1 text-[12px] font-medium text-white hover:bg-orange-500"
+                >
+                  {isTargetServerOnline
+                    ? `Run on ${targetLabel} ⌘↵`
+                    : `Queue for ${targetLabel} ⌘↵`}
+                </button>
+              )}
             </div>
           </div>
         </div>

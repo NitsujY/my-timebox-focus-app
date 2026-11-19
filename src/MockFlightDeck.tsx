@@ -1073,20 +1073,21 @@ export default function MockFlightDeck({ onExitMock }: { onExitMock?: () => void
           <section className="space-y-3">
             <TaskComposer
               alwaysOpen
+              disableAgentAction
               servers={servers}
               defaultServerId={defaultServerId}
               placeholder="＋ Add to Backlog… (Title ~server @repo // prompt or Tab)"
-              onSubmit={(parsed, launchAgent) => {
+              onSubmit={(parsed) => {
                 const srv = servers.find((s) => s.id === parsed.serverId) ?? servers[0];
                 setTasks((prev) => [
                   ...prev,
                   {
                     id: `t_${Date.now()}`,
                     title: parsed.title,
-                    section: launchAgent ? "focus" : "backlog",
-                    triage: launchAgent && srv.online ? "working" : "queued",
+                    section: "backlog",
+                    triage: "queued",
                     serverId: srv.id,
-                    queuedForServer: launchAgent && !srv.online,
+                    queuedForServer: false,
                     repo: parsed.repo,
                     specPrompt: parsed.prompt,
                     attentionMin: 0,
@@ -1571,12 +1572,14 @@ function TriageRow({
 function TaskComposer({
   placeholder,
   alwaysOpen,
+  disableAgentAction = false,
   servers,
   defaultServerId,
   onSubmit,
 }: {
   placeholder: string;
   alwaysOpen?: boolean;
+  disableAgentAction?: boolean;
   servers: ServerNode[];
   defaultServerId: string;
   onSubmit: (
@@ -1635,7 +1638,7 @@ function TaskComposer({
               setTimeout(() => promptRef.current?.focus(), 20);
             } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
               e.preventDefault();
-              submit(true);
+              submit(disableAgentAction ? false : true);
             } else if (e.key === "Enter" && !showDetails) {
               e.preventDefault();
               submit(false);
@@ -1716,7 +1719,7 @@ function TaskComposer({
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault();
-                submit(true);
+                submit(disableAgentAction ? false : true);
               }
             }}
             placeholder={`Prompt for ${targetLabel}…`}
@@ -1725,7 +1728,9 @@ function TaskComposer({
 
           <div className="flex items-center justify-between gap-2">
             <span className="font-mono text-[11px] text-zinc-500">
-              {targetSrv.online
+              {disableAgentAction
+                ? "Enter or ⌘Enter saves to Backlog"
+                : targetSrv.online
                 ? `${targetSrv.endpoint} (${targetSrv.latencyMs}ms)`
                 : `${targetSrv.id} offline · queues in Todoist`}
             </span>
@@ -1733,15 +1738,17 @@ function TaskComposer({
               <button type="button" onClick={() => submit(false)} className={btn}>
                 Save task
               </button>
-              <button
-                type="button"
-                onClick={() => submit(true)}
-                className="rounded bg-orange-600 px-3 py-1 text-[12px] font-medium text-white hover:bg-orange-500 cursor-pointer"
-              >
-                {targetSrv.online
-                  ? `Run on ${targetLabel} ⌘↵`
-                  : `Queue for ${targetLabel} ⌘↵`}
-              </button>
+              {!disableAgentAction && (
+                <button
+                  type="button"
+                  onClick={() => submit(true)}
+                  className="rounded bg-orange-600 px-3 py-1 text-[12px] font-medium text-white hover:bg-orange-500 cursor-pointer"
+                >
+                  {targetSrv.online
+                    ? `Run on ${targetLabel} ⌘↵`
+                    : `Queue for ${targetLabel} ⌘↵`}
+                </button>
+              )}
             </div>
           </div>
         </div>
