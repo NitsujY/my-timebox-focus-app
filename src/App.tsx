@@ -37,6 +37,7 @@ import {
   type OpenCodeModelOption,
   type OpenCodeServer,
   type OpenCodeVerifyResult,
+  type SessionFileDiff,
   type SessionSummary,
   type TaskMeta,
   type TriageState,
@@ -1154,20 +1155,45 @@ export default function App() {
     }
   }, [ocConnected, ocConfig.autoRunQueued, queuedForAgentTasks, runQueuedTasks]);
 
-  // Approve pending OpenCode tool permission inline
-  const approvePermission = async (t: Task) => {
+  // Approve or reject pending OpenCode tool permission inline
+  const approvePermission = async (
+    t: Task,
+    decision: "once" | "always" | "reject" = "once",
+  ) => {
     const meta = parseTaskDescription(t.description);
     const live = ocSessions.find(
       (s) => meta.sessions.includes(s.id) && s.permission,
     );
     if (!live?.permission) return;
     try {
-      await replyOpenCodePermission(live.id, live.permission.id, "once", live.serverId);
+      await replyOpenCodePermission(live.id, live.permission.id, decision, live.serverId);
+      invalidateSessionSummary(live.id);
       syncOpenCode();
-      showToast(`Approved on ${live.serverId}`);
+      showToast(
+        decision === "reject"
+          ? `Rejected on ${live.serverId}`
+          : decision === "always"
+            ? `Allowed always on ${live.serverId}`
+            : `Approved on ${live.serverId}`,
+      );
     } catch {
-      showToast("Approval failed");
+      showToast("Permission reply failed");
     }
+  };
+
+  // Stop / interrupt a running OpenCode session inline without completing the task
+  const stopTaskSession = async (t: Task) => {
+    const meta = parseTaskDescription(t.description);
+    const running = ocSessions.filter(
+      (s) => meta.sessions.includes(s.id) && s.status === "running",
+    );
+    if (running.length === 0) return;
+    for (const s of running) {
+      await interruptOpenCodeSession(s.id, s.serverId);
+      invalidateSessionSummary(s.id);
+    }
+    void syncOpenCode();
+    showToast(`Stopped agent on ${running[0].serverId}`);
   };
 
   // Answer pending OpenCode question / option picker inline
@@ -1377,6 +1403,9 @@ export default function App() {
   const runningOcCount = ocSessions.filter(
     (s) => s.status === "running" || s.status === "question",
   ).length;
+  const needsYouFocusCount = focusTasks.filter(
+    (t) => resolveTaskTriage(t, ocSessions).triage === "needs_you",
+  ).length;
   const totalServerCount = ocConfig.servers.length;
   const onlineServerCount = ocConfig.servers.filter((s) => ocServerOnlineById[s.id]).length;
 
@@ -1425,14 +1454,25 @@ export default function App() {
                     {onlineServerCount}/{totalServerCount}
                   </span>
                   <span className="hidden text-zinc-500 sm:inline">online</span>
-                  {runningOcCount > 0 && (
+                  {needsYouFocusCount > 0 && (
                     <>
                       <span className="text-zinc-700" aria-hidden="true">
                         ·
                       </span>
                       <span className="font-medium text-orange-400">
+                        {needsYouFocusCount}
+                        <span className="hidden sm:inline"> need you</span>
+                      </span>
+                    </>
+                  )}
+                  {runningOcCount > 0 && (
+                    <>
+                      <span className="text-zinc-700" aria-hidden="true">
+                        ·
+                      </span>
+                      <span className="font-medium text-zinc-200">
                         {runningOcCount}
-                        <span className="hidden sm:inline"> active</span>
+                        <span className="hidden sm:inline"> working</span>
                       </span>
                     </>
                   )}
@@ -1465,6 +1505,11 @@ export default function App() {
                 onClick={() => setView(v)}
               >
                 {v}
+                {v === "focus" && needsYouFocusCount > 0 && (
+                  <span className="ml-1 font-mono text-[11px] tabular-nums text-orange-400">
+                    {needsYouFocusCount}
+                  </span>
+                )}
                 {v === "backlog" && backlogTasks.length > 0 && (
                   <span className="ml-1 font-mono text-[11px] tabular-nums text-zinc-500">
                     {backlogTasks.length}
@@ -1607,10 +1652,12 @@ export default function App() {
                 defaultServerId={ocConfig.defaultServerId}
                 ocSessions={ocSessions}
                 humanSecBy={humanSecBy}
+                agentSecBy={agentSecBy}
                 onToggle={toggleRow}
                 onHandToAgent={handToAgent}
                 onApprove={approvePermission}
                 onAnswerForm={answerFormOption}
+                onInterrupt={stopTaskSession}
                 onMove={roles.focus ? (x) => moveTo(x, roles.focus!) : undefined}
                 onMoveProject={otherProjects.length ? moveToProject : undefined}
                 projects={otherProjects}
@@ -1649,10 +1696,12 @@ export default function App() {
             onRunQueued={() => void runQueuedTasks()}
             onOpenOcSettings={() => setView("settings")}
             humanSecBy={humanSecBy}
+            agentSecBy={agentSecBy}
             onToggle={toggleRow}
             onHandToAgent={handToAgent}
             onApprove={approvePermission}
             onAnswerForm={answerFormOption}
+            onInterrupt={stopTaskSession}
             onTrackOcSession={(s) => {
               addTask(s.title, roles.focus, {
                 repo: s.repoShort,
@@ -1876,10 +1925,12 @@ function FocusView({
   onRunQueued,
   onOpenOcSettings,
   humanSecBy,
+  agentSecBy,
   onToggle,
   onHandToAgent,
   onApprove,
   onAnswerForm,
+  onInterrupt,
   onTrackOcSession,
   onIgnoreOcSession,
   onMove,
@@ -1918,6 +1969,7 @@ function FocusView({
   onRunQueued: () => void;
   onOpenOcSettings: () => void;
   humanSecBy: Record<string, number>;
+  agentSecBy: Record<string, number>;
   onToggle: (id: string) => void;
   onHandToAgent: (
     t: Task,
@@ -1927,8 +1979,9 @@ function FocusView({
     repo?: string,
     note?: string,
   ) => void;
-  onApprove: (t: Task) => void;
+  onApprove: (t: Task, decision?: "once" | "always" | "reject") => void;
   onAnswerForm: (t: Task, fieldKey: string, value: string, label: string) => void;
+  onInterrupt: (t: Task) => void;
   onTrackOcSession: (s: OpenCodeLiveSession) => void;
   onIgnoreOcSession: (sid: string) => void;
   onMove: (t: Task) => void;
@@ -2028,7 +2081,7 @@ function FocusView({
             />
           </div>
           {bufferTasks.length > 0 && (
-            <ul className="mt-1 space-y-0.5">
+            <ul className="mt-1 space-y-1">
               {bufferTasks.map((t) => (
                 <TaskRow
                   key={t.id}
@@ -2043,11 +2096,13 @@ function FocusView({
                   defaultServerId={defaultServerId}
                   ocSessions={ocSessions}
                   humanSec={humanSecBy[t.id] ?? 0}
+                  agentSec={agentSecBy[t.id] ?? 0}
                   expanded={expandedId === t.id}
                   onToggle={() => onToggle(t.id)}
                   onHandToAgent={(p, srvId, mdl, rp, nt) => onHandToAgent(t, p, srvId, mdl, rp, nt)}
-                  onApprove={() => onApprove(t)}
+                  onApprove={(dec) => onApprove(t, dec)}
                   onAnswerForm={(k, v, l) => onAnswerForm(t, k, v, l)}
+                  onInterrupt={() => onInterrupt(t)}
                   onStart={onStart}
                   onMove={focusId ? onMove : undefined}
                   onDemote={onDemote}
@@ -2086,7 +2141,7 @@ function FocusView({
             <span className="mt-1 block text-orange-500">Pull from Backlog →</span>
           </button>
         ) : (
-          <ul className="space-y-0.5">
+          <ul className="space-y-1.5">
             {sortedFocus.map((t) => (
               <TaskRow
                 key={t.id}
@@ -2102,11 +2157,13 @@ function FocusView({
                 defaultServerId={defaultServerId}
                 ocSessions={ocSessions}
                 humanSec={humanSecBy[t.id] ?? 0}
+                agentSec={agentSecBy[t.id] ?? 0}
                 expanded={expandedId === t.id}
                 onToggle={() => onToggle(t.id)}
                 onHandToAgent={(p, srvId, mdl, rp, nt) => onHandToAgent(t, p, srvId, mdl, rp, nt)}
-                onApprove={() => onApprove(t)}
+                onApprove={(dec) => onApprove(t, dec)}
                 onAnswerForm={(k, v, l) => onAnswerForm(t, k, v, l)}
+                onInterrupt={() => onInterrupt(t)}
                 onStart={onStart}
                 onComplete={() => onComplete(t)}
                 onDemote={onDemote}
@@ -2201,10 +2258,12 @@ function BacklogList({
   defaultServerId,
   ocSessions,
   humanSecBy,
+  agentSecBy,
   onToggle,
   onHandToAgent,
   onApprove,
   onAnswerForm,
+  onInterrupt,
   onMove,
   onMoveProject,
   projects,
@@ -2225,6 +2284,7 @@ function BacklogList({
   defaultServerId: string;
   ocSessions: OpenCodeLiveSession[];
   humanSecBy: Record<string, number>;
+  agentSecBy: Record<string, number>;
   onToggle: (id: string) => void;
   onHandToAgent: (
     t: Task,
@@ -2234,8 +2294,9 @@ function BacklogList({
     repo?: string,
     note?: string,
   ) => void;
-  onApprove: (t: Task) => void;
+  onApprove: (t: Task, decision?: "once" | "always" | "reject") => void;
   onAnswerForm: (t: Task, fieldKey: string, value: string, label: string) => void;
+  onInterrupt: (t: Task) => void;
   onMove?: (t: Task) => void;
   onMoveProject?: (t: Task, projectId: string) => void;
   projects?: Project[];
@@ -2250,7 +2311,7 @@ function BacklogList({
   const visible = showAll ? tasks : tasks.slice(0, PAGE);
   return (
     <>
-      <ul className="space-y-0.5">
+      <ul className="space-y-1">
         {visible.map((t) => (
           <TaskRow
             key={t.id}
@@ -2265,11 +2326,13 @@ function BacklogList({
             defaultServerId={defaultServerId}
             ocSessions={ocSessions}
             humanSec={humanSecBy[t.id] ?? 0}
+            agentSec={agentSecBy[t.id] ?? 0}
             expanded={expandedId === t.id}
             onToggle={() => onToggle(t.id)}
             onHandToAgent={(p, srvId, mdl, rp, nt) => onHandToAgent(t, p, srvId, mdl, rp, nt)}
-            onApprove={() => onApprove(t)}
+            onApprove={(dec) => onApprove(t, dec)}
             onAnswerForm={(k, v, l) => onAnswerForm(t, k, v, l)}
+            onInterrupt={() => onInterrupt(t)}
             onMove={onMove}
             onMoveProject={onMoveProject}
             projects={projects}
@@ -2289,6 +2352,88 @@ function BacklogList({
   );
 }
 
+function InlineDiffViewer({
+  files,
+  onAcceptAndComplete,
+}: {
+  files: SessionFileDiff[];
+  onAcceptAndComplete?: () => void;
+}) {
+  const [activeIdx, setActiveIdx] = useState(0);
+  if (files.length === 0) return null;
+  const safeIdx = activeIdx < files.length ? activeIdx : 0;
+  const activeFile = files[safeIdx];
+  const patchLines = activeFile.patch ? activeFile.patch.split("\n") : [];
+
+  return (
+    <div
+      className="mt-2.5 overflow-hidden rounded-lg border border-zinc-800/90 bg-zinc-950 font-mono text-[11px]"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/80 bg-zinc-900/70 px-2.5 py-1.5">
+        <div className="flex items-center gap-1.5 overflow-x-auto">
+          {files.map((f, idx) => (
+            <button
+              key={f.file}
+              type="button"
+              onClick={() => setActiveIdx(idx)}
+              className={`inline-flex shrink-0 items-center gap-1 rounded px-2 py-0.5 transition-colors ${
+                idx === safeIdx
+                  ? "bg-zinc-800 text-zinc-100"
+                  : "text-zinc-400 hover:text-zinc-200"
+              }`}
+              title={f.file}
+            >
+              <span>{f.shortFile}</span>
+              <span className="text-emerald-400">+{f.additions}</span>
+              <span className="text-red-400">-{f.deletions}</span>
+            </button>
+          ))}
+        </div>
+        {onAcceptAndComplete && (
+          <button
+            type="button"
+            onClick={onAcceptAndComplete}
+            className="shrink-0 rounded border border-emerald-500/40 bg-emerald-600/20 px-2 py-0.5 font-sans text-[11px] font-medium text-emerald-300 transition-colors hover:bg-emerald-600/30"
+          >
+            ✓ Accept &amp; Mark Done
+          </button>
+        )}
+      </div>
+
+      <div className="max-h-56 space-y-0.5 overflow-x-auto overflow-y-auto p-2.5 leading-relaxed">
+        {patchLines.length === 0 ? (
+          <div className="text-zinc-500">
+            Modified {activeFile.file} (+{activeFile.additions} -{activeFile.deletions})
+          </div>
+        ) : (
+          patchLines.map((line, i) => {
+            const isAdd = line.startsWith("+") && !line.startsWith("+++");
+            const isDel = line.startsWith("-") && !line.startsWith("---");
+            const isHunk = line.startsWith("@@");
+            return (
+              <div
+                key={i}
+                className={`whitespace-pre rounded-sm px-1.5 ${
+                  isAdd
+                    ? "bg-emerald-500/12 text-emerald-300"
+                    : isDel
+                      ? "bg-red-500/12 text-red-300"
+                      : isHunk
+                        ? "text-zinc-500"
+                        : "text-zinc-400"
+                }`}
+              >
+                {line}
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TaskRow({
   t,
   large,
@@ -2297,6 +2442,7 @@ function TaskRow({
   onHandToAgent,
   onApprove,
   onAnswerForm,
+  onInterrupt,
   onStart,
   onComplete,
   defaultMinutes = 5,
@@ -2316,6 +2462,7 @@ function TaskRow({
   defaultServerId = "local",
   ocSessions,
   humanSec,
+  agentSec = 0,
 }: {
   t: Task;
   large?: boolean;
@@ -2328,8 +2475,9 @@ function TaskRow({
     repo?: string,
     note?: string,
   ) => void;
-  onApprove: () => void;
+  onApprove: (decision?: "once" | "always" | "reject") => void;
   onAnswerForm: (fieldKey: string, value: string, label: string) => void;
+  onInterrupt?: () => void;
   onStart?: (t: Task, minutes: number) => void;
   onComplete?: () => void;
   defaultMinutes?: number;
@@ -2349,9 +2497,11 @@ function TaskRow({
   defaultServerId?: string;
   ocSessions: OpenCodeLiveSession[];
   humanSec: number;
+  agentSec?: number;
 }) {
   const rootRef = useRef<HTMLLIElement>(null);
   const [zen, setZen] = useState(false);
+  const [showDiff, setShowDiff] = useState(false);
 
   useEffect(() => {
     if (!expanded) setZen(false);
@@ -2400,6 +2550,7 @@ function TaskRow({
   const ui = TRIAGE_UI[triage];
   const hasQuestion = Boolean(liveSession?.form);
   const needsApproval = Boolean(liveSession?.permission);
+  const isBlockedOnHuman = hasQuestion || needsApproval;
   const isQueuedForAgent = !liveSession && Boolean(meta.queued);
   const assignedServerId = liveSession?.serverId || meta.server || defaultServerId;
   const isAssignedServerOnline = ocServerOnlineById[assignedServerId] ?? ocConnected;
@@ -2413,17 +2564,20 @@ function TaskRow({
       return;
     }
     let cancelled = false;
-    const loadSummary = () => {
-      fetchOpenCodeSessionSummary(activeSid, liveSession?.updatedAt, assignedServerId).then(
-        (res) => {
-          if (!cancelled && res) setSummary(res);
-        },
-      );
+    const loadSummary = (force = false) => {
+      fetchOpenCodeSessionSummary(
+        activeSid,
+        liveSession?.updatedAt,
+        assignedServerId,
+        force,
+      ).then((res) => {
+        if (!cancelled && res) setSummary(res);
+      });
     };
     loadSummary();
     const shouldPoll =
       liveSession?.status === "running" || !summary?.lastAssistantText;
-    const iv = shouldPoll ? window.setInterval(loadSummary, 1500) : undefined;
+    const iv = shouldPoll ? window.setInterval(() => loadSummary(true), 1500) : undefined;
     return () => {
       cancelled = true;
       if (iv) window.clearInterval(iv);
@@ -2440,6 +2594,7 @@ function TaskRow({
   const spent = (spentBy[t.id] ?? 0) + Math.floor(humanSec / 60);
   const planned = t.duration?.amount ?? defaultMinutes;
   const over = spent > planned;
+  const aiMin = Math.floor(agentSec / 60);
 
   const repoShort = shortRepo(meta.repo || liveSession?.repoShort);
   const showServerBadge = ocServers.length > 1 || (meta.server && meta.server !== defaultServerId);
@@ -2456,6 +2611,11 @@ function TaskRow({
     .filter(Boolean)
     .join("/");
 
+  const filesChanged = summary?.filesChanged ?? [];
+  const totalAdditions = summary?.totalAdditions ?? 0;
+  const totalDeletions = summary?.totalDeletions ?? 0;
+  const recentTools = summary?.recentTools ?? [];
+
   const latestReplyOneLine = summary?.lastAssistantText
     ? summary.lastAssistantText
         .replace(/```[\s\S]*?```/g, "")
@@ -2469,15 +2629,37 @@ function TaskRow({
     liveSession?.form?.fields?.[0]?.title || liveSession?.form?.title || "";
 
   // Single quiet sub-line under task title
-  const subline = hasQuestion
-    ? `Question: ${formQuestionTitle}`
-    : needsApproval && liveSession?.permission
-      ? `Blocked: ${liveSession.permission.action} ${liveSession.permission.resources.join(" ")}`
-      : triage === "working" && summary?.lastToolCall
-        ? `Running: ${summary.lastToolCall}`
-        : isQueuedForAgent
-          ? `Queued for ${assignedServerId}${meta.prompt ? ` · ${meta.prompt.split("\n")[0]}` : ""}`
-          : latestReplyOneLine || meta.note || meta.prompt.split("\n")[0] || "";
+  const subline =
+    triage === "working" && recentTools.length > 0
+      ? ""
+      : isQueuedForAgent
+        ? `Queued for ${assignedServerId}${meta.prompt ? ` · ${meta.prompt.split("\n")[0]}` : ""}`
+        : latestReplyOneLine || meta.note || meta.prompt.split("\n")[0] || "";
+
+  const diffBadgeEl = filesChanged.length > 0 && (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        setShowDiff((s) => !s);
+      }}
+      className={`inline-flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[11px] transition-colors ${
+        triage === "needs_you" && !isBlockedOnHuman
+          ? "border-amber-500/35 bg-amber-500/10 text-zinc-200 hover:border-amber-400/60"
+          : "border-zinc-800 bg-zinc-900/90 text-zinc-300 hover:border-zinc-700"
+      }`}
+      title="Click to toggle inline file diff"
+    >
+      <span>
+        {showDiff ? "▾" : "▸"}{" "}
+        {triage === "working" && filesChanged.length === 1
+          ? `editing ${filesChanged[0].shortFile}`
+          : `${filesChanged.length} ${filesChanged.length === 1 ? "file" : "files"}`}
+      </span>
+      <span className="text-emerald-400">+{totalAdditions}</span>
+      <span className="text-red-400">-{totalDeletions}</span>
+    </button>
+  );
 
   const dur = (
     <div className="flex shrink-0 items-center gap-2 font-mono text-[12px] tabular-nums">
@@ -2486,13 +2668,40 @@ function TaskRow({
           <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
           Queued
         </span>
-      ) : (
-        (triage !== "queued" || liveSession) && (
-          <span className={`inline-flex items-center gap-1.5 text-[12px] ${ui.labelCls}`}>
-            <span className={`h-1.5 w-1.5 rounded-full ${ui.dot}`} />
-            {hasQuestion ? "Question" : ui.label}
-          </span>
-        )
+      ) : hasQuestion ? (
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-orange-500/15 px-2.5 py-0.5 text-[11px] font-medium text-orange-400">
+          <span className="h-1.5 w-1.5 rounded-full bg-orange-500" />
+          Question
+        </span>
+      ) : needsApproval ? (
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-orange-500/15 px-2.5 py-0.5 text-[11px] font-medium text-orange-400">
+          <span className="h-1.5 w-1.5 rounded-full bg-orange-500" />
+          Permission
+        </span>
+      ) : triage === "working" ? (
+        <span className="inline-flex items-center gap-1.5 text-[12px] text-zinc-200">
+          <span className="h-1.5 w-1.5 rounded-full bg-zinc-200 animate-pulse" />
+          Working{agentSec > 0 ? ` · ${fmt(agentSec)}` : ""}
+        </span>
+      ) : triage === "needs_you" ? (
+        <span
+          className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] ${
+            filesChanged.length > 0
+              ? "border border-amber-400/35 bg-amber-500/10 text-amber-300"
+              : ui.labelCls
+          }`}
+        >
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${
+              filesChanged.length > 0 ? "bg-amber-400" : ui.dot
+            }`}
+          />
+          {filesChanged.length > 0 ? "Review Diff" : ui.label}
+        </span>
+      ) : null}
+
+      {aiMin > 0 && triage !== "working" && (
+        <span className="hidden text-zinc-500 sm:inline">ai {aiMin}m</span>
       )}
       {spent > 0 ? (
         <span className="text-zinc-500">
@@ -2507,6 +2716,20 @@ function TaskRow({
 
   const actions = (
     <div className="flex shrink-0 items-center gap-1">
+      {triage === "working" && onInterrupt && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onInterrupt();
+          }}
+          title="Stop running agent session"
+          aria-label="Stop running agent session"
+          className="shrink-0 rounded border border-zinc-800 bg-zinc-900 px-2 py-0.5 font-mono text-[11px] text-zinc-400 transition-colors hover:border-red-500/40 hover:text-red-400"
+        >
+          ■ Stop
+        </button>
+      )}
       {!liveSession && !onMove && !isQueuedForAgent && (
         <button
           className="shrink-0 rounded px-2 py-1 text-[12px] text-orange-500 transition-colors duration-150 hover:bg-zinc-800"
@@ -2548,13 +2771,19 @@ function TaskRow({
     </div>
   );
 
+  const rowLeftBorder = expanded
+    ? "border-l-orange-500 bg-zinc-900/80 ring-1 ring-zinc-800"
+    : isBlockedOnHuman
+      ? "border-l-orange-500 bg-zinc-900/60"
+      : triage === "needs_you" && filesChanged.length > 0
+        ? "border-l-amber-400/90 bg-zinc-900/45"
+        : `${ui.leftBar || pBar(t.priority)}`;
+
   return (
     <li
       ref={rootRef}
-      className={`rounded-md border-l-2 transition-colors duration-150 ${
-        expanded
-          ? "border-l-orange-500 bg-zinc-900/80 ring-1 ring-zinc-800"
-          : `${ui.leftBar || pBar(t.priority)} hover:bg-zinc-900/50 active:bg-zinc-800/60`
+      className={`rounded-lg border-l-2 transition-colors duration-150 ${rowLeftBorder} ${
+        !expanded ? "hover:bg-zinc-900/65" : ""
       } ${isNew(t) ? "row-new" : ""}`}
     >
       {expanded ? (
@@ -2591,40 +2820,181 @@ function TaskRow({
           onDelete={onDelete}
         />
       ) : (
-        <div className={`flex items-center gap-2.5 px-3 ${large ? "min-h-13" : "min-h-10"}`}>
-          <button className="min-w-0 flex-1 py-1.5 text-left" onClick={onToggle}>
-            <div className="flex items-center gap-2">
-              <span
-                className={`truncate ${
-                  large ? "text-[15px] font-medium text-zinc-100" : "text-[14px] text-zinc-200"
-                }`}
+        <div className="px-3 py-2">
+          <div className="flex items-start justify-between gap-2.5">
+            {onComplete && (
+              <button
+                type="button"
+                onClick={onComplete}
+                title="Mark task Done"
+                aria-label="Mark task Done"
+                className="mt-1 flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded border border-zinc-700 text-[10px] text-transparent transition-colors hover:border-orange-500 hover:text-orange-400"
               >
-                {t.content}
-              </span>
-              {targetBadge && (
-                <span className="shrink-0 font-mono text-[11px] text-zinc-500">
-                  {targetBadge}
-                </span>
+                ✓
+              </button>
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  className={`truncate text-left ${
+                    large
+                      ? "text-[15px] font-medium text-zinc-100"
+                      : "text-[14px] text-zinc-200"
+                  }`}
+                  onClick={onToggle}
+                >
+                  {t.content}
+                </button>
+                {targetBadge && (
+                  <span className="shrink-0 font-mono text-[11px] text-zinc-500">
+                    {targetBadge}
+                  </span>
+                )}
+                {diffBadgeEl}
+              </div>
+
+              {/* Live Tool Pipeline Breadcrumb when Agent is Working */}
+              {triage === "working" && recentTools.length > 0 && (
+                <div
+                  className="mt-1.5 flex flex-wrap items-center gap-1.5 font-mono text-[11px]"
+                  onClick={onToggle}
+                >
+                  {recentTools.map((step, i) => {
+                    const isLast = i === recentTools.length - 1;
+                    return (
+                      <span key={i} className="inline-flex items-center gap-1.5">
+                        {i > 0 && <span className="text-zinc-700">→</span>}
+                        <span
+                          className={
+                            isLast
+                              ? "inline-flex items-center gap-1.5 rounded border border-zinc-700/80 bg-zinc-800/90 px-2 py-0.5 text-zinc-100"
+                              : "rounded bg-zinc-900 px-1.5 py-0.5 text-zinc-400"
+                          }
+                        >
+                          {isLast ? (
+                            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-200 animate-pulse" />
+                          ) : (
+                            <span className="text-zinc-500">✓</span>
+                          )}
+                          <span className="truncate max-w-64">{step.label}</span>
+                        </span>
+                      </span>
+                    );
+                  })}
+                </div>
               )}
-            </div>
-            {subline && (
-              <span
-                className={`block truncate text-[12px] ${
-                  hasQuestion || needsApproval
-                    ? "text-orange-400"
-                    : isQueuedForAgent
+
+              {subline && (
+                <button
+                  type="button"
+                  onClick={onToggle}
+                  className={`mt-0.5 block w-full truncate text-left text-[12px] ${
+                    isQueuedForAgent
                       ? "text-amber-400/90"
                       : triage === "needs_you"
                         ? "text-zinc-300"
                         : "text-zinc-500"
-                }`}
-              >
-                {subline}
-              </span>
-            )}
-          </button>
-          {dur}
-          {actions}
+                  }`}
+                >
+                  {subline}
+                </button>
+              )}
+            </div>
+            <div className="flex shrink-0 items-center gap-2 pt-0.5">
+              {dur}
+              {actions}
+            </div>
+          </div>
+
+          {/* Inline Question Shelf directly on collapsed card (1-click answer, no need to open drawer) */}
+          {liveSession?.form && (
+            <div className="mt-2.5 rounded-lg border border-zinc-800/90 bg-zinc-950/90 p-3">
+              {liveSession.form.fields.map((field) => (
+                <div key={field.key} className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[13px] font-medium text-zinc-100">
+                      {field.title || formQuestionTitle}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={onToggle}
+                      className="shrink-0 font-mono text-[11px] text-zinc-500 hover:text-zinc-300"
+                    >
+                      Custom reply →
+                    </button>
+                  </div>
+                  {field.description && (
+                    <p className="text-[12px] text-zinc-400">{field.description}</p>
+                  )}
+                  {field.options && field.options.length > 0 && (
+                    <div className="grid gap-1.5 sm:grid-cols-3">
+                      {field.options.map((opt, idx) => (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          onClick={() => onAnswerForm(field.key, opt.value, opt.label)}
+                          className="group flex flex-col items-start rounded-md border border-zinc-800 bg-zinc-900/70 px-2.5 py-2 text-left transition-colors hover:border-orange-500/70"
+                        >
+                          <span className="text-[12px] font-medium text-zinc-100 group-hover:text-orange-400">
+                            {idx + 1}. {opt.label}
+                          </span>
+                          {opt.description && (
+                            <span className="mt-0.5 line-clamp-2 text-[11px] text-zinc-400">
+                              {opt.description}
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Inline Permission Approval Bar directly on collapsed card */}
+          {liveSession?.permission && (
+            <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-orange-500/40 bg-zinc-950 px-3 py-2 text-[12px]">
+              <div className="min-w-0 truncate font-mono text-zinc-200">
+                <span className="text-orange-400">
+                  Allow {liveSession.permission.action}:{" "}
+                </span>
+                {liveSession.permission.resources.join(" ")}
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => onApprove("once")}
+                  className="rounded bg-orange-600 px-2.5 py-1 font-medium text-white hover:bg-orange-500"
+                >
+                  Allow once
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onApprove("always")}
+                  className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-zinc-200 hover:border-zinc-600"
+                >
+                  Always
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onApprove("reject")}
+                  className="rounded px-2 py-1 text-zinc-400 hover:bg-zinc-900 hover:text-red-400"
+                >
+                  Reject
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Inline Collapsible Diff Viewer */}
+          {showDiff && filesChanged.length > 0 && (
+            <InlineDiffViewer
+              files={filesChanged}
+              onAcceptAndComplete={onComplete}
+            />
+          )}
         </div>
       )}
     </li>
@@ -2687,7 +3057,7 @@ function RowEditor({
     repo?: string,
     note?: string,
   ) => void;
-  onApprove: () => void;
+  onApprove: (decision?: "once" | "always" | "reject") => void;
   onAnswerForm: (fieldKey: string, value: string, label: string) => void;
   onStartCountdown?: () => void;
   onDemote?: (t: Task) => void;
@@ -3079,18 +3449,43 @@ function RowEditor({
 
               {/* Fallback if a tool permission is pending */}
               {liveSession?.permission && (
-                <div className="flex items-center justify-between gap-2 rounded border border-orange-500/40 bg-zinc-950 px-3 py-2 text-[12px]">
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-orange-500/40 bg-zinc-950 px-3 py-2 text-[12px]">
                   <div className="min-w-0 truncate font-mono text-zinc-200">
                     <span className="text-orange-400">Allow {liveSession.permission.action}: </span>
                     {liveSession.permission.resources.join(" ")}
                   </div>
-                  <button
-                    onClick={onApprove}
-                    className="shrink-0 rounded bg-orange-600 px-2.5 py-1 font-medium text-white hover:bg-orange-500"
-                  >
-                    Allow
-                  </button>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => onApprove("once")}
+                      className="rounded bg-orange-600 px-2.5 py-1 font-medium text-white hover:bg-orange-500"
+                    >
+                      Allow once
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onApprove("always")}
+                      className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-zinc-200 hover:border-zinc-600"
+                    >
+                      Always
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onApprove("reject")}
+                      className="rounded px-2 py-1 text-zinc-400 hover:bg-zinc-900 hover:text-red-400"
+                    >
+                      Reject
+                    </button>
+                  </div>
                 </div>
+              )}
+
+              {/* Inline File Diff Viewer inside Expanded Drawer */}
+              {summary?.filesChanged && summary.filesChanged.length > 0 && (
+                <InlineDiffViewer
+                  files={summary.filesChanged}
+                  onAcceptAndComplete={onComplete}
+                />
               )}
 
               {/* 3. Latest OpenCode Outcome (Markdown) + Checkpoints */}
@@ -3124,8 +3519,16 @@ function RowEditor({
                         >
                           {turns.map((turn) => (
                             <li key={turn.id} className="space-y-1 text-zinc-400">
-                              <div className="font-mono text-[11px] text-zinc-500">
-                                {turn.role === "user" ? "you" : server}
+                              <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-zinc-500">
+                                <span>{turn.role === "user" ? "you" : server}</span>
+                                {turn.tools.slice(0, 3).map((tb, idx) => (
+                                  <span
+                                    key={idx}
+                                    className="max-w-60 truncate rounded border border-zinc-800/80 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-400"
+                                  >
+                                    {tb}
+                                  </span>
+                                ))}
                               </div>
                               {turn.text && <SimpleMarkdown text={turn.text} />}
                             </li>

@@ -1167,6 +1167,21 @@ export async function interruptOpenCodeSession(
   }).catch(() => {});
 }
 
+export type SessionFileDiff = {
+  file: string;
+  shortFile: string;
+  additions: number;
+  deletions: number;
+  patch: string;
+};
+
+export type SessionToolStep = {
+  name: string;
+  detail: string;
+  label: string;
+  status: "running" | "completed" | "error";
+};
+
 export type SessionTurn = {
   id: string;
   role: "user" | "assistant";
@@ -1178,6 +1193,10 @@ export type SessionTurn = {
 export type SessionSummary = {
   lastAssistantText: string;
   lastToolCall?: string;
+  recentTools: SessionToolStep[];
+  filesChanged: SessionFileDiff[];
+  totalAdditions: number;
+  totalDeletions: number;
   turns: SessionTurn[];
   updatedAt?: number;
 };
@@ -1191,13 +1210,45 @@ export function invalidateSessionSummary(sessionID: string) {
   }
 }
 
+function shortFilePath(p: string): string {
+  const clean = p.trim().replace(/^\/+/, "");
+  const parts = clean.split("/");
+  return parts.length > 2 ? parts.slice(-2).join("/") : clean;
+}
+
+function stripPatchHeader(patch: string): string {
+  const lines = patch.split("\n");
+  const idx = lines.findIndex((l) => l.startsWith("@@"));
+  const body = idx !== -1 ? lines.slice(idx) : lines;
+  return body.slice(0, 60).join("\n");
+}
+
+function buildFallbackPatch(oldStr?: string, newStr?: string): {
+  patch: string;
+  additions: number;
+  deletions: number;
+} {
+  const oldLines = oldStr ? oldStr.split("\n") : [];
+  const newLines = newStr ? newStr.split("\n") : [];
+  const delPreview = oldLines.slice(0, 18).map((l) => `- ${l}`);
+  const addPreview = newLines.slice(0, 24).map((l) => `+ ${l}`);
+  const header = `@@ -1,${oldLines.length} +1,${newLines.length} @@`;
+  return {
+    patch: [header, ...delPreview, ...addPreview].join("\n"),
+    additions: newLines.length,
+    deletions: oldLines.length,
+  };
+}
+
 export async function fetchOpenCodeSessionSummary(
   sessionID: string,
   knownUpdatedAt = 0,
   serverId?: string,
+  forceRefresh = false,
 ): Promise<SessionSummary | null> {
   const cached = summaryCache.get(sessionID);
   if (
+    !forceRefresh &&
     cached &&
     cached.summary.lastAssistantText &&
     knownUpdatedAt > 0 &&
@@ -1224,7 +1275,24 @@ export async function fetchOpenCodeSessionSummary(
           type?: string;
           text?: string;
           name?: string;
-          state?: { status?: string; input?: { command?: string; path?: string } };
+          state?: {
+            status?: string;
+            input?: {
+              command?: string;
+              path?: string;
+              oldString?: string;
+              newString?: string;
+              content?: string;
+            };
+            metadata?: {
+              files?: Array<{
+                file?: string;
+                patch?: string;
+                additions?: number;
+                deletions?: number;
+              }>;
+            };
+          };
         }>;
       }>;
     };
@@ -1234,6 +1302,72 @@ export async function fetchOpenCodeSessionSummary(
     let lastToolCall: string | undefined;
     let updatedAt = knownUpdatedAt;
     const rawTurns: SessionTurn[] = [];
+    const allToolSteps: SessionToolStep[] = [];
+    const fileDiffMap = new Map<string, SessionFileDiff>();
+
+    // Walk chronologically from oldest to newest so file diffs & tool steps accumulate in order
+    const chronological = [...msgs].reverse();
+    for (const m of chronological) {
+      if (m.type !== "assistant") continue;
+      for (const part of m.content ?? []) {
+        if (part.type !== "tool" || !part.name) continue;
+        const rawDetail =
+          part.state?.input?.command ||
+          (part.state?.input?.path ? shortFilePath(part.state.input.path) : "");
+        const shortDetail =
+          rawDetail && rawDetail.length > 48 ? `${rawDetail.slice(0, 45)}…` : rawDetail;
+        const label = shortDetail ? `${part.name} ${shortDetail}` : part.name;
+        const st = part.state?.status;
+        const status: SessionToolStep["status"] =
+          st === "running" || st === "pending"
+            ? "running"
+            : st === "error"
+              ? "error"
+              : "completed";
+        allToolSteps.push({
+          name: part.name,
+          detail: shortDetail || "",
+          label,
+          status,
+        });
+
+        const metaFiles = part.state?.metadata?.files;
+        if (Array.isArray(metaFiles) && metaFiles.length > 0) {
+          for (const mf of metaFiles) {
+            const file = mf.file?.trim();
+            if (!file) continue;
+            const prev = fileDiffMap.get(file);
+            const cleanPatch = mf.patch ? stripPatchHeader(mf.patch) : "";
+            const add = typeof mf.additions === "number" ? mf.additions : 0;
+            const del = typeof mf.deletions === "number" ? mf.deletions : 0;
+            fileDiffMap.set(file, {
+              file,
+              shortFile: shortFilePath(file),
+              additions: (prev?.additions ?? 0) + add,
+              deletions: (prev?.deletions ?? 0) + del,
+              patch: cleanPatch || prev?.patch || "",
+            });
+          }
+        } else if (
+          (part.name === "edit" || part.name === "write") &&
+          part.state?.input?.path
+        ) {
+          const file = part.state.input.path.trim();
+          const prev = fileDiffMap.get(file);
+          const fb =
+            part.name === "edit"
+              ? buildFallbackPatch(part.state.input.oldString, part.state.input.newString)
+              : buildFallbackPatch(undefined, part.state.input.content);
+          fileDiffMap.set(file, {
+            file,
+            shortFile: shortFilePath(file),
+            additions: (prev?.additions ?? 0) + fb.additions,
+            deletions: (prev?.deletions ?? 0) + fb.deletions,
+            patch: fb.patch || prev?.patch || "",
+          });
+        }
+      }
+    }
 
     for (const m of msgs) {
       const msgTime = m.time?.completed ?? m.time?.created ?? 0;
@@ -1285,10 +1419,21 @@ export async function fetchOpenCodeSessionSummary(
     }
 
     const turns = rawTurns.slice(0, 20).reverse();
+    const filesChanged = Array.from(fileDiffMap.values());
+    let totalAdditions = 0;
+    let totalDeletions = 0;
+    for (const f of filesChanged) {
+      totalAdditions += f.additions;
+      totalDeletions += f.deletions;
+    }
 
     const summary: SessionSummary = {
       lastAssistantText,
       lastToolCall,
+      recentTools: allToolSteps.slice(-3),
+      filesChanged,
+      totalAdditions,
+      totalDeletions,
       turns,
       updatedAt,
     };
