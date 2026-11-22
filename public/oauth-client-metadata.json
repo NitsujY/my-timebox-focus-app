@@ -1,7 +1,7 @@
 {
-  "client_id": "https://todolist-md.com/oauth-client-metadata.json",
+  "client_id": "https://tasktorun.online/oauth-client-metadata.json",
   "client_name": "Timebox Focus",
-  "redirect_uris": ["https://todolist-md.com/"],
+  "redirect_uris": ["https://tasktorun.online/"],
   "token_endpoint_auth_method": "none",
   "grant_types": ["authorization_code", "refresh_token"],
   "response_types": ["code"],

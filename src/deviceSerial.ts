@@ -3,7 +3,7 @@
 // 115200 baud). No relay, no LAN, and no radios on the device — BLE + WiFi
 // starved IRAM/heap and made the display flicker; the cable replaced them.
 // Web Serial is a permissioned browser API, so it works from the HTTPS deploy
-// (todolist-md.com). Chrome/Edge only (Safari/Firefox have no Web Serial).
+// (tasktorun.online). Chrome/Edge only (Safari/Firefox have no Web Serial).
 //
 // Fire-and-forget: if the device is unplugged or the user never picks its
 // port in the browser dialog, the timer behaves exactly as before and the

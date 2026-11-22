@@ -540,7 +540,7 @@ export async function verifyServerConnection(
       latencyMs,
       error:
         base.includes("127.0.0.1:49374") || base.includes("localhost:49374")
-          ? `Unreachable or blocked by CORS — run: opencode service set cors ${typeof window !== "undefined" ? window.location.origin : "https://todolist-md.com"} && opencode service start`
+          ? `Unreachable or blocked by CORS — run: opencode service set cors ${typeof window !== "undefined" ? window.location.origin : "https://tasktorun.online"} && opencode service start`
           : e instanceof Error
             ? `Unreachable (${e.message})`
             : "Unreachable — check endpoint URL, Tailscale/LAN, or CORS",

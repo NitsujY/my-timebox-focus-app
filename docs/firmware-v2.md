@@ -21,7 +21,7 @@ WiFi stays on for **NTP** (and mDNS, `timebox.local`) so the device works as a
 normal clock with the app closed — but there are no on-device TLS calls anymore
 (the log-&-stop comment moved to the app). Like BLE, Web Serial is a
 permissioned browser API, so it **works from the HTTPS-deployed app**
-(`todolist-md.com`). Chrome/Edge only (Safari/Firefox have no Web Serial).
+(`tasktorun.online`). Chrome/Edge only (Safari/Firefox have no Web Serial).
 
 ```
 app ──USB CDC @115200, one JSON object per line──▶ ESP32
