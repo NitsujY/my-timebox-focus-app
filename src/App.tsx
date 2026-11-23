@@ -847,7 +847,11 @@ export default function App() {
     const repo = extra?.repo || p.repo || "";
     const targetSrv = resolveServer(extra?.server || p.server || ocConfig.defaultServerId, ocConfig);
     const serverId = targetSrv.id;
-    const model = extra?.model || "";
+    const model =
+      extra?.model ||
+      targetSrv.defaultModel ||
+      ocConfig.defaultModel ||
+      "";
     const prompt = extra?.prompt || p.prompt || "";
     const note = extra?.note || "";
     const linkedSessions = extra?.sessions ? [...extra.sessions] : [];
@@ -1136,7 +1140,13 @@ export default function App() {
         ocConfig,
       );
       const serverId = targetSrv.id;
-      const modelKey = modelOverride ?? meta.model ?? existingLive?.modelKey ?? "";
+      const modelKey =
+        modelOverride ??
+        (meta.model || undefined) ??
+        (targetSrv.defaultModel || undefined) ??
+        (ocConfig.defaultModel || undefined) ??
+        existingLive?.modelKey ??
+        "";
 
       let sid = latestSid;
       try {
@@ -1677,6 +1687,7 @@ export default function App() {
             }
             onSyncComments={syncComments}
             onSyncServerProjects={handleSyncServerProjects}
+            ocModelsByServer={ocModelsByServer}
             onReset={() => {
               localStorage.clear();
               location.reload();
@@ -5426,6 +5437,7 @@ function SettingsPage({
   unsynced,
   onSyncComments,
   onSyncServerProjects,
+  ocModelsByServer = {},
 }: {
   prefs: Prefs;
   onPrefs: (p: Partial<Prefs>) => void;
@@ -5448,7 +5460,9 @@ function SettingsPage({
   unsynced: number;
   onSyncComments: () => void;
   onSyncServerProjects?: (serverId: string) => Promise<number | void>;
+  ocModelsByServer?: Record<string, OpenCodeModelOption[]>;
 }) {
+  const [activeTab, setActiveTab] = useState<"fleet" | "focus" | "hardware" | "system">("fleet");
   const [editingSrvId, setEditingSrvId] = useState<string | null>(null);
   const [newRepoLabel, setNewRepoLabel] = useState("");
   const [newRepoDir, setNewRepoDir] = useState("");
@@ -5460,10 +5474,28 @@ function SettingsPage({
   const [newDir, setNewDir] = useState("/Users/justinyu");
   const [showAddServer, setShowAddServer] = useState(false);
 
-  const h = "mb-2 text-[13px] font-medium text-zinc-500";
-  const row = "flex items-center justify-between gap-4 py-2";
+  const card = "rounded-lg border border-zinc-800/90 bg-zinc-900/40 p-4 space-y-3";
+  const row = "flex items-center justify-between gap-4 py-2 border-b border-zinc-800/40 last:border-b-0";
   const toggle = (on: boolean) =>
     `relative h-6 w-10 shrink-0 rounded-full transition-colors ${on ? "bg-orange-500" : "bg-zinc-700"}`;
+
+  const onlineServerCount = ocConfig.servers.filter(
+    (s) => ocServerOnlineById[s.id] ?? ocVerifyById[s.id]?.ok ?? false,
+  ).length;
+
+  // Aggregate all discovered models across servers
+  const allDiscoveredModels = useMemo(() => {
+    const map = new Map<string, OpenCodeModelOption>();
+    for (const srv of ocConfig.servers) {
+      const list = ocModelsByServer[srv.id] ?? [];
+      for (const m of list) {
+        if (!map.has(m.key)) {
+          map.set(m.key, m);
+        }
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [ocConfig.servers, ocModelsByServer]);
 
   const updateServerField = (srvId: string, patch: Partial<OpenCodeServer>) => {
     const nextServers = ocConfig.servers.map((s) =>
@@ -5503,578 +5535,911 @@ function SettingsPage({
   };
 
   return (
-    <div className="w-full space-y-8">
-      <section className="space-y-3">
-        <div className="flex items-center justify-between gap-2">
+    <div className="w-full space-y-6">
+      {/* Header & Section Navigation */}
+      <div className="flex flex-col gap-4 border-b border-zinc-800/80 pb-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-[14px] font-semibold text-zinc-100">
-              Execution Servers &amp; Projects
-            </h2>
-            <p className="text-[12px] text-zinc-500">
-              Each server carries its own projects, endpoint, and workspace path.
+            <h1 className="text-[17px] font-semibold text-zinc-100 tracking-tight">Console Settings</h1>
+            <p className="text-[12px] text-zinc-400">
+              Configure execution fleet, default AI models, focus protocols, and hardware display.
             </p>
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-2">
             <a
               href="?mock=1"
-              className="rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-[12px] text-zinc-300 hover:border-zinc-700 hover:text-zinc-100"
+              className="rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-[12px] text-zinc-300 hover:border-zinc-700 hover:text-zinc-100 transition-colors"
               title="Open interactive Multi-Server Flight Deck mockup"
             >
-              Mockup ↗
+              Flight Deck Mockup ↗
             </a>
             <button
               type="button"
               disabled={ocVerifying}
               onClick={onVerifyOpenCode}
-              className="rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-[12px] font-medium text-orange-400 hover:border-zinc-700 disabled:opacity-50"
+              className="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1 text-[12px] font-medium text-orange-400 hover:border-zinc-700 hover:text-orange-300 disabled:opacity-50 transition-colors"
             >
-              {ocVerifying ? "Verifying…" : "Verify all"}
+              {ocVerifying ? "Verifying fleet…" : "Verify fleet"}
             </button>
           </div>
         </div>
 
-        {queuedCount > 0 && (
-          <div className="flex items-center justify-between gap-2 rounded-md border border-amber-500/30 bg-zinc-900/90 px-3 py-2 text-[12px] text-amber-300">
-            <span>
-              ⏳ {queuedCount} task{queuedCount === 1 ? "" : "s"} queued in Todoist
-            </span>
-            {ocConnected && (
-              <button
-                type="button"
-                onClick={onRunQueued}
-                className="rounded bg-orange-600 px-2.5 py-0.5 text-[11px] font-medium text-white hover:bg-orange-500"
-              >
-                ▶ Run now
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* Server Fleet List — Clean Collapsed Cards by Default */}
-        <ul className="space-y-2.5">
-          {ocConfig.servers.map((srv) => {
-            const vRes = ocVerifyById[srv.id];
-            const isOnline = ocServerOnlineById[srv.id] ?? vRes?.ok ?? false;
-            const isDefault = ocConfig.defaultServerId === srv.id;
-            const isEditing = editingSrvId === srv.id;
-            const resolvedBase = resolveOpenCodeBase(srv.endpoint);
-            const srvRepos = srv.repos ?? [];
-
-            return (
-              <li
-                key={srv.id}
-                className="rounded-md border border-zinc-800/90 bg-zinc-900/40 p-3.5 text-[13px]"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`h-2 w-2 shrink-0 rounded-full ${
-                        ocVerifying
-                          ? "bg-orange-400 animate-ping"
-                          : isOnline
-                            ? "bg-orange-500"
-                            : "bg-zinc-600"
-                      }`}
-                    />
-                    <span className="font-medium text-zinc-100">{srv.name}</span>
-                    <span className="font-mono text-[12px] text-zinc-500">~{srv.id}</span>
-                    {isDefault && (
-                      <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400">
-                        default
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="flex items-center gap-2.5 text-[12px]">
-                    <span
-                      className={`font-mono text-[11px] ${
-                        vRes?.ok ? "text-orange-400" : "text-zinc-500"
-                      }`}
-                    >
-                      {vRes?.ok
-                        ? `${vRes.latencyMs}ms · ${vRes.sessionCount} ses`
-                        : "offline"}
-                    </span>
-                    {!isDefault && (
-                      <button
-                        type="button"
-                        onClick={() => onOcConfig({ defaultServerId: srv.id })}
-                        className="text-zinc-500 hover:text-zinc-300"
-                      >
-                        Set default
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => setEditingSrvId(isEditing ? null : srv.id)}
-                      className="text-zinc-400 hover:text-zinc-100"
-                    >
-                      {isEditing ? "Done" : "Edit"}
-                    </button>
-                  </div>
-                </div>
-
-                <div className="mt-1 font-mono text-[11px] text-zinc-500">
-                  {resolvedBase}
-                  {!srv.endpoint.trim() && resolvedBase === "/opencode-api" ? " (local bridge)" : ""} ·{" "}
-                  {srv.defaultDir || "/Users/justinyu"}
-                </div>
-
-                {vRes && !vRes.ok && vRes.error && (
-                  <p className="mt-2 rounded border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 font-mono text-[11px] text-zinc-400">
-                    {vRes.error}
-                  </p>
-                )}
-
-                {/* Associated Projects / Repos */}
-                <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-                  <span className="mr-0.5 text-[11px] text-zinc-500">Projects:</span>
-                  {onSyncServerProjects && (
-                    <button
-                      type="button"
-                      disabled={syncingSrvId === srv.id}
-                      onClick={async () => {
-                        setSyncingSrvId(srv.id);
-                        try {
-                          await onSyncServerProjects(srv.id);
-                        } finally {
-                          setSyncingSrvId(null);
-                        }
-                      }}
-                      className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[10px] text-orange-400 hover:border-orange-500/50 hover:text-orange-300 disabled:opacity-50"
-                      title="Fetch all projects known to OpenCode on this server"
-                    >
-                      {syncingSrvId === srv.id ? "Syncing…" : "⟳ Sync from OpenCode"}
-                    </button>
-                  )}
-                  {srvRepos.length === 0 ? (
-                    <span className="font-mono text-[11px] text-zinc-600">
-                      ~ ({srv.defaultDir || "/Users/justinyu"})
-                    </span>
-                  ) : (
-                    srvRepos.map((r) => (
-                      <span
-                        key={r.label}
-                        title={r.dir}
-                        className="inline-flex items-center gap-1 rounded border border-zinc-800/80 bg-zinc-950/60 px-2 py-0.5 font-mono text-[11px] text-zinc-300"
-                      >
-                        {shortRepo(r.label)}
-                        {isEditing && (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              updateServerField(srv.id, {
-                                repos: srvRepos.filter((x) => x.label !== r.label),
-                              })
-                            }
-                            className="ml-0.5 text-zinc-500 hover:text-red-400"
-                            title={`Remove ${r.label}`}
-                          >
-                            ×
-                          </button>
-                        )}
-                      </span>
-                    ))
-                  )}
-                </div>
-
-                {/* Collapsible Edit Drawer */}
-                {isEditing && (
-                  <div className="mt-3 space-y-2.5 border-t border-zinc-800/80 pt-3 text-[12px]">
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                      <div>
-                        <label className="mb-1 block text-[11px] text-zinc-500">
-                          Endpoint URL (empty = local bridge)
-                        </label>
-                        <input
-                          className={`${input} py-1.5 font-mono text-[12px]`}
-                          placeholder="http://127.0.0.1:49374/api or http://127.0.0.1:5173/opencode-api"
-                          value={srv.endpoint}
-                          onChange={(e) => {
-                            updateServerField(srv.id, { endpoint: e.target.value.trim() });
-                          }}
-                        />
-                      </div>
-                      <div>
-                        <label className="mb-1 block text-[11px] text-zinc-500">
-                          Default Workspace Path
-                        </label>
-                        <input
-                          className={`${input} py-1.5 font-mono text-[12px]`}
-                          placeholder="/Users/justinyu"
-                          value={srv.defaultDir ?? "/Users/justinyu"}
-                          onChange={(e) => {
-                            updateServerField(srv.id, {
-                              defaultDir: e.target.value.trim() || "/Users/justinyu",
-                            });
-                          }}
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="mb-1 block text-[11px] text-zinc-500">
-                        Basic Auth Password (optional)
-                      </label>
-                      <input
-                        type="password"
-                        className={`${input} py-1.5 font-mono text-[12px]`}
-                        placeholder="Paste password from ~/.config/opencode/service.json"
-                        value={srv.password ?? ""}
-                        onChange={(e) => {
-                          updateServerField(srv.id, { password: e.target.value.trim() });
-                        }}
-                      />
-                    </div>
-
-                    {/* Add Project / Repo to this Server */}
-                    <div className="space-y-1.5 pt-1">
-                      <label className="block text-[11px] text-zinc-500">
-                        Add project / repo to ~{srv.id}
-                      </label>
-                      <div className="flex gap-1.5">
-                        <input
-                          value={newRepoLabel}
-                          onChange={(e) => setNewRepoLabel(e.target.value)}
-                          placeholder="Name (e.g. vyond/devops)"
-                          className="w-36 rounded border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-[12px] text-zinc-200 outline-none placeholder:text-zinc-600"
-                        />
-                        <input
-                          value={newRepoDir}
-                          onChange={(e) => setNewRepoDir(e.target.value)}
-                          placeholder={`Path (e.g. ${srv.defaultDir || "/workspace"}/devops)`}
-                          className="min-w-0 flex-1 rounded border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-[12px] text-zinc-200 outline-none placeholder:text-zinc-600"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const rawDir = newRepoDir.trim();
-                            const srvRoot = srv.defaultDir || "/workspace";
-                            const dir = rawDir.startsWith("~/")
-                              ? `${srvRoot.replace(/\/+$/, "")}/${rawDir.slice(2)}`
-                              : rawDir;
-                            if (!dir) return;
-                            const lbl = newRepoLabel.trim() || pathToRepoLabel(dir, srvRoot);
-                            updateServerField(srv.id, {
-                              repos: [
-                                ...srvRepos.filter((x) => x.label !== lbl && x.dir !== dir),
-                                { label: lbl, dir },
-                              ],
-                            });
-                            setNewRepoLabel("");
-                            setNewRepoDir("");
-                          }}
-                          className="shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-[12px] text-zinc-200 hover:bg-zinc-700"
-                        >
-                          ＋ Add
-                        </button>
-                      </div>
-                    </div>
-
-                    {ocConfig.servers.length > 1 && (
-                      <div className="flex justify-end pt-1">
-                        <button
-                          type="button"
-                          onClick={() => removeServer(srv.id)}
-                          className="text-[12px] text-red-400 hover:text-red-300"
-                        >
-                          Remove server
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-
-        {/* Add Server Node Drawer */}
-        {!showAddServer ? (
+        {/* Clean Segmented Tabs */}
+        <div className="flex items-center gap-1.5 overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950 p-1">
           <button
             type="button"
-            onClick={() => setShowAddServer(true)}
-            className="w-full rounded-md border border-dashed border-zinc-800 py-2 text-[12px] text-zinc-400 hover:border-zinc-700 hover:bg-zinc-900/50 hover:text-zinc-200"
+            onClick={() => setActiveTab("fleet")}
+            className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-[13px] font-medium transition-all ${
+              activeTab === "fleet"
+                ? "bg-zinc-800 text-zinc-100 shadow-sm"
+                : "text-zinc-400 hover:text-zinc-200"
+            }`}
           >
-            ＋ Add execution server
+            <span>⚡ Fleet &amp; Agents</span>
+            <span
+              className={`inline-flex items-center rounded-full px-1.5 py-0.2 font-mono text-[10px] ${
+                onlineServerCount > 0
+                  ? "border border-emerald-800/40 bg-emerald-950/70 text-emerald-400"
+                  : "bg-zinc-800 text-zinc-500"
+              }`}
+            >
+              {onlineServerCount}/{ocConfig.servers.length} online
+            </span>
           </button>
-        ) : (
-          <div className="space-y-2 rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-[12px]">
-            <div className="flex items-center justify-between">
-              <span className="font-medium text-zinc-300">New Execution Server</span>
+          <button
+            type="button"
+            onClick={() => setActiveTab("focus")}
+            className={`rounded-md px-3 py-1.5 text-[13px] font-medium transition-all ${
+              activeTab === "focus"
+                ? "bg-zinc-800 text-zinc-100 shadow-sm"
+                : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            ⏱ Focus &amp; Timer
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("hardware")}
+            className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[13px] font-medium transition-all ${
+              activeTab === "hardware"
+                ? "bg-zinc-800 text-zinc-100 shadow-sm"
+                : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            <span>📟 Hardware &amp; Sync</span>
+            {prefs.deviceOn && (
+              <span className="h-1.5 w-1.5 rounded-full bg-orange-400" title="ESP32 companion enabled" />
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("system")}
+            className={`rounded-md px-3 py-1.5 text-[13px] font-medium transition-all ${
+              activeTab === "system"
+                ? "bg-zinc-800 text-zinc-100 shadow-sm"
+                : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            ⚙ System &amp; Data
+          </button>
+        </div>
+      </div>
+
+      {/* TAB 1: FLEET & AGENTS */}
+      {activeTab === "fleet" && (
+        <div className="space-y-6">
+          {queuedCount > 0 && (
+            <div className="flex items-center justify-between gap-3 rounded-md border border-amber-500/30 bg-amber-950/20 px-3.5 py-2.5 text-[12px] text-amber-300">
+              <span className="flex items-center gap-2">
+                <span>⏳</span>
+                <span>
+                  <strong>{queuedCount}</strong> task{queuedCount === 1 ? "" : "s"} queued in Todoist
+                </span>
+              </span>
+              {ocConnected && (
+                <button
+                  type="button"
+                  onClick={onRunQueued}
+                  className="rounded bg-orange-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-orange-500 transition-colors"
+                >
+                  ▶ Run queued now
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Global Default Model Card */}
+          <div className="rounded-lg border border-zinc-800/90 bg-zinc-900/40 p-4 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-[13px] font-semibold text-zinc-100">Global Default Model</h3>
+                  <span className="rounded bg-orange-500/10 px-1.5 py-0.5 font-mono text-[10px] text-orange-400 border border-orange-500/20">
+                    Agent Dispatch
+                  </span>
+                </div>
+                <p className="mt-0.5 text-[12px] text-zinc-500">
+                  Default model used for newly created sessions or queued runs when not overridden per task or server.
+                </p>
+              </div>
+
+              <select
+                aria-label="Global Default OpenCode Model"
+                value={ocConfig.defaultModel ?? ""}
+                onChange={(e) => onOcConfig({ defaultModel: e.target.value })}
+                className="max-w-xs truncate rounded-md border border-zinc-800 bg-zinc-950 px-3 py-1.5 font-mono text-[12px] text-zinc-200 outline-none focus:border-zinc-700"
+              >
+                <option value="">(Server default — let each node decide)</option>
+                {allDiscoveredModels.map((m) => (
+                  <option key={m.key} value={m.key}>
+                    {m.name} ({m.providerID})
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Execution Fleet Nodes List */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <h3 className="text-[13px] font-semibold text-zinc-100">
+                  Execution Servers &amp; Projects ({ocConfig.servers.length})
+                </h3>
+                <p className="text-[12px] text-zinc-500">
+                  Workspaces, project roots, and per-node default models.
+                </p>
+              </div>
               <button
                 type="button"
-                onClick={() => setShowAddServer(false)}
-                className="text-zinc-500 hover:text-zinc-300"
+                onClick={() => setShowAddServer(true)}
+                className="rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-[12px] text-zinc-300 hover:border-zinc-700 hover:text-zinc-100"
               >
-                Cancel
+                ＋ Add server
               </button>
             </div>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+
+            <ul className="space-y-3">
+              {ocConfig.servers.map((srv) => {
+                const vRes = ocVerifyById[srv.id];
+                const isOnline = ocServerOnlineById[srv.id] ?? vRes?.ok ?? false;
+                const isDefault = ocConfig.defaultServerId === srv.id;
+                const isEditing = editingSrvId === srv.id;
+                const resolvedBase = resolveOpenCodeBase(srv.endpoint);
+                const srvRepos = srv.repos ?? [];
+                const srvModels = ocModelsByServer[srv.id] ?? [];
+
+                return (
+                  <li
+                    key={srv.id}
+                    className="rounded-lg border border-zinc-800/90 bg-zinc-900/40 p-4 text-[13px] space-y-3"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`h-2.5 w-2.5 shrink-0 rounded-full transition-all ${
+                            ocVerifying
+                              ? "bg-orange-400 animate-ping"
+                              : isOnline
+                                ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.4)]"
+                                : "bg-zinc-600"
+                          }`}
+                        />
+                        <span className="font-semibold text-zinc-100">{srv.name}</span>
+                        <span className="font-mono text-[12px] text-zinc-500">~{srv.id}</span>
+                        {isDefault ? (
+                          <span className="rounded bg-orange-950/50 border border-orange-500/30 px-1.5 py-0.5 font-mono text-[10px] text-orange-400">
+                            primary default
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => onOcConfig({ defaultServerId: srv.id })}
+                            className="rounded bg-zinc-800/80 px-2 py-0.5 text-[11px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-colors"
+                          >
+                            Set primary
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-2.5 text-[12px]">
+                        <span
+                          className={`font-mono text-[11px] ${
+                            vRes?.ok ? "text-emerald-400" : "text-zinc-500"
+                          }`}
+                        >
+                          {vRes?.ok
+                            ? `${vRes.latencyMs}ms · ${vRes.sessionCount} active ses`
+                            : isOnline
+                              ? "online"
+                              : "offline"}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setEditingSrvId(isEditing ? null : srv.id)}
+                          className="rounded border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-[11px] text-zinc-300 hover:border-zinc-700 hover:text-zinc-100"
+                        >
+                          {isEditing ? "Close" : "Edit node"}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="font-mono text-[11px] text-zinc-500">
+                      {resolvedBase}
+                      {!srv.endpoint.trim() && resolvedBase === "/opencode-api" ? " (local Vite bridge)" : ""} ·{" "}
+                      {srv.defaultDir || "/Users/justinyu"}
+                    </div>
+
+                    {vRes && !vRes.ok && vRes.error && (
+                      <p className="rounded border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 font-mono text-[11px] text-zinc-400">
+                        {vRes.error}
+                      </p>
+                    )}
+
+                    {/* Per-Server Default Model */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-zinc-800/60 bg-zinc-950/60 px-3 py-2 text-[12px]">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-zinc-400">Default Model for ~{srv.id}:</span>
+                      </div>
+                      <select
+                        aria-label={`Default Model for ${srv.name}`}
+                        value={srv.defaultModel ?? ""}
+                        onChange={(e) => updateServerField(srv.id, { defaultModel: e.target.value })}
+                        className="max-w-xs truncate rounded border border-zinc-800 bg-zinc-900 px-2.5 py-1 font-mono text-[11px] text-zinc-200 outline-none focus:border-zinc-700"
+                      >
+                        <option value="">
+                          {ocConfig.defaultModel
+                            ? `Inherit global (${shortModelLabel(ocConfig.defaultModel)})`
+                            : "(Server default)"}
+                        </option>
+                        {srvModels.map((m) => (
+                          <option key={m.key} value={m.key}>
+                            {m.name} ({m.providerID}){m.isDefault ? " [node default]" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Associated Projects / Repos */}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="mr-0.5 text-[11px] text-zinc-500">Projects:</span>
+                      {onSyncServerProjects && (
+                        <button
+                          type="button"
+                          disabled={syncingSrvId === srv.id}
+                          onClick={async () => {
+                            setSyncingSrvId(srv.id);
+                            try {
+                              await onSyncServerProjects(srv.id);
+                            } finally {
+                              setSyncingSrvId(null);
+                            }
+                          }}
+                          className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[10px] text-orange-400 hover:border-orange-500/50 hover:text-orange-300 disabled:opacity-50"
+                          title="Fetch all projects known to OpenCode on this server"
+                        >
+                          {syncingSrvId === srv.id ? "Syncing…" : "⟳ Sync from OpenCode"}
+                        </button>
+                      )}
+                      {srvRepos.length === 0 ? (
+                        <span className="font-mono text-[11px] text-zinc-600">
+                          ~ ({srv.defaultDir || "/Users/justinyu"})
+                        </span>
+                      ) : (
+                        srvRepos.map((r) => (
+                          <span
+                            key={r.label}
+                            title={r.dir}
+                            className="inline-flex items-center gap-1 rounded border border-zinc-800/80 bg-zinc-950/80 px-2 py-0.5 font-mono text-[11px] text-zinc-300"
+                          >
+                            {shortRepo(r.label)}
+                            {isEditing && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateServerField(srv.id, {
+                                    repos: srvRepos.filter((x) => x.label !== r.label),
+                                  })
+                                }
+                                className="ml-0.5 text-zinc-500 hover:text-red-400"
+                                title={`Remove ${r.label}`}
+                              >
+                                ×
+                              </button>
+                            )}
+                          </span>
+                        ))
+                      )}
+                    </div>
+
+                    {/* Collapsible Edit Drawer */}
+                    {isEditing && (
+                      <div className="space-y-3 border-t border-zinc-800/80 pt-3 text-[12px]">
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                          <div>
+                            <label className="mb-1 block text-[11px] text-zinc-500">
+                              Endpoint URL (empty = local bridge)
+                            </label>
+                            <input
+                              className={`${input} py-1.5 font-mono text-[12px]`}
+                              placeholder="http://127.0.0.1:49374/api or http://127.0.0.1:5173/opencode-api"
+                              value={srv.endpoint}
+                              onChange={(e) => {
+                                updateServerField(srv.id, { endpoint: e.target.value.trim() });
+                              }}
+                            />
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-[11px] text-zinc-500">
+                              Default Workspace Path
+                            </label>
+                            <input
+                              className={`${input} py-1.5 font-mono text-[12px]`}
+                              placeholder="/Users/justinyu"
+                              value={srv.defaultDir ?? "/Users/justinyu"}
+                              onChange={(e) => {
+                                updateServerField(srv.id, {
+                                  defaultDir: e.target.value.trim() || "/Users/justinyu",
+                                });
+                              }}
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="mb-1 block text-[11px] text-zinc-500">
+                            Basic Auth Password (optional)
+                          </label>
+                          <input
+                            type="password"
+                            className={`${input} py-1.5 font-mono text-[12px]`}
+                            placeholder="Paste password from ~/.config/opencode/service.json"
+                            value={srv.password ?? ""}
+                            onChange={(e) => {
+                              updateServerField(srv.id, { password: e.target.value.trim() });
+                            }}
+                          />
+                        </div>
+
+                        {/* Add Project / Repo to this Server */}
+                        <div className="space-y-1.5 pt-1">
+                          <label className="block text-[11px] text-zinc-500">
+                            Add project / repo to ~{srv.id}
+                          </label>
+                          <div className="flex gap-1.5">
+                            <input
+                              value={newRepoLabel}
+                              onChange={(e) => setNewRepoLabel(e.target.value)}
+                              placeholder="Name (e.g. vyond/devops)"
+                              className="w-36 rounded border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-[12px] text-zinc-200 outline-none placeholder:text-zinc-600"
+                            />
+                            <input
+                              value={newRepoDir}
+                              onChange={(e) => setNewRepoDir(e.target.value)}
+                              placeholder={`Path (e.g. ${srv.defaultDir || "/workspace"}/devops)`}
+                              className="min-w-0 flex-1 rounded border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-[12px] text-zinc-200 outline-none placeholder:text-zinc-600"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const rawDir = newRepoDir.trim();
+                                const srvRoot = srv.defaultDir || "/workspace";
+                                const dir = rawDir.startsWith("~/")
+                                  ? `${srvRoot.replace(/\/+$/, "")}/${rawDir.slice(2)}`
+                                  : rawDir;
+                                if (!dir) return;
+                                const lbl = newRepoLabel.trim() || pathToRepoLabel(dir, srvRoot);
+                                updateServerField(srv.id, {
+                                  repos: [
+                                    ...srvRepos.filter((x) => x.label !== lbl && x.dir !== dir),
+                                    { label: lbl, dir },
+                                  ],
+                                });
+                                setNewRepoLabel("");
+                                setNewRepoDir("");
+                              }}
+                              className="shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-[12px] text-zinc-200 hover:bg-zinc-700"
+                            >
+                              ＋ Add
+                            </button>
+                          </div>
+                        </div>
+
+                        {ocConfig.servers.length > 1 && (
+                          <div className="flex justify-end pt-1">
+                            <button
+                              type="button"
+                              onClick={() => removeServer(srv.id)}
+                              className="text-[12px] text-red-400 hover:text-red-300"
+                            >
+                              Remove server
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+
+            {/* Add Server Node Drawer */}
+            {!showAddServer ? (
+              <button
+                type="button"
+                onClick={() => setShowAddServer(true)}
+                className="w-full rounded-lg border border-dashed border-zinc-800 py-2.5 text-[12px] text-zinc-400 hover:border-zinc-700 hover:bg-zinc-900/40 hover:text-zinc-200 transition-colors"
+              >
+                ＋ Add execution server (devbox, cloud VM, or homelab)
+              </button>
+            ) : (
+              <div className="space-y-3 rounded-lg border border-zinc-800 bg-zinc-900/70 p-4 text-[12px]">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-zinc-200">New Execution Server</span>
+                  <button
+                    type="button"
+                    onClick={() => setShowAddServer(false)}
+                    className="text-zinc-500 hover:text-zinc-300"
+                  >
+                    Cancel
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <input
+                    className={`${input} py-1.5 font-mono text-[12px]`}
+                    placeholder="ID slug (e.g. devbox-2)"
+                    value={newId}
+                    onChange={(e) => setNewId(e.target.value)}
+                  />
+                  <input
+                    className={`${input} py-1.5 text-[12px]`}
+                    placeholder="Display name (e.g. Cloud Devbox)"
+                    value={newName}
+                    onChange={(e) => setNewName(e.target.value)}
+                  />
+                </div>
+                <input
+                  className={`${input} py-1.5 font-mono text-[12px]`}
+                  placeholder="Endpoint URL (e.g. https://devbox.vyond.ts.net/api)"
+                  value={newEndpoint}
+                  onChange={(e) => setNewEndpoint(e.target.value)}
+                />
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <input
+                    className={`${input} py-1.5 font-mono text-[12px]`}
+                    placeholder="Default dir (/workspace)"
+                    value={newDir}
+                    onChange={(e) => setNewDir(e.target.value)}
+                  />
+                  <input
+                    type="password"
+                    className={`${input} py-1.5 font-mono text-[12px]`}
+                    placeholder="Basic Auth password (optional)"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                  />
+                </div>
+                <div className="flex justify-end pt-1">
+                  <button
+                    type="button"
+                    onClick={addServer}
+                    disabled={!newId.trim()}
+                    className="rounded bg-orange-600 px-3.5 py-1.5 text-[12px] font-medium text-white hover:bg-orange-500 disabled:opacity-40 transition-colors"
+                  >
+                    Save Execution Server
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Automation Options */}
+          <div className="rounded-lg border border-zinc-800/90 bg-zinc-900/40 p-4 space-y-3">
+            <h3 className="text-[13px] font-semibold text-zinc-100">Automation &amp; Queueing</h3>
+            <div className={row}>
+              <div>
+                <span className="text-[13px] font-medium text-zinc-200">
+                  Auto-run queued tasks when server connects
+                </span>
+                <p className="text-[12px] text-zinc-500">
+                  Automatically start tasks marked <code className="font-mono text-zinc-400">queue=1</code> as soon as their target execution node comes online.
+                </p>
+              </div>
+              <button
+                type="button"
+                className={toggle(ocConfig.autoRunQueued)}
+                onClick={() => onOcConfig({ autoRunQueued: !ocConfig.autoRunQueued })}
+              >
+                <span
+                  className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${
+                    ocConfig.autoRunQueued ? "left-4.5" : "left-0.5"
+                  }`}
+                />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 2: FOCUS & TIMER */}
+      {activeTab === "focus" && (
+        <div className="space-y-6">
+          <div className={card}>
+            <div>
+              <h3 className="text-[13px] font-semibold text-zinc-100">Focus Task Capacity</h3>
+              <p className="text-[12px] text-zinc-500">
+                Maximum active tasks allowed simultaneously in the Focus section.
+              </p>
+            </div>
+            <div className="max-w-xs">
               <input
-                className={`${input} py-1.5 font-mono text-[12px]`}
-                placeholder="ID slug (e.g. gpu-box)"
-                value={newId}
-                onChange={(e) => setNewId(e.target.value)}
+                className={input}
+                type="number"
+                inputMode="numeric"
+                min={1}
+                step={1}
+                defaultValue={prefs.focusCap}
+                onBlur={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  const valid = Number.isFinite(n) && n >= 1;
+                  const cap = valid ? n : 3;
+                  if (!valid) e.target.value = String(cap);
+                  if (cap !== prefs.focusCap) onPrefs({ focusCap: cap });
+                }}
               />
-              <input
-                className={`${input} py-1.5 text-[12px]`}
-                placeholder="Display name (e.g. GPU Server)"
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-              />
+              <p className="mt-1 text-[11px] text-zinc-500">
+                Any positive number. Defaults to 3 if empty or invalid.
+              </p>
+            </div>
+          </div>
+
+          <div className={card}>
+            <div>
+              <h3 className="text-[13px] font-semibold text-zinc-100">Duration Presets</h3>
+              <p className="text-[12px] text-zinc-500">
+                Quick timebox intervals (minutes) available for timer presets.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {prefs.durations.map((d) => (
+                <span
+                  key={d}
+                  className="rounded border border-zinc-800 bg-zinc-950 px-2.5 py-1 font-mono text-[12px] text-zinc-300"
+                >
+                  {d}m
+                </span>
+              ))}
             </div>
             <input
-              className={`${input} py-1.5 font-mono text-[12px]`}
-              placeholder="Endpoint URL (e.g. https://gpu.ts.net/api)"
-              value={newEndpoint}
-              onChange={(e) => setNewEndpoint(e.target.value)}
+              className={`${input} font-mono text-[13px]`}
+              defaultValue={prefs.durations.join(", ")}
+              onBlur={(e) => {
+                const ds = e.target.value
+                  .split(",")
+                  .map((s) => parseInt(s.trim(), 10))
+                  .filter((n) => n > 0 && n <= 480);
+                if (ds.length) onPrefs({ durations: [...new Set(ds)].sort((a, b) => a - b) });
+              }}
             />
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              <input
-                className={`${input} py-1.5 font-mono text-[12px]`}
-                placeholder="Default dir (/workspace)"
-                value={newDir}
-                onChange={(e) => setNewDir(e.target.value)}
-              />
-              <input
-                type="password"
-                className={`${input} py-1.5 font-mono text-[12px]`}
-                placeholder="Basic Auth password (optional)"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-              />
+          </div>
+
+          <div className={card}>
+            <h3 className="text-[13px] font-semibold text-zinc-100">Session Behavior</h3>
+            <div className={row}>
+              <div>
+                <span className="text-[13px] text-zinc-200">Default duration (no estimate)</span>
+                <p className="text-[11px] text-zinc-500">Fallback duration for unestimated tasks</p>
+              </div>
+              <select
+                className={`${input} w-24 py-1.5`}
+                value={prefs.defaultMinutes}
+                onChange={(e) => onPrefs({ defaultMinutes: +e.target.value })}
+              >
+                {prefs.durations.map((d) => (
+                  <option key={d} value={d}>
+                    {d}m
+                  </option>
+                ))}
+              </select>
             </div>
-            <div className="flex justify-end">
+
+            <div className={row}>
+              <div>
+                <span className="text-[13px] text-zinc-200">On complete action</span>
+                <p className="text-[11px] text-zinc-500">Move task to Done section or close it directly</p>
+              </div>
+              <div className="flex gap-1">
+                {(["done", "close"] as const).map((m) => (
+                  <button
+                    key={m}
+                    className={`rounded-md border px-3 py-1 text-[12px] font-medium transition-colors ${
+                      prefs.completeAction === m
+                        ? "border-zinc-600 bg-zinc-800 text-zinc-100"
+                        : "border-zinc-800 text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-300"
+                    }`}
+                    onClick={() => onPrefs({ completeAction: m })}
+                  >
+                    {m === "done" ? "Move to Done" : "Close task"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className={row}>
+              <div>
+                <span className="text-[13px] text-zinc-200">Celebrate on complete</span>
+                <p className="text-[11px] text-zinc-500">Subtle completion burst</p>
+              </div>
               <button
                 type="button"
-                onClick={addServer}
-                disabled={!newId.trim()}
-                className="rounded bg-orange-600 px-3 py-1 text-[12px] font-medium text-white hover:bg-orange-500 disabled:opacity-40"
+                className={toggle(prefs.celebrate)}
+                onClick={() => onPrefs({ celebrate: !prefs.celebrate })}
               >
-                Save Server
+                <span
+                  className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${
+                    prefs.celebrate ? "left-4.5" : "left-0.5"
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className={row}>
+              <div>
+                <span className="text-[13px] text-zinc-200">Timer end alert</span>
+                <p className="text-[11px] text-zinc-500">Audio chime behavior when time expires</p>
+              </div>
+              <div className="flex gap-1">
+                {(["hard", "gentle"] as const).map((m) => (
+                  <button
+                    key={m}
+                    className={`rounded-md border px-3 py-1 text-[12px] font-medium capitalize transition-colors ${
+                      prefs.timerEnd === m
+                        ? "border-zinc-600 bg-zinc-800 text-zinc-100"
+                        : "border-zinc-800 text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-300"
+                    }`}
+                    onClick={() => onPrefs({ timerEnd: m })}
+                  >
+                    {m === "hard" ? "Hard stop" : "Gentle"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className={row}>
+              <div>
+                <span className="text-[13px] text-zinc-200">Buffer section</span>
+                <p className="text-[11px] text-zinc-500">Holding area between Backlog and Focus</p>
+              </div>
+              <button
+                type="button"
+                className={toggle(prefs.bufferOn)}
+                onClick={() => onPrefs({ bufferOn: !prefs.bufferOn })}
+              >
+                <span
+                  className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${
+                    prefs.bufferOn ? "left-4.5" : "left-0.5"
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className={row}>
+              <div>
+                <span className="text-[13px] text-zinc-200">Morning ritual banner</span>
+                <p className="text-[11px] text-zinc-500">Daily planning prompt when starting morning work</p>
+              </div>
+              <button
+                type="button"
+                className={toggle(prefs.planBanner)}
+                onClick={() => onPrefs({ planBanner: !prefs.planBanner })}
+              >
+                <span
+                  className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${
+                    prefs.planBanner ? "left-4.5" : "left-0.5"
+                  }`}
+                />
               </button>
             </div>
           </div>
-        )}
+        </div>
+      )}
 
-        {/* Auto-run queued tasks */}
-        <div className={row}>
-          <div>
-            <span className="text-[14px]">Auto-run queued tasks when server connects</span>
-            <p className="text-[12px] text-zinc-500">
-              Automatically launch tasks tagged <code className="font-mono">queue=1</code> once
-              their assigned server is online.
+      {/* TAB 3: HARDWARE & SYNC */}
+      {activeTab === "hardware" && (
+        <div className="space-y-6">
+          {/* ESP32 Companion Display */}
+          <div className={card}>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-[13px] font-semibold text-zinc-100">ESP32 Companion Desk Display</h3>
+                <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400">
+                  docs/firmware-v2.md
+                </span>
+              </div>
+              <p className="text-[12px] text-zinc-500">
+                Physical big-digit countdown display on your desk over Web Serial USB or LAN.
+              </p>
+            </div>
+
+            <div className={row}>
+              <div>
+                <span className="text-[13px] text-zinc-200">Trigger display over USB / LAN</span>
+                <p className="text-[11px] text-zinc-500">
+                  Sends countdown and state packets to connected ESP32 display
+                </p>
+              </div>
+              <button
+                type="button"
+                className={toggle(prefs.deviceOn)}
+                onClick={() => onPrefs({ deviceOn: !prefs.deviceOn })}
+              >
+                <span
+                  className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${
+                    prefs.deviceOn ? "left-4.5" : "left-0.5"
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className={row}>
+              <div>
+                <span className="text-[13px] text-zinc-200">Screen off after idle</span>
+                <p className="text-[11px] text-zinc-500">Sleep timeout when no active session is running</p>
+              </div>
+              <div className="flex gap-1">
+                {[1, 5, 15, 30, 0].map((m) => (
+                  <button
+                    key={m}
+                    className={`rounded-md border px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                      prefs.screenOffMin === m
+                        ? "border-zinc-600 bg-zinc-800 text-zinc-100"
+                        : "border-zinc-800 text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-300"
+                    }`}
+                    onClick={() => onPrefs({ screenOffMin: m })}
+                  >
+                    {m === 0 ? "Never" : `${m}m`}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Todoist Project & Roles Mapping */}
+          <div className={card}>
+            <div>
+              <h3 className="text-[13px] font-semibold text-zinc-100">Todoist Project &amp; Sections</h3>
+              <p className="text-[12px] text-zinc-500">
+                Connected Todoist task project and role section mappings.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-[11px] font-medium text-zinc-400">Target Todoist Project</label>
+              <ProjectSelect token={token} projectId={projectId} onProject={onProject} />
+            </div>
+
+            <div className="space-y-2 pt-2">
+              <label className="block text-[11px] font-medium text-zinc-400">Section Roles</label>
+              <MappingScreen {...mappingProps} />
+            </div>
+
+            <div className="border-t border-zinc-800/60 pt-3">
+              <div className={row}>
+                <div>
+                  <span className="text-[13px] text-zinc-200">Timer logs → task comments</span>
+                  <p className="text-[11px] text-zinc-500">
+                    Back up actual vs planned session records to task comments
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className={`${btn} text-orange-500 disabled:opacity-40 font-medium`}
+                  disabled={unsynced === 0}
+                  onClick={onSyncComments}
+                >
+                  {unsynced ? `Sync ${unsynced} logs` : "All synced ✓"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 4: SYSTEM & DATA */}
+      {activeTab === "system" && (
+        <div className="space-y-6">
+          {/* Diagnostics Card */}
+          <div className={card}>
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-[13px] font-semibold text-zinc-100">Fleet Health &amp; Diagnostics</h3>
+                <p className="text-[12px] text-zinc-500">
+                  Connectivity check and ping latency for each registered node.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={ocVerifying}
+                onClick={onVerifyOpenCode}
+                className="rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-[11px] text-orange-400 hover:border-zinc-700 disabled:opacity-50"
+              >
+                {ocVerifying ? "Testing…" : "Run test"}
+              </button>
+            </div>
+
+            <div className="divide-y divide-zinc-800/60 rounded border border-zinc-800/80 bg-zinc-950/60 font-mono text-[12px]">
+              {ocConfig.servers.map((s) => {
+                const v = ocVerifyById[s.id];
+                const online = ocServerOnlineById[s.id] ?? v?.ok ?? false;
+                const models = ocModelsByServer[s.id] ?? [];
+                return (
+                  <div key={s.id} className="flex items-center justify-between p-2.5">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`h-2 w-2 rounded-full ${online ? "bg-emerald-400" : "bg-zinc-600"}`}
+                      />
+                      <span className="text-zinc-200">{s.name}</span>
+                      <span className="text-zinc-500">~{s.id}</span>
+                    </div>
+                    <div className="flex items-center gap-3 text-[11px] text-zinc-400">
+                      <span>{models.length} models</span>
+                      <span>{v?.ok ? `${v.latencyMs}ms` : online ? "connected" : "unreachable"}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Quick Links & Documentation */}
+          <div className={card}>
+            <h3 className="text-[13px] font-semibold text-zinc-100">Help &amp; Workflows</h3>
+            <div className="flex flex-wrap gap-4 pt-1">
+              <button
+                type="button"
+                className="text-[13px] font-medium text-orange-400 hover:text-orange-300 transition-colors"
+                onClick={onViewGuide}
+              >
+                📖 View guide again
+              </button>
+              <button
+                type="button"
+                className="text-[13px] font-medium text-orange-400 hover:text-orange-300 transition-colors"
+                onClick={onTheory}
+              >
+                💡 How the focus protocol works
+              </button>
+              <a
+                href="?mock=1"
+                className="text-[13px] font-medium text-zinc-400 hover:text-zinc-200 transition-colors"
+              >
+                🚀 Open Flight Deck Mockup
+              </a>
+            </div>
+          </div>
+
+          {/* Danger Zone */}
+          <div className="rounded-lg border border-red-950/60 bg-red-950/10 p-4 space-y-2">
+            <h3 className="text-[13px] font-semibold text-red-400">Danger Zone</h3>
+            <p className="text-[12px] text-zinc-400">
+              Clear your Todoist authentication tokens, OpenCode server registry, and all cached sessions.
             </p>
-          </div>
-          <button
-            className={toggle(ocConfig.autoRunQueued)}
-            onClick={() => onOcConfig({ autoRunQueued: !ocConfig.autoRunQueued })}
-          >
-            <span
-              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${ocConfig.autoRunQueued ? "left-4.5" : "left-0.5"}`}
-            />
-          </button>
-        </div>
-      </section>
-
-      <section>
-        <h2 className={h}>List (Todoist project)</h2>
-        <ProjectSelect token={token} projectId={projectId} onProject={onProject} />
-      </section>
-      <section>
-        <h2 className={h}>Section roles</h2>
-        <MappingScreen {...mappingProps} />
-      </section>
-      <section>
-        <h2 className={h}>Focus task cap</h2>
-        <input
-          className={input}
-          type="number"
-          inputMode="numeric"
-          min={1}
-          step={1}
-          defaultValue={prefs.focusCap}
-          onBlur={(e) => {
-            const n = parseInt(e.target.value, 10);
-            const valid = Number.isFinite(n) && n >= 1;
-            const cap = valid ? n : 3;
-            if (!valid) e.target.value = String(cap);
-            if (cap !== prefs.focusCap) onPrefs({ focusCap: cap });
-          }}
-        />
-        <p className="mt-1 text-[12px] text-zinc-600">
-          Any positive number. Defaults to 3 if left empty or invalid.
-        </p>
-      </section>
-      <section>
-        <h2 className={h}>Duration presets (minutes, comma-separated)</h2>
-        <input
-          className={input}
-          defaultValue={prefs.durations.join(", ")}
-          onBlur={(e) => {
-            const ds = e.target.value
-              .split(",")
-              .map((s) => parseInt(s.trim(), 10))
-              .filter((n) => n > 0 && n <= 480);
-            if (ds.length) onPrefs({ durations: [...new Set(ds)].sort((a, b) => a - b) });
-          }}
-        />
-      </section>
-      <section>
-        <h2 className={h}>Behavior</h2>
-        <div className={row}>
-          <span className="text-[14px]">Default duration (no estimate)</span>
-          <select
-            className={`${input} w-24`}
-            value={prefs.defaultMinutes}
-            onChange={(e) => onPrefs({ defaultMinutes: +e.target.value })}
-          >
-            {prefs.durations.map((d) => (
-              <option key={d} value={d}>
-                {d}m
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className={row}>
-          <span className="text-[14px]">Buffer section</span>
-          <button
-            className={toggle(prefs.bufferOn)}
-            onClick={() => onPrefs({ bufferOn: !prefs.bufferOn })}
-          >
-            <span
-              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${prefs.bufferOn ? "left-4.5" : "left-0.5"}`}
-            />
-          </button>
-        </div>
-        <div className={row}>
-          <span className="text-[14px]">Morning ritual banner</span>
-          <button
-            className={toggle(prefs.planBanner)}
-            onClick={() => onPrefs({ planBanner: !prefs.planBanner })}
-          >
-            <span
-              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${prefs.planBanner ? "left-4.5" : "left-0.5"}`}
-            />
-          </button>
-        </div>
-        <div className={row}>
-          <span className="text-[14px]">On complete</span>
-          <div className="flex gap-1">
-            {(["done", "close"] as const).map((m) => (
+            <div className="pt-1">
               <button
-                key={m}
-                className={`rounded-md border px-3 py-1 text-[13px] ${
-                  prefs.completeAction === m
-                    ? "border-zinc-600 text-zinc-200"
-                    : "border-zinc-800 text-zinc-500 hover:bg-zinc-800"
-                }`}
-                onClick={() => onPrefs({ completeAction: m })}
+                type="button"
+                className="rounded border border-red-900/60 bg-red-950/40 px-3 py-1.5 text-[12px] font-medium text-red-300 hover:bg-red-900/40 transition-colors"
+                onClick={() => {
+                  if (window.confirm("Are you sure you want to reset all tokens, server configs, and cached state?")) {
+                    onReset();
+                  }
+                }}
               >
-                {m === "done" ? "Move to Done" : "Close task"}
+                Reset token &amp; all local data
               </button>
-            ))}
+            </div>
           </div>
         </div>
-        <div className={row}>
-          <span className="text-[14px]">Celebrate on complete</span>
-          <button
-            className={toggle(prefs.celebrate)}
-            onClick={() => onPrefs({ celebrate: !prefs.celebrate })}
-          >
-            <span
-              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${prefs.celebrate ? "left-4.5" : "left-0.5"}`}
-            />
-          </button>
-        </div>
-        <div className={row}>
-          <span className="text-[14px]">Timer end</span>
-          <div className="flex gap-1">
-            {(["hard", "gentle"] as const).map((m) => (
-              <button
-                key={m}
-                className={`rounded-md border px-3 py-1 text-[13px] capitalize ${
-                  prefs.timerEnd === m
-                    ? "border-zinc-600 text-zinc-200"
-                    : "border-zinc-800 text-zinc-500 hover:bg-zinc-800"
-                }`}
-                onClick={() => onPrefs({ timerEnd: m })}
-              >
-                {m === "hard" ? "Hard stop" : "Gentle"}
-              </button>
-            ))}
-          </div>
-        </div>
-      </section>
-      <section>
-        <h2 className={h}>ESP32 companion display</h2>
-        <div className={row}>
-          <span className="text-[14px]">Trigger device over LAN</span>
-          <button
-            className={toggle(prefs.deviceOn)}
-            onClick={() => onPrefs({ deviceOn: !prefs.deviceOn })}
-          >
-            <span
-              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${prefs.deviceOn ? "left-4.5" : "left-0.5"}`}
-            />
-          </button>
-        </div>
-        <div className={row}>
-          <span className="text-[14px]">Screen off after</span>
-          <div className="flex gap-1">
-            {[1, 5, 15, 30, 0].map((m) => (
-              <button
-                key={m}
-                className={`rounded-md border px-3 py-1 text-[13px] ${
-                  prefs.screenOffMin === m
-                    ? "border-zinc-600 text-zinc-200"
-                    : "border-zinc-800 text-zinc-500 hover:bg-zinc-800"
-                }`}
-                onClick={() => onPrefs({ screenOffMin: m })}
-              >
-                {m === 0 ? "Never" : `${m}m`}
-              </button>
-            ))}
-          </div>
-        </div>
-        <p className="text-[12px] text-zinc-600">
-          Big-digit countdown on the desk display while a timer runs. Connects
-          over USB (Web Serial — Chrome/Edge). Plug the display in; the first
-          time you start a timer, pick its USB serial port in the browser
-          dialog (see docs/firmware-v2.md). Off by default.
-        </p>
-      </section>
-      <section>
-        <h2 className={h}>Todoist sync</h2>
-        <div className={row}>
-          <span className="text-[14px]">Timer logs → task comments</span>
-          <button
-            className={`${btn} text-orange-500 disabled:opacity-40`}
-            disabled={unsynced === 0}
-            onClick={onSyncComments}
-          >
-            {unsynced ? `Sync ${unsynced}` : "All synced ✓"}
-          </button>
-        </div>
-      </section>
-      <section>
-        <h2 className={h}>Help</h2>
-        <div className="flex gap-4">
-          <button className={`${btn} px-0 text-orange-500`} onClick={onViewGuide}>
-            View guide again
-          </button>
-          <button className={`${btn} px-0 text-orange-500`} onClick={onTheory}>
-            How it works
-          </button>
-        </div>
-      </section>
-      <section>
-        <h2 className={h}>Danger</h2>
-        <button className={`${btn} px-0 text-red-400`} onClick={onReset}>
-          Reset token &amp; all local data
-        </button>
-      </section>
+      )}
     </div>
   );
 }

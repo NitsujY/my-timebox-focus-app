@@ -19,6 +19,8 @@ export type OpenCodeServer = {
   password?: string;
   /** Default workspace directory on that server (e.g. `/Users/justinyu` or `/home/ubuntu`) */
   defaultDir?: string;
+  /** Preferred default model on this execution server (e.g. `anthropic/claude-3-7-sonnet`) */
+  defaultModel?: string;
   /** Projects / repositories available on this execution server */
   repos?: OpenCodeRepo[];
   /** Whether to poll this server for live sessions */
@@ -34,6 +36,8 @@ export type OpenCodeConfig = {
   autoRunQueued: boolean;
   /** Default execution server ID when a task doesn't specify `srv=...` */
   defaultServerId: string;
+  /** Global preferred default model when no task/server model is set */
+  defaultModel?: string;
   /** Configured execution servers (local laptop, remote devboxes, homelab, etc.) */
   servers: OpenCodeServer[];
 };
@@ -109,6 +113,7 @@ export const DEFAULT_OC_CONFIG: OpenCodeConfig = {
   password: "",
   autoRunQueued: true,
   defaultServerId: "local",
+  defaultModel: "",
   servers: DEFAULT_SERVERS,
 };
 
@@ -139,6 +144,7 @@ export function loadOpenCodeConfig(): OpenCodeConfig {
           password: localSrv?.password ?? "",
           autoRunQueued: parsedExisting.autoRunQueued ?? true,
           defaultServerId: parsedExisting.defaultServerId ?? "local",
+          defaultModel: parsedExisting.defaultModel ?? "",
           servers: list,
         });
         params.delete("oc_pass");
@@ -170,6 +176,7 @@ export function loadOpenCodeConfig(): OpenCodeConfig {
             : isLegacyHomelabSample
               ? true
               : s.enabled ?? preset?.enabled ?? true,
+          defaultModel: s.defaultModel ?? preset?.defaultModel ?? "",
           repos: s.repos && s.repos.length > 0 ? s.repos : preset?.repos ?? KNOWN_REPOS,
         };
       });
@@ -198,6 +205,7 @@ export function loadOpenCodeConfig(): OpenCodeConfig {
       password: primary.password ?? "",
       autoRunQueued: parsed.autoRunQueued ?? true,
       defaultServerId,
+      defaultModel: parsed.defaultModel ?? "",
       servers,
     };
   } catch {
