@@ -1504,7 +1504,11 @@ export default function App() {
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-10 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur">
-        <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-2 px-4 py-2.5 sm:px-6 lg:px-8">
+        <div
+          className={`mx-auto flex w-full items-center justify-between gap-2 px-4 py-2.5 sm:px-6 lg:px-8 ${
+            view === "focus" ? "max-w-[1680px]" : "max-w-5xl"
+          }`}
+        >
           <div className="flex shrink-0 items-center gap-2.5">
             <span className="hidden text-[15px] font-semibold tracking-tight text-zinc-100 sm:inline">
               Timebox
@@ -1631,9 +1635,18 @@ export default function App() {
             />
           </div>
         </div>
-        <ProjectChips projects={projects} projectId={projectId} onProject={switchProject} />
+        <ProjectChips
+          projects={projects}
+          projectId={projectId}
+          onProject={switchProject}
+          wide={view === "focus"}
+        />
       </header>
-      <main className="mx-auto w-full max-w-5xl px-4 pt-6 pb-12 sm:px-6 lg:px-8">
+      <main
+        className={`mx-auto w-full px-4 pt-6 pb-12 sm:px-6 lg:px-8 ${
+          view === "focus" ? "max-w-[1680px]" : "max-w-5xl"
+        }`}
+      >
         {error && <p className="mb-4 text-[13px] text-zinc-500">{error}</p>}
         {remapNeeded && (
           <div className="mb-4 flex items-center justify-between gap-4 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-3">
@@ -2109,15 +2122,256 @@ function FocusView({
   const showPlan =
     planBanner && focusTasks.length === 0 && backlogCount > 0 && dismissed !== todayStr();
 
-  // Bubble tasks that Need You to the top of Focus
-  const sortedFocus = [...focusTasks].sort((a, b) => {
-    const sa = resolveTaskTriage(a, ocSessions).triage;
-    const sb = resolveTaskTriage(b, ocSessions).triage;
-    return TRIAGE_ORDER[sa] - TRIAGE_ORDER[sb];
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    const saved = Number(load("tb_sidebar_width", 420));
+    return saved >= 280 && saved <= 760 ? saved : 420;
   });
+  const [isResizing, setIsResizing] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(expandedId);
+  const [mobileShowStage, setMobileShowStage] = useState(false);
+
+  useEffect(() => {
+    if (expandedId) setSelectedId(expandedId);
+  }, [expandedId]);
+
+  const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sidebarWidth;
+    setIsResizing(true);
+
+    const onMovePtr = (ev: PointerEvent) => {
+      const maxW = Math.min(760, Math.max(360, window.innerWidth - 420));
+      const next = Math.max(280, Math.min(maxW, startW + (ev.clientX - startX)));
+      setSidebarWidth(next);
+      save("tb_sidebar_width", next);
+    };
+    const onUpPtr = () => {
+      setIsResizing(false);
+      window.removeEventListener("pointermove", onMovePtr);
+      window.removeEventListener("pointerup", onUpPtr);
+    };
+    window.addEventListener("pointermove", onMovePtr);
+    window.addEventListener("pointerup", onUpPtr);
+  };
+
+  const resetSidebarWidth = () => {
+    setSidebarWidth(420);
+    save("tb_sidebar_width", 420);
+  };
+
+  const combinedTasks = useMemo(() => {
+    const seen = new Set<string>();
+    const list: Task[] = [];
+    for (const t of [...focusTasks, ...bufferTasks]) {
+      if (!seen.has(t.id)) {
+        seen.add(t.id);
+        list.push(t);
+      }
+    }
+    return list;
+  }, [focusTasks, bufferTasks]);
+
+  const laneNeedsYou = useMemo(() => {
+    return combinedTasks
+      .filter((t) => resolveTaskTriage(t, ocSessions).triage === "needs_you")
+      .sort((a, b) => {
+        const ra = resolveTaskTriage(a, ocSessions).liveSession;
+        const rb = resolveTaskTriage(b, ocSessions).liveSession;
+        const score = (s?: OpenCodeLiveSession) =>
+          s?.form ? 0 : s?.permission ? 1 : 2;
+        return score(ra) - score(rb);
+      });
+  }, [combinedTasks, ocSessions]);
+
+  const laneWorking = useMemo(
+    () => combinedTasks.filter((t) => resolveTaskTriage(t, ocSessions).triage === "working"),
+    [combinedTasks, ocSessions],
+  );
+
+  const laneQueuedFocus = useMemo(
+    () => focusTasks.filter((t) => resolveTaskTriage(t, ocSessions).triage === "queued"),
+    [focusTasks, ocSessions],
+  );
+
+  const laneQueuedBuffer = useMemo(
+    () => bufferTasks.filter((t) => resolveTaskTriage(t, ocSessions).triage === "queued"),
+    [bufferTasks, ocSessions],
+  );
+
+  const orderedBoardTasks = useMemo(
+    () => [...laneNeedsYou, ...laneWorking, ...laneQueuedFocus, ...laneQueuedBuffer],
+    [laneNeedsYou, laneWorking, laneQueuedFocus, laneQueuedBuffer],
+  );
+
+  const selectedTask =
+    orderedBoardTasks.find((t) => t.id === selectedId) ??
+    laneNeedsYou[0] ??
+    laneWorking[0] ??
+    laneQueuedFocus[0] ??
+    laneQueuedBuffer[0] ??
+    null;
+
+  const selectTask = (id: string, openMobile = false) => {
+    setSelectedId(id);
+    if (expandedId !== id) onToggle(id);
+    if (openMobile) setMobileShowStage(true);
+  };
+
+  const advanceAfterAction = (actedId: string) => {
+    const nextWaiting = laneNeedsYou.find((t) => t.id !== actedId);
+    if (nextWaiting) {
+      setSelectedId(nextWaiting.id);
+      if (expandedId !== nextWaiting.id) onToggle(nextWaiting.id);
+    }
+  };
+
+  const renderSidebarCard = (t: Task, isBuffer = false) => {
+    const { triage, liveSession, meta } = resolveTaskTriage(t, ocSessions);
+    const active = selectedTask?.id === t.id;
+    const assignedServerId = liveSession?.serverId || meta.server || defaultServerId;
+    const isAssignedOnline = ocServerOnlineById[assignedServerId] ?? ocConnected;
+    const repoShort = shortRepo(meta.repo || liveSession?.repoShort);
+    const targetBadge = [
+      ocServers.length > 1 || (meta.server && meta.server !== defaultServerId)
+        ? assignedServerId
+        : null,
+      repoShort,
+    ]
+      .filter(Boolean)
+      .join("/");
+    const aSec = agentSecBy[t.id] ?? 0;
+    const hSec = humanSecBy[t.id] ?? 0;
+    const spent = (spentBy[t.id] ?? 0) + Math.floor(hSec / 60);
+    const planned = t.duration?.amount ?? defaultMinutes;
+    const isQueuedForAgent = !liveSession && Boolean(meta.queued);
+
+    const statusLabel = liveSession?.form
+      ? "Question"
+      : liveSession?.permission
+        ? "Permission"
+        : triage === "needs_you"
+          ? "Ready for review"
+          : triage === "working"
+            ? `Processing${aSec > 0 ? ` · ${fmt(aSec)}` : ""}`
+            : isQueuedForAgent
+              ? `Queued for ${assignedServerId}`
+              : isBuffer
+                ? "Buffer"
+                : `${spent > 0 ? `${spent}m/` : ""}${planned}m`;
+
+    return (
+      <li key={t.id}>
+        <div
+          onClick={() => selectTask(t.id, true)}
+          className={`group flex cursor-pointer flex-col gap-1.5 rounded-lg border px-3.5 py-3 transition-all duration-150 ${
+            active
+              ? "border-orange-500 bg-zinc-900/95 shadow-sm"
+              : triage === "needs_you"
+                ? "border-zinc-800/90 bg-zinc-900/55 hover:border-zinc-700 hover:bg-zinc-900/80"
+                : "border-zinc-800/75 bg-zinc-900/30 hover:border-zinc-700 hover:bg-zinc-900/65"
+          } ${isNew(t) ? "row-new" : ""}`}
+        >
+          <div className="flex items-center justify-between gap-2 font-mono text-[11px]">
+            <div className="flex min-w-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  advanceAfterAction(t.id);
+                  onComplete(t);
+                }}
+                title="Mark task Done"
+                aria-label="Mark task Done"
+                className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-zinc-700 text-[10px] text-transparent transition-colors hover:border-orange-500 hover:text-orange-400"
+              >
+                ✓
+              </button>
+              <span
+                className={
+                  triage === "needs_you"
+                    ? "font-medium text-orange-400"
+                    : triage === "working"
+                      ? "text-zinc-200"
+                      : isQueuedForAgent
+                        ? "text-amber-400"
+                        : "text-zinc-500"
+                }
+              >
+                {statusLabel}
+              </span>
+            </div>
+
+            <div className="flex shrink-0 items-center gap-1.5">
+              {targetBadge && <span className="text-zinc-500">{targetBadge}</span>}
+              {triage === "working" && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onInterrupt(t);
+                  }}
+                  title="Stop running agent"
+                  className="rounded border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:border-red-500/40 hover:text-red-400"
+                >
+                  Stop
+                </button>
+              )}
+              {triage === "queued" && isBuffer && focusId && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onMove(t);
+                  }}
+                  title="Move to Focus"
+                  className="rounded border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                >
+                  → Focus
+                </button>
+              )}
+              {triage === "queued" && (!isQueuedForAgent || isAssignedOnline) && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    selectTask(t.id, false);
+                    onHandToAgent(t, undefined, assignedServerId);
+                  }}
+                  title={
+                    isAssignedOnline
+                      ? `Run on ${assignedServerId}`
+                      : `Queue for ${assignedServerId}`
+                  }
+                  className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 text-[10px] font-medium text-orange-400 hover:border-orange-500/60 hover:text-orange-300"
+                >
+                  Run
+                </button>
+              )}
+            </div>
+          </div>
+
+          <p className="line-clamp-2 text-[15px] font-medium leading-snug text-zinc-100">
+            {t.content}
+          </p>
+
+          {liveSession?.form && (
+            <p className="truncate text-[12px] text-orange-300/90">
+              {liveSession.form.fields?.[0]?.title || liveSession.form.title}
+            </p>
+          )}
+          {liveSession?.permission && (
+            <p className="truncate font-mono text-[11px] text-orange-300/90">
+              Allow {liveSession.permission.action}: {liveSession.permission.resources.join(" ")}
+            </p>
+          )}
+        </div>
+      </li>
+    );
+  };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {queuedTasks.length > 0 && (
         <div className="flex items-center justify-between gap-3 rounded-md border border-zinc-800 bg-zinc-900/90 px-3.5 py-2.5 text-[13px]">
           <div className="flex min-w-0 items-center gap-2 text-zinc-300">
@@ -2172,96 +2426,238 @@ function FocusView({
         </div>
       )}
 
-      {bufferId && (
-        <section>
-          <div className="flex items-center gap-2 px-2">
-            <p className="shrink-0 text-[13px] text-zinc-500">Buffer</p>
-            <AddRow
-              inline
-              ocConnected={ocConnected}
-              ocServers={ocServers}
-              ocServerOnlineById={ocServerOnlineById}
-              ocModelsByServer={ocModelsByServer}
-              ocProjectsByServer={ocProjectsByServer}
-              onAddProject={onAddProject}
-              onRefreshProjects={onRefreshProjects}
-              defaultServerId={defaultServerId}
-              placeholder="＋ Quick add… (~server @repo // prompt)"
-              hotkey="b"
-              sections={sections}
-              onAdd={(raw, extra) => onAdd(raw, bufferId, extra)}
-            />
-          </div>
-          {bufferTasks.length > 0 && (
-            <ul className="mt-1 space-y-1">
-              {bufferTasks.map((t) => (
-                <TaskRow
-                  key={t.id}
-                  t={t}
-                  durations={durations}
-                  defaultMinutes={defaultMinutes}
-                  spentBy={spentBy}
-                  ocConnected={ocConnected}
-                  ocServers={ocServers}
-                  ocServerOnlineById={ocServerOnlineById}
-                  ocModelsByServer={ocModelsByServer}
-                  ocProjectsByServer={ocProjectsByServer}
-                  onAddProject={onAddProject}
-                  onRefreshProjects={onRefreshProjects}
-                  defaultServerId={defaultServerId}
-                  ocSessions={ocSessions}
-                  humanSec={humanSecBy[t.id] ?? 0}
-                  agentSec={agentSecBy[t.id] ?? 0}
-                  expanded={expandedId === t.id}
-                  onToggle={() => onToggle(t.id)}
-                  onHandToAgent={(p, srvId, mdl, rp, nt) => onHandToAgent(t, p, srvId, mdl, rp, nt)}
-                  onApprove={(dec) => onApprove(t, dec)}
-                  onAnswerForm={(k, v, l) => onAnswerForm(t, k, v, l)}
-                  onInterrupt={() => onInterrupt(t)}
-                  onStart={onStart}
-                  onMove={focusId ? onMove : undefined}
-                  onDemote={onDemote}
-                  onMoveProject={onMoveProject}
-                  projects={projects}
-                  onComplete={() => onComplete(t)}
-                  onUpdate={onUpdate}
-                  onDuration={onDuration}
-                  onDelete={onDelete}
-                />
-              ))}
-            </ul>
-          )}
-        </section>
-      )}
-
       {focusTasks.length > cap && (
         <p className="rounded-md border border-zinc-800 bg-zinc-900 px-4 py-3 text-[13px] text-zinc-400">
           Too many priorities — Focus holds {cap}. Move something back to Backlog.
         </p>
       )}
 
-      <section>
-        <div className="mb-1 flex items-center justify-between px-2">
-          <p className="text-[13px] text-zinc-500">Focus</p>
-          <span className="text-[12px] text-zinc-600">
-            Sorted by what needs your attention first
-          </span>
+      {/* Draggable Triage Sidebar + Wide Main Stage */}
+      <div
+        className={`flex flex-col md:flex-row md:items-start ${
+          isResizing ? "select-none cursor-col-resize" : ""
+        }`}
+      >
+        {/* LEFT TRIAGE SIDEBAR (Resizable on md+ screens) */}
+        <aside
+          aria-label="Focus task queues"
+          style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
+          className={`w-full shrink-0 space-y-6 md:w-[var(--sidebar-w)] ${
+            mobileShowStage && selectedTask ? "hidden md:block" : "block"
+          }`}
+        >
+          {/* GROUP 1: WAITING FOR YOUR ANSWER */}
+          <section className="space-y-2">
+            <div className="flex items-center justify-between px-1">
+              <div className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-orange-500" />
+                <h2 className="text-[12px] font-semibold uppercase tracking-wider text-orange-400">
+                  Waiting for Your Answer
+                </h2>
+              </div>
+              <span className="font-mono text-[12px] tabular-nums text-orange-400">
+                {laneNeedsYou.length}
+              </span>
+            </div>
+
+            {laneNeedsYou.length === 0 ? (
+              <p className="rounded-lg border border-zinc-900 bg-zinc-950/50 px-3.5 py-3 text-[13px] text-zinc-500">
+                No tasks blocked on your input.
+              </p>
+            ) : (
+              <ul className="space-y-1.5">
+                {laneNeedsYou.map((t) => renderSidebarCard(t, t.section_id === bufferId))}
+              </ul>
+            )}
+          </section>
+
+          {/* GROUP 2: AGENT PROCESSING */}
+          <section className="space-y-2">
+            <div className="flex items-center justify-between px-1">
+              <div className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-zinc-200 animate-pulse" />
+                <h2 className="text-[12px] font-semibold uppercase tracking-wider text-zinc-300">
+                  Agent Processing
+                </h2>
+              </div>
+              <span className="font-mono text-[12px] tabular-nums text-zinc-400">
+                {laneWorking.length}
+              </span>
+            </div>
+
+            {laneWorking.length === 0 ? (
+              <p className="rounded-lg border border-zinc-900 bg-zinc-950/50 px-3.5 py-2.5 text-[13px] text-zinc-500">
+                No agents currently running.
+              </p>
+            ) : (
+              <ul className="space-y-1.5">
+                {laneWorking.map((t) => renderSidebarCard(t, t.section_id === bufferId))}
+              </ul>
+            )}
+          </section>
+
+          {/* GROUP 3: READY IN FOCUS & BUFFER */}
+          <section className="space-y-2">
+            <div className="flex items-center justify-between px-1">
+              <div className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-zinc-600" />
+                <h2 className="text-[12px] font-semibold uppercase tracking-wider text-zinc-400">
+                  Ready in Focus
+                </h2>
+              </div>
+              <span className="font-mono text-[12px] tabular-nums text-zinc-500">
+                {laneQueuedFocus.length + laneQueuedBuffer.length}
+              </span>
+            </div>
+
+            {laneQueuedFocus.length === 0 && laneQueuedBuffer.length === 0 ? (
+              <button
+                type="button"
+                className="block w-full rounded-lg border border-zinc-900 bg-zinc-950/50 px-3.5 py-4 text-left text-[13px] text-zinc-500 hover:border-zinc-800"
+                onClick={onGoBacklog}
+              >
+                Focus holds today's top {cap} tasks.{" "}
+                <span className="text-orange-500">Pull from Backlog →</span>
+              </button>
+            ) : (
+              <ul className="space-y-1.5">
+                {laneQueuedFocus.map((t) => renderSidebarCard(t, false))}
+                {laneQueuedBuffer.map((t) => renderSidebarCard(t, true))}
+              </ul>
+            )}
+
+            {focusId && (
+              <AddRow
+                ocConnected={ocConnected}
+                ocServers={ocServers}
+                ocServerOnlineById={ocServerOnlineById}
+                ocModelsByServer={ocModelsByServer}
+                ocProjectsByServer={ocProjectsByServer}
+                onAddProject={onAddProject}
+                onRefreshProjects={onRefreshProjects}
+                defaultServerId={defaultServerId}
+                placeholder="＋ Add to Focus… (~server @repo // prompt or Tab)"
+                hotkey="n"
+                sections={sections}
+                onAdd={(raw, extra) => onAdd(raw, focusId, extra)}
+              />
+            )}
+
+            {bufferId && (
+              <AddRow
+                ocConnected={ocConnected}
+                ocServers={ocServers}
+                ocServerOnlineById={ocServerOnlineById}
+                ocModelsByServer={ocModelsByServer}
+                ocProjectsByServer={ocProjectsByServer}
+                onAddProject={onAddProject}
+                onRefreshProjects={onRefreshProjects}
+                defaultServerId={defaultServerId}
+                placeholder="＋ Add to Buffer… (hotkey b)"
+                hotkey="b"
+                sections={sections}
+                onAdd={(raw, extra) => onAdd(raw, bufferId, extra)}
+              />
+            )}
+          </section>
+
+          {unlinkedOcSessions.length > 0 && (
+            <section className="border-t border-zinc-900 pt-3">
+              <p className="mb-1.5 px-1 text-[12px] text-zinc-500">
+                Unlinked OpenCode sessions (last 24h)
+              </p>
+              <ul className="space-y-1">
+                {unlinkedOcSessions.slice(0, 6).map((s) => (
+                  <li
+                    key={s.id}
+                    className="flex min-h-9 items-center justify-between gap-2 rounded-md px-2 text-[13px] text-zinc-400 hover:bg-zinc-900"
+                  >
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span
+                        className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                          s.status === "running"
+                            ? "bg-zinc-300 animate-pulse"
+                            : "bg-orange-500"
+                        }`}
+                      />
+                      {ocServers.length > 1 && (
+                        <span className="shrink-0 rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.2 font-mono text-[11px] text-zinc-400">
+                          {s.serverId}
+                        </span>
+                      )}
+                      <span className="truncate text-zinc-300">{s.title}</span>
+                      {s.repoShort && (
+                        <span className="shrink-0 font-mono text-[11px] text-zinc-600">
+                          {s.repoShort}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <button
+                        onClick={() => onTrackOcSession(s)}
+                        className="text-[12px] text-zinc-400 hover:text-orange-500"
+                        title="Create a Todoist Focus task linked to this session"
+                      >
+                        ＋ Track
+                      </button>
+                      <button
+                        onClick={() => onIgnoreOcSession(s.id)}
+                        className="px-1 text-[12px] text-zinc-600 hover:text-zinc-400"
+                        title="Hide this session from Unlinked list (keeps session in OpenCode)"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+        </aside>
+
+        {/* DRAGGABLE RESIZE HANDLE (Desktop md+) */}
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Drag to resize sidebar (double-click to reset)"
+          title="Drag to resize sidebar · Double-click to reset"
+          onPointerDown={startResize}
+          onDoubleClick={resetSidebarWidth}
+          className="group hidden md:flex w-6 shrink-0 cursor-col-resize items-stretch justify-center self-stretch py-2 select-none"
+        >
+          <div
+            className={`w-px transition-colors duration-150 ${
+              isResizing
+                ? "w-0.5 bg-orange-500"
+                : "bg-zinc-800/80 group-hover:w-0.5 group-hover:bg-orange-500/80"
+            }`}
+          />
         </div>
-        {sortedFocus.length === 0 ? (
-          <button
-            className="block w-full py-8 text-center text-[13px] text-zinc-500"
-            onClick={onGoBacklog}
-          >
-            Focus holds today's top {cap} tasks.
-            <span className="mt-1 block text-orange-500">Pull from Backlog →</span>
-          </button>
-        ) : (
-          <ul className="space-y-1.5">
-            {sortedFocus.map((t) => (
+
+        {/* RIGHT MAIN STAGE WORKSPACE */}
+        <div
+          className={`min-w-0 flex-1 md:sticky md:top-20 ${
+            mobileShowStage && selectedTask ? "block" : "hidden md:block"
+          }`}
+        >
+          {mobileShowStage && selectedTask && (
+            <button
+              type="button"
+              onClick={() => setMobileShowStage(false)}
+              className="mb-3 inline-flex items-center gap-1.5 text-[13px] font-medium text-orange-400 md:hidden"
+            >
+              ← Back to Focus queues
+              {laneNeedsYou.length > 0 ? ` (${laneNeedsYou.length} waiting)` : ""}
+            </button>
+          )}
+
+          {selectedTask ? (
+            <ul className="list-none">
               <TaskRow
-                key={t.id}
-                t={t}
+                key={selectedTask.id}
+                t={selectedTask}
                 large
+                stageMode
                 durations={durations}
                 defaultMinutes={defaultMinutes}
                 spentBy={spentBy}
@@ -2274,96 +2670,63 @@ function FocusView({
                 onRefreshProjects={onRefreshProjects}
                 defaultServerId={defaultServerId}
                 ocSessions={ocSessions}
-                humanSec={humanSecBy[t.id] ?? 0}
-                agentSec={agentSecBy[t.id] ?? 0}
-                expanded={expandedId === t.id}
-                onToggle={() => onToggle(t.id)}
-                onHandToAgent={(p, srvId, mdl, rp, nt) => onHandToAgent(t, p, srvId, mdl, rp, nt)}
-                onApprove={(dec) => onApprove(t, dec)}
-                onAnswerForm={(k, v, l) => onAnswerForm(t, k, v, l)}
-                onInterrupt={() => onInterrupt(t)}
+                humanSec={humanSecBy[selectedTask.id] ?? 0}
+                agentSec={agentSecBy[selectedTask.id] ?? 0}
+                expanded={true}
+                onToggle={() => setMobileShowStage(false)}
+                onHandToAgent={(p, srvId, mdl, rp, nt) => {
+                  const wasWaiting =
+                    resolveTaskTriage(selectedTask, ocSessions).triage === "needs_you";
+                  onHandToAgent(selectedTask, p, srvId, mdl, rp, nt);
+                  if (wasWaiting) advanceAfterAction(selectedTask.id);
+                }}
+                onApprove={(dec) => {
+                  onApprove(selectedTask, dec);
+                  if (dec !== "reject") advanceAfterAction(selectedTask.id);
+                }}
+                onAnswerForm={(k, v, l) => {
+                  onAnswerForm(selectedTask, k, v, l);
+                  advanceAfterAction(selectedTask.id);
+                }}
+                onInterrupt={() => onInterrupt(selectedTask)}
                 onStart={onStart}
-                onComplete={() => onComplete(t)}
+                onMove={
+                  selectedTask.section_id === bufferId && focusId ? onMove : undefined
+                }
+                onComplete={() => {
+                  advanceAfterAction(selectedTask.id);
+                  onComplete(selectedTask);
+                }}
                 onDemote={onDemote}
                 onMoveProject={onMoveProject}
                 projects={projects}
                 onUpdate={onUpdate}
                 onDuration={onDuration}
-                onDelete={onDelete}
+                onDelete={(taskToDelete) => {
+                  advanceAfterAction(taskToDelete.id);
+                  onDelete(taskToDelete);
+                }}
               />
-            ))}
-          </ul>
-        )}
-        {focusId && (
-          <AddRow
-            ocConnected={ocConnected}
-            ocServers={ocServers}
-            ocServerOnlineById={ocServerOnlineById}
-            ocModelsByServer={ocModelsByServer}
-            ocProjectsByServer={ocProjectsByServer}
-            onAddProject={onAddProject}
-            onRefreshProjects={onRefreshProjects}
-            defaultServerId={defaultServerId}
-            placeholder="＋ Add to Focus… (~server @repo // prompt or Tab)"
-            hotkey="n"
-            sections={sections}
-            onAdd={(raw, extra) => onAdd(raw, focusId, extra)}
-          />
-        )}
-      </section>
-
-      {unlinkedOcSessions.length > 0 && (
-        <section className="border-t border-zinc-900 pt-3">
-          <p className="mb-1 px-2 text-[12px] text-zinc-500">
-            Unlinked OpenCode sessions (last 24h)
-          </p>
-          <ul className="space-y-0.5">
-            {unlinkedOcSessions.slice(0, 6).map((s) => (
-              <li
-                key={s.id}
-                className="flex min-h-9 items-center justify-between gap-2 rounded-md px-2 text-[13px] text-zinc-400 hover:bg-zinc-900"
+            </ul>
+          ) : (
+            <div className="rounded-xl border border-zinc-800/80 bg-zinc-900/30 p-8 text-center">
+              <p className="text-[15px] font-medium text-zinc-200">
+                No active tasks in Focus
+              </p>
+              <p className="mt-1 text-[13px] text-zinc-500">
+                Add a task in the left sidebar or pull tasks from your Backlog to begin.
+              </p>
+              <button
+                type="button"
+                onClick={onGoBacklog}
+                className="mt-4 rounded-md bg-orange-600 px-3.5 py-1.5 text-[13px] font-medium text-white hover:bg-orange-500"
               >
-                <div className="flex min-w-0 items-center gap-2">
-                  <span
-                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                      s.status === "running"
-                        ? "bg-zinc-300 animate-pulse"
-                        : "bg-orange-500"
-                    }`}
-                  />
-                  {ocServers.length > 1 && (
-                    <span className="shrink-0 rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.2 font-mono text-[11px] text-zinc-400">
-                      {s.serverId}
-                    </span>
-                  )}
-                  <span className="truncate text-zinc-300">{s.title}</span>
-                  {s.repoShort && (
-                    <span className="shrink-0 font-mono text-[11px] text-zinc-600">
-                      {s.repoShort}
-                    </span>
-                  )}
-                </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  <button
-                    onClick={() => onTrackOcSession(s)}
-                    className="text-[12px] text-zinc-400 hover:text-orange-500"
-                    title="Create a Todoist Focus task linked to this session"
-                  >
-                    ＋ Track
-                  </button>
-                  <button
-                    onClick={() => onIgnoreOcSession(s.id)}
-                    className="px-1 text-[12px] text-zinc-600 hover:text-zinc-400"
-                    title="Hide this session from Unlinked list (keeps session in OpenCode)"
-                  >
-                    ×
-                  </button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+                Pull from Backlog →
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -2567,6 +2930,7 @@ function InlineDiffViewer({
 function TaskRow({
   t,
   large,
+  stageMode = false,
   expanded,
   onToggle,
   onHandToAgent,
@@ -2599,6 +2963,7 @@ function TaskRow({
 }: {
   t: Task;
   large?: boolean;
+  stageMode?: boolean;
   expanded: boolean;
   onToggle: () => void;
   onHandToAgent: (
@@ -2646,7 +3011,8 @@ function TaskRow({
   useEffect(() => {
     if (!expanded) return;
     const down = (e: PointerEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) onToggle();
+      if (!stageMode && rootRef.current && !rootRef.current.contains(e.target as Node))
+        onToggle();
     };
     const key = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "e") {
@@ -2669,18 +3035,18 @@ function TaskRow({
         if (zen) {
           e.preventDefault();
           setZen(false);
-        } else {
+        } else if (!stageMode) {
           onToggle();
         }
       }
     };
-    document.addEventListener("pointerdown", down);
+    if (!stageMode) document.addEventListener("pointerdown", down);
     window.addEventListener("keydown", key);
     return () => {
-      document.removeEventListener("pointerdown", down);
+      if (!stageMode) document.removeEventListener("pointerdown", down);
       window.removeEventListener("keydown", key);
     };
-  }, [expanded, zen, onToggle]);
+  }, [expanded, zen, stageMode, onToggle]);
 
   const { triage, liveSession, meta } = resolveTaskTriage(t, ocSessions);
   const ui = TRIAGE_UI[triage];
@@ -2907,25 +3273,28 @@ function TaskRow({
     </div>
   );
 
-  const rowLeftBorder = expanded
-    ? "border-l-orange-500 bg-zinc-900/80 ring-1 ring-zinc-800"
-    : isBlockedOnHuman
-      ? "border-l-orange-500 bg-zinc-900/60"
-      : triage === "needs_you" && filesChanged.length > 0
-        ? "border-l-amber-400/90 bg-zinc-900/45"
-        : `${ui.leftBar || pBar(t.priority)}`;
+  const rowLeftBorder = stageMode
+    ? "border border-zinc-800/90 bg-zinc-900/45 p-1 sm:p-2"
+    : expanded
+      ? "border-l-2 border-l-orange-500 bg-zinc-900/80 ring-1 ring-zinc-800"
+      : isBlockedOnHuman
+        ? "border-l-2 border-l-orange-500 bg-zinc-900/60"
+        : triage === "needs_you" && filesChanged.length > 0
+          ? "border-l-2 border-l-amber-400/90 bg-zinc-900/45"
+          : `border-l-2 ${ui.leftBar || pBar(t.priority)}`;
 
   return (
     <li
       ref={rootRef}
-      className={`rounded-lg border-l-2 transition-colors duration-150 ${rowLeftBorder} ${
-        !expanded ? "hover:bg-zinc-900/65" : ""
+      className={`rounded-xl transition-colors duration-150 ${rowLeftBorder} ${
+        !expanded && !stageMode ? "hover:bg-zinc-900/65" : ""
       } ${isNew(t) ? "row-new" : ""}`}
     >
       {expanded ? (
         <RowEditor
           t={t}
           large={large}
+          stageMode={stageMode}
           zen={zen}
           onToggleZen={() => setZen((z) => !z)}
           dur={dur}
@@ -3143,6 +3512,7 @@ function TaskRow({
 function RowEditor({
   t,
   large,
+  stageMode = false,
   zen = false,
   onToggleZen,
   dur,
@@ -3175,6 +3545,7 @@ function RowEditor({
 }: {
   t: Task;
   large?: boolean;
+  stageMode?: boolean;
   zen?: boolean;
   onToggleZen?: () => void;
   dur: ReactNode;
@@ -3422,21 +3793,29 @@ function RowEditor({
           className={`flex items-center gap-2.5 ${
             zen
               ? "border-b border-zinc-800 pb-3"
-              : `px-3 ${large ? "min-h-13" : "min-h-10"}`
+              : stageMode
+                ? "px-3.5 py-2.5"
+                : `px-3 ${large ? "min-h-13" : "min-h-10"}`
           }`}
           onClick={(e) => {
-            if (!zen && !(e.target as HTMLElement).closest("input,button,select,textarea"))
+            if (
+              !zen &&
+              !stageMode &&
+              !(e.target as HTMLElement).closest("input,button,select,textarea")
+            )
               onClose();
           }}
         >
           <input
-            autoFocus
+            autoFocus={!stageMode}
             className={`min-w-0 flex-1 bg-transparent p-0 text-left outline-none ${
               zen
                 ? "text-[18px] font-semibold text-zinc-100"
-                : large
-                  ? "text-[15px] font-medium"
-                  : "text-[14px]"
+                : stageMode
+                  ? "text-[19px] sm:text-[21px] font-semibold tracking-[-0.015em] text-zinc-100"
+                  : large
+                    ? "text-[15px] font-medium"
+                    : "text-[14px]"
             }`}
             value={title}
             onChange={(e) => {
@@ -3445,7 +3824,7 @@ function RowEditor({
             }}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
-                if (zen) (e.target as HTMLInputElement).blur();
+                if (zen || stageMode) (e.target as HTMLInputElement).blur();
                 else onClose();
               }
             }}
@@ -3652,31 +4031,63 @@ function RowEditor({
 
             {/* Scrollable workspace region in Zen mode */}
             <div className={zen ? "min-h-0 flex-1 space-y-4 overflow-y-auto pr-1" : "space-y-3"}>
+              {/* Live Tool Pipeline when Agent is Working */}
+              {liveSession?.status === "running" &&
+                summary?.recentTools &&
+                summary.recentTools.length > 0 && (
+                  <div className="space-y-1.5 rounded-lg border border-zinc-800/80 bg-zinc-950/90 p-3 font-mono text-[12px]">
+                    {summary.recentTools.map((step, idx) => {
+                      const isLast = idx === summary.recentTools.length - 1;
+                      return (
+                        <div
+                          key={idx}
+                          className={`flex items-center gap-2 truncate ${
+                            isLast ? "font-medium text-zinc-100" : "text-zinc-500"
+                          }`}
+                        >
+                          <span
+                            className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                              isLast ? "bg-orange-500 animate-pulse" : "bg-zinc-600"
+                            }`}
+                          />
+                          <span className="truncate">{step.label}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
               {/* 2. OpenCode Question / Option Picker */}
               {liveSession?.form && (
-                <div className="space-y-1.5 border-l-2 border-l-orange-500 pl-3 py-0.5 text-[13px]">
+                <div className="space-y-2 border-l-2 border-l-orange-500 pl-3.5 py-1 text-[13px]">
                   {liveSession.form.fields.map((field) => (
-                    <div key={field.key} className="space-y-1.5">
-                      <div className="font-medium text-zinc-100">
+                    <div key={field.key} className="space-y-2">
+                      <div className="text-[15px] font-medium text-zinc-100">
                         {field.title || liveSession.form?.title}
                       </div>
                       {field.description && (
-                        <p className="text-[12px] text-zinc-400">{field.description}</p>
+                        <p className="text-[13px] text-zinc-400">{field.description}</p>
                       )}
                       {field.options && field.options.length > 0 && (
-                        <div className="grid gap-1.5 pt-1">
-                          {field.options.map((opt) => (
+                        <div
+                          className={
+                            stageMode
+                              ? "grid gap-2 pt-1 sm:grid-cols-2 xl:grid-cols-3"
+                              : "grid gap-1.5 pt-1"
+                          }
+                        >
+                          {field.options.map((opt, idx) => (
                             <button
                               key={opt.value}
                               type="button"
                               onClick={() => onAnswerForm(field.key, opt.value, opt.label)}
-                              className="flex flex-col items-start rounded border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-left hover:border-orange-500/60"
+                              className="flex flex-col items-start rounded-lg border border-zinc-800 bg-zinc-950/90 px-3.5 py-2.5 text-left transition-colors hover:border-orange-500/70"
                             >
                               <span className="text-[13px] font-medium text-zinc-100">
-                                {opt.label}
+                                {stageMode ? `${idx + 1}. ${opt.label}` : opt.label}
                               </span>
                               {opt.description && (
-                                <span className="text-[12px] text-zinc-400">
+                                <span className="mt-1 text-[12px] leading-snug text-zinc-400">
                                   {opt.description}
                                 </span>
                               )}
@@ -3733,7 +4144,15 @@ function RowEditor({
               {/* 3. Latest OpenCode Outcome (Markdown) + Checkpoints */}
               {(summary?.lastAssistantText || summary?.lastToolCall) && (
                 <div className="space-y-2 border-t border-zinc-800/60 pt-2.5">
-                  <div className={zen ? "" : "max-h-56 overflow-y-auto"}>
+                  <div
+                    className={
+                      zen
+                        ? ""
+                        : stageMode
+                          ? "max-h-[420px] overflow-y-auto"
+                          : "max-h-56 overflow-y-auto"
+                    }
+                  >
                     {summary.lastAssistantText ? (
                       <SimpleMarkdown text={summary.lastAssistantText} />
                     ) : (
@@ -6495,15 +6914,21 @@ function ProjectChips({
   projects: chips,
   projectId,
   onProject,
+  wide = false,
 }: {
   projects: Project[];
   projectId: string;
   onProject: (id: string) => void;
+  wide?: boolean;
 }) {
   if (chips.length < 2) return null;
   return (
     <div className="border-t border-zinc-900 bg-zinc-950/60">
-      <div className="mx-auto flex w-full max-w-5xl items-center gap-1 overflow-x-auto px-4 py-1.5 sm:px-6 lg:px-8">
+      <div
+        className={`mx-auto flex w-full items-center gap-1 overflow-x-auto px-4 py-1.5 sm:px-6 lg:px-8 ${
+          wide ? "max-w-[1680px]" : "max-w-5xl"
+        }`}
+      >
         <span className="mr-1 shrink-0 font-mono text-[11px] text-zinc-600">
           List:
         </span>
