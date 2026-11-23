@@ -1,0 +1,170 @@
+{
+  ".github/workflows/deploy.yml": {
+    "mtime": 1786730948.631817,
+    "seen": 1795445104.549398,
+    "ast_hash": "06ac591af53e44295273b8459174c658",
+    "semantic_hash": "06ac591af53e44295273b8459174c658"
+  },
+  ".vscode/settings.json": {
+    "mtime": 1791301630.539195,
+    "seen": 1795445104.549401,
+    "ast_hash": "a2537e590b6060d6d47c9c47431f2162",
+    "semantic_hash": "a2537e590b6060d6d47c9c47431f2162"
+  },
+  "firmware/flash.sh": {
+    "mtime": 1788965954.20675,
+    "seen": 1795445104.549403,
+    "ast_hash": "73ee52a4c1622e2bbdeae49a0de97fa0",
+    "semantic_hash": "73ee52a4c1622e2bbdeae49a0de97fa0"
+  },
+  "firmware/src/config.h": {
+    "mtime": 1791306562.1542742,
+    "seen": 1795445104.549404,
+    "ast_hash": "dbfba44d0c7cac1e43076dba26081aa3",
+    "semantic_hash": "dbfba44d0c7cac1e43076dba26081aa3"
+  },
+  "firmware/src/main.cpp": {
+    "mtime": 1792257158.6351504,
+    "seen": 1795445104.5494049,
+    "ast_hash": "1b0492f2f1b31cfcaf0f13dd6cedfb5c",
+    "semantic_hash": "1b0492f2f1b31cfcaf0f13dd6cedfb5c"
+  },
+  "firmware/src/secrets.example.h": {
+    "mtime": 1791307478.5310311,
+    "seen": 1795445104.5494049,
+    "ast_hash": "8bcf509006320787c67157d9ab9ea841",
+    "semantic_hash": "8bcf509006320787c67157d9ab9ea841"
+  },
+  "package.json": {
+    "mtime": 1791287045.2900674,
+    "seen": 1795445104.549406,
+    "ast_hash": "ff71008dce1ea134540090645e462d7a",
+    "semantic_hash": "ff71008dce1ea134540090645e462d7a"
+  },
+  "public/oauth-client-metadata.json": {
+    "mtime": 1795361664.6747124,
+    "seen": 1795445104.549406,
+    "ast_hash": "73e796d9750ca05a9c4b80f764cb6129",
+    "semantic_hash": "73e796d9750ca05a9c4b80f764cb6129"
+  },
+  "src/App.tsx": {
+    "mtime": 1795435312.0331826,
+    "seen": 1795445104.549407,
+    "ast_hash": "0e416edc4d3c1d242fca267c05f08433",
+    "semantic_hash": "0e416edc4d3c1d242fca267c05f08433"
+  },
+  "src/MockFlightDeck.tsx": {
+    "mtime": 1795073780.172764,
+    "seen": 1795445104.549407,
+    "ast_hash": "4d200adb29daefbdbcff85ce3f6aefbe",
+    "semantic_hash": "4d200adb29daefbdbcff85ce3f6aefbe"
+  },
+  "src/auth.ts": {
+    "mtime": 1788537553.8971963,
+    "seen": 1795445104.549408,
+    "ast_hash": "fe477f5cd0b9c8778cd0a362a78964d7",
+    "semantic_hash": "fe477f5cd0b9c8778cd0a362a78964d7"
+  },
+  "src/deviceSerial.ts": {
+    "mtime": 1795361674.098902,
+    "seen": 1795445104.549409,
+    "ast_hash": "46a01753989c13bac3bc85dcf7700d5c",
+    "semantic_hash": "46a01753989c13bac3bc85dcf7700d5c"
+  },
+  "src/main.tsx": {
+    "mtime": 1794581385.7611816,
+    "seen": 1795445104.549409,
+    "ast_hash": "1441e0b9712fce6631f40922e13bebb4",
+    "semantic_hash": "1441e0b9712fce6631f40922e13bebb4"
+  },
+  "src/markdown.tsx": {
+    "mtime": 1794763073.903734,
+    "seen": 1795445104.54941,
+    "ast_hash": "fd938344d0662b06918cc4f4e10b11d3",
+    "semantic_hash": "fd938344d0662b06918cc4f4e10b11d3"
+  },
+  "src/opencode.ts": {
+    "mtime": 1795433629.6764526,
+    "seen": 1795445104.54941,
+    "ast_hash": "853981595c9c4a7231ddef02d6a1a25c",
+    "semantic_hash": "853981595c9c4a7231ddef02d6a1a25c"
+  },
+  "tsconfig.json": {
+    "mtime": 1786721379.3241668,
+    "seen": 1795445104.549411,
+    "ast_hash": "c4dfb4c469787ed4a808e0ea6a6ec3b1",
+    "semantic_hash": "c4dfb4c469787ed4a808e0ea6a6ec3b1"
+  },
+  "vite.config.ts": {
+    "mtime": 1794839730.6718452,
+    "seen": 1795445104.549411,
+    "ast_hash": "a1b5e2f886dea2fd6326d40c169a14b2",
+    "semantic_hash": "a1b5e2f886dea2fd6326d40c169a14b2"
+  },
+  "CHANGELOG.md": {
+    "mtime": 1792768345.2657468,
+    "seen": 1795445104.549412,
+    "ast_hash": "63c06330456284b334508ecac24e08f6",
+    "semantic_hash": "63c06330456284b334508ecac24e08f6"
+  },
+  "README.md": {
+    "mtime": 1792768345.2834835,
+    "seen": 1795445104.5494132,
+    "ast_hash": "c57ed82e73befdfcfc79c42a54f5e582",
+    "semantic_hash": "c57ed82e73befdfcfc79c42a54f5e582"
+  },
+  "docs/firmware-v2.md": {
+    "mtime": 1795361681.0547283,
+    "seen": 1795445104.5494132,
+    "ast_hash": "a01dee148f47a82f5c31e81d5eee8784",
+    "semantic_hash": "a01dee148f47a82f5c31e81d5eee8784"
+  },
+  "firmware/CMakeLists.txt": {
+    "mtime": 1791302579.151374,
+    "seen": 1795445104.549414,
+    "ast_hash": "fc514883f4f1ceb40d7f00738e8f8533",
+    "semantic_hash": "fc514883f4f1ceb40d7f00738e8f8533"
+  },
+  "firmware/DESIGN.md": {
+    "mtime": 1788966188.478243,
+    "seen": 1795445104.549414,
+    "ast_hash": "ddf9fde67ad1d5d4a6f7221d7c63e553",
+    "semantic_hash": "ddf9fde67ad1d5d4a6f7221d7c63e553"
+  },
+  "firmware/README.md": {
+    "mtime": 1791307478.52202,
+    "seen": 1795445104.5494149,
+    "ast_hash": "7daccd7e6855f1aca87d43874572620a",
+    "semantic_hash": "7daccd7e6855f1aca87d43874572620a"
+  },
+  "firmware/SPEC.md": {
+    "mtime": 1788922631.2157493,
+    "seen": 1795445104.5494149,
+    "ast_hash": "074cad158e818adaf5920243bbeeffb1",
+    "semantic_hash": "074cad158e818adaf5920243bbeeffb1"
+  },
+  "firmware/esp-preview.html": {
+    "mtime": 1788965686.2359254,
+    "seen": 1795445104.5494158,
+    "ast_hash": "331a9b4af137a37135335a3c5cb843be",
+    "semantic_hash": "331a9b4af137a37135335a3c5cb843be"
+  },
+  "firmware/src/CMakeLists.txt": {
+    "mtime": 1791301329.6392004,
+    "seen": 1795445104.5494158,
+    "ast_hash": "b10c99e9327af964ecb3b89e27bdbc2f",
+    "semantic_hash": "b10c99e9327af964ecb3b89e27bdbc2f"
+  },
+  "index.html": {
+    "mtime": 1787422146.313127,
+    "seen": 1795445104.549417,
+    "ast_hash": "686b771489d7b1aafd2a5532f6dd14c9",
+    "semantic_hash": "686b771489d7b1aafd2a5532f6dd14c9"
+  },
+  "public/icon.svg": {
+    "mtime": 1787422115.9736967,
+    "seen": 1795445104.549417,
+    "ast_hash": "5d5528e0346ef20168ceeceeacc20942",
+    "semantic_hash": "5d5528e0346ef20168ceeceeacc20942"
+  }
+}
