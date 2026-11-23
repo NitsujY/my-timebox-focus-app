@@ -34,8 +34,11 @@ import {
   saveOpenCodeConfig,
   sendOpenCodePrompt,
   shortModelLabel,
+  suggestBacklogTasks,
   switchOpenCodeSessionModel,
   verifyAllOpenCodeServers,
+  type BacklogSignal,
+  type BacklogSuggestion,
   type OpenCodeConfig,
   type OpenCodeLiveSession,
   type OpenCodeModelOption,
@@ -45,6 +48,7 @@ import {
   type SessionFileDiff,
   type SessionSummary,
   type TaskMeta,
+  type TriageResult,
   type TriageState,
 } from "./opencode";
 import { SimpleMarkdown } from "./markdown";
@@ -1751,7 +1755,21 @@ export default function App() {
                 Your parking lot for ideas. Dump anything here — it waits without interrupting you.
               </p>
             ) : (
-              <BacklogList
+              <>
+                <div className="mt-3 mb-1.5 flex items-center justify-between gap-2 px-1 font-mono text-[11px]">
+                  <span className="text-zinc-500">
+                    {backlogTasks.length} task{backlogTasks.length === 1 ? "" : "s"} in parking lot
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setView("focus")}
+                    className="inline-flex items-center gap-1.5 rounded border border-orange-500/40 bg-orange-950/30 px-2.5 py-1 text-orange-400 hover:border-orange-500 hover:bg-orange-950/50"
+                    title="Switch to Focus and open Triage suggestions"
+                  >
+                    ⚡ Triage to Focus →
+                  </button>
+                </div>
+                <BacklogList
                 tasks={backlogTasks}
                 expandedId={expandedId}
                 spentBy={spentBy}
@@ -1781,12 +1799,15 @@ export default function App() {
                 durations={prefs.durations}
                 defaultMinutes={prefs.defaultMinutes}
               />
+              </>
             )}
           </section>
         ) : (
           <FocusView
             focusTasks={focusTasks}
             bufferTasks={bufferTasks}
+            backlogTasks={backlogTasks}
+            sessions={sessions}
             backlogCount={backlogTasks.length}
             sections={sections}
             focusId={roles.focus}
@@ -2016,9 +2037,254 @@ type AddExtra = {
   mode?: "save" | "drive" | "agent";
 };
 
+function TriageStage({
+  suggestions,
+  loading,
+  source,
+  serverName,
+  modelLabel,
+  backlogTasks,
+  defaultServerId,
+  onPickFocus,
+  onPickStart,
+  onPickAgent,
+  onRefresh,
+  onClose,
+}: {
+  suggestions: BacklogSuggestion[];
+  loading: boolean;
+  source?: "opencode" | "heuristic";
+  serverName?: string;
+  modelLabel?: string;
+  backlogTasks: Task[];
+  defaultServerId: string;
+  onPickFocus: (t: Task) => void;
+  onPickStart: (t: Task, minutes: number) => void;
+  onPickAgent: (t: Task, serverId?: string) => void;
+  onRefresh: () => void;
+  onClose?: () => void;
+}) {
+  const renderPriorityBadge = (p: number) => {
+    switch (p) {
+      case 4:
+        return (
+          <span className="rounded border border-red-500/40 bg-red-950/50 px-1.5 py-0.5 font-mono text-[11px] text-red-300">
+            [P4]
+          </span>
+        );
+      case 3:
+        return (
+          <span className="rounded border border-amber-500/40 bg-amber-950/50 px-1.5 py-0.5 font-mono text-[11px] text-amber-300">
+            [P3]
+          </span>
+        );
+      case 2:
+        return (
+          <span className="rounded border border-blue-500/40 bg-blue-950/50 px-1.5 py-0.5 font-mono text-[11px] text-blue-300">
+            [P2]
+          </span>
+        );
+      default:
+        return (
+          <span className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 font-mono text-[11px] text-zinc-400">
+            [P1]
+          </span>
+        );
+    }
+  };
+
+  const renderSignalBadge = (sig: BacklogSignal) => {
+    switch (sig) {
+      case "blocker":
+        return (
+          <span
+            key={sig}
+            className="inline-flex items-center gap-1 rounded border border-red-500/40 bg-red-950/40 px-1.5 py-0.5 font-mono text-[11px] text-red-300"
+          >
+            ⚡ blocker
+          </span>
+        );
+      case "deadline":
+        return (
+          <span
+            key={sig}
+            className="inline-flex items-center gap-1 rounded border border-amber-500/40 bg-amber-950/40 px-1.5 py-0.5 font-mono text-[11px] text-amber-300"
+          >
+            ⏰ deadline
+          </span>
+        );
+      case "agent":
+        return (
+          <span
+            key={sig}
+            className="inline-flex items-center gap-1 rounded border border-orange-500/40 bg-orange-950/40 px-1.5 py-0.5 font-mono text-[11px] text-orange-300"
+          >
+            ◈ agent
+          </span>
+        );
+      case "recent":
+        return (
+          <span
+            key={sig}
+            className="inline-flex items-center gap-1 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-[11px] text-zinc-300"
+          >
+            ⟲ recent
+          </span>
+        );
+      case "quick":
+        return (
+          <span
+            key={sig}
+            className="inline-flex items-center gap-1 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-[11px] text-zinc-300"
+          >
+            ⚡ quick
+          </span>
+        );
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-zinc-800/90 bg-zinc-950 p-5 space-y-4 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/80 pb-3 font-mono text-[11px]">
+        <div className="flex items-center gap-2">
+          <span className="h-2 w-2 rounded-full bg-orange-500 animate-pulse" />
+          <span className="font-semibold uppercase tracking-wider text-orange-400">
+            ⚡ Triage · {suggestions.length} picks from Backlog ({backlogTasks.length})
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-zinc-500">
+            {loading
+              ? "● evaluating backlog…"
+              : source === "opencode"
+                ? `${serverName || "OpenCode"} · ${modelLabel || "model"}`
+                : "heuristic rank"}
+          </span>
+          <button
+            type="button"
+            onClick={onRefresh}
+            title="Refresh recommendations"
+            className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+          >
+            ⟲
+          </button>
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              title="Close triage (Esc)"
+              className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+            >
+              ✕ Esc
+            </button>
+          )}
+        </div>
+      </div>
+
+      {loading && suggestions.length === 0 ? (
+        <div className="py-12 text-center font-mono text-[12px] text-zinc-500 space-y-1">
+          <p className="text-zinc-300">● Reading backlog ({backlogTasks.length} tasks)</p>
+          <p className="text-[11px] text-zinc-600">
+            Checking priorities, deadlines, continuity, and agent readiness…
+          </p>
+        </div>
+      ) : suggestions.length === 0 ? (
+        <div className="py-8 text-center text-[13px] text-zinc-500">
+          <p>No remaining suggestions in backlog.</p>
+        </div>
+      ) : (
+        <ul className="space-y-3">
+          {suggestions.map((s, idx) => {
+            const t = backlogTasks.find((item) => item.id === s.taskId);
+            if (!t) return null;
+            const meta = parseTaskDescription(t.description);
+            const repoDisplay = shortRepo(meta.repo);
+
+            return (
+              <li
+                key={t.id}
+                className="group flex flex-col gap-2 rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-3.5 transition-colors hover:border-zinc-700 hover:bg-zinc-900/70"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-2.5 min-w-0">
+                    <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded border border-zinc-700 bg-zinc-900 font-mono text-[11px] font-medium text-orange-400">
+                      {idx + 1}
+                    </span>
+                    <div className="min-w-0 space-y-1.5">
+                      <p className="text-[15px] font-medium leading-snug text-zinc-100">
+                        {t.content}
+                      </p>
+                      <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
+                        {renderPriorityBadge(t.priority)}
+                        {repoDisplay && (
+                          <span className="rounded border border-zinc-800 bg-zinc-900/80 px-1.5 py-0.5 text-zinc-400">
+                            {repoDisplay}
+                          </span>
+                        )}
+                        <span className="rounded border border-zinc-800 bg-zinc-900/80 px-1.5 py-0.5 text-zinc-400">
+                          ⏱ {s.suggestedMinutes}m
+                        </span>
+                        {s.signals.map((sig) => renderSignalBadge(sig))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex shrink-0 items-center gap-1.5 pt-0.5 font-mono text-[11px]">
+                    {s.strategy === "agent" ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => onPickAgent(t, s.targetServerId)}
+                          title={`Delegate to OpenCode (${s.targetServerId || defaultServerId}) (Key ${idx + 1})`}
+                          className="rounded border border-orange-500/50 bg-orange-950/60 px-2.5 py-1 font-medium text-orange-300 hover:border-orange-500 hover:bg-orange-900/80"
+                        >
+                          {idx + 1}: ◈ Run {s.targetServerId || defaultServerId}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onPickFocus(t)}
+                          title="Pull into Focus queue"
+                          className="rounded border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                        >
+                          🎯 Focus
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => onPickFocus(t)}
+                          title={`Pull into Focus queue (Key ${idx + 1})`}
+                          className="rounded border border-orange-500/50 bg-orange-950/60 px-2.5 py-1 font-medium text-orange-300 hover:border-orange-500 hover:bg-orange-900/80"
+                        >
+                          {idx + 1}: 🎯 Focus
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onPickStart(t, s.suggestedMinutes)}
+                          title={`Move to Focus and start ${s.suggestedMinutes}m timer`}
+                          className="rounded border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                        >
+                          ▶ {s.suggestedMinutes}m
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function FocusView({
   focusTasks,
   bufferTasks,
+  backlogTasks,
+  sessions,
   backlogCount,
   sections,
   focusId,
@@ -2066,6 +2332,8 @@ function FocusView({
 }: {
   focusTasks: Task[];
   bufferTasks: Task[];
+  backlogTasks: Task[];
+  sessions: Session[];
   backlogCount: number;
   sections: SectionMap;
   focusId?: string;
@@ -2122,6 +2390,12 @@ function FocusView({
   const showPlan =
     planBanner && focusTasks.length === 0 && backlogCount > 0 && dismissed !== todayStr();
 
+  const [triageOpen, setTriageOpen] = useState(
+    () => focusTasks.length === 0 && backlogTasks.length > 0,
+  );
+  const [triageLoading, setTriageLoading] = useState(false);
+  const [triageData, setTriageData] = useState<TriageResult | null>(null);
+
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
     const saved = Number(load("tb_sidebar_width", 420));
     return saved >= 280 && saved <= 760 ? saved : 420;
@@ -2133,6 +2407,105 @@ function FocusView({
   useEffect(() => {
     if (expandedId) setSelectedId(expandedId);
   }, [expandedId]);
+
+  const runTriage = useCallback(async () => {
+    if (backlogTasks.length === 0) return;
+    setTriageLoading(true);
+    try {
+      const recentRepos = sessions
+        .filter((s) => s.repo && Date.now() - s.timestamp < 24 * 3600_000)
+        .map((s) => s.repo!)
+        .filter(Boolean);
+      const res = await suggestBacklogTasks({
+        backlogTasks,
+        focusTasks,
+        recentRepos,
+        serverId: defaultServerId,
+        defaultMinutes,
+      });
+      setTriageData(res);
+    } catch {
+      /* ignore */
+    } finally {
+      setTriageLoading(false);
+    }
+  }, [backlogTasks, focusTasks, sessions, defaultServerId, defaultMinutes]);
+
+  useEffect(() => {
+    if (triageOpen && !triageData && !triageLoading && backlogTasks.length > 0) {
+      void runTriage();
+    }
+  }, [triageOpen, triageData, triageLoading, backlogTasks.length, runTriage]);
+
+  const handlePickFocus = (t: Task) => {
+    if (focusId) onMove(t);
+    setTriageData((prev) =>
+      prev
+        ? {
+            ...prev,
+            suggestions: prev.suggestions.filter((s) => s.taskId !== t.id),
+          }
+        : null,
+    );
+  };
+
+  const handlePickStart = (t: Task, minutes: number) => {
+    if (focusId) onMove(t);
+    onStart(t, minutes);
+    setTriageData((prev) =>
+      prev
+        ? {
+            ...prev,
+            suggestions: prev.suggestions.filter((s) => s.taskId !== t.id),
+          }
+        : null,
+    );
+  };
+
+  const handlePickAgent = (t: Task, serverId?: string) => {
+    if (focusId) onMove(t);
+    onHandToAgent(t, undefined, serverId);
+    setTriageData((prev) =>
+      prev
+        ? {
+            ...prev,
+            suggestions: prev.suggestions.filter((s) => s.taskId !== t.id),
+          }
+        : null,
+    );
+  };
+
+  useEffect(() => {
+    if (!triageOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea") return;
+
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setTriageOpen(false);
+        return;
+      }
+
+      if (e.key === "1" || e.key === "2" || e.key === "3") {
+        const idx = Number(e.key) - 1;
+        const s = triageData?.suggestions?.[idx];
+        if (s) {
+          e.preventDefault();
+          const targetTask = backlogTasks.find((item) => item.id === s.taskId);
+          if (targetTask) {
+            if (s.strategy === "agent") {
+              handlePickAgent(targetTask, s.targetServerId);
+            } else {
+              handlePickFocus(targetTask);
+            }
+          }
+        }
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [triageOpen, triageData, backlogTasks]);
 
   const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -2409,9 +2782,19 @@ function FocusView({
           <p className="text-[13px] text-zinc-400">
             Plan your day — pull up to {cap} tasks into Focus
           </p>
-          <div className="flex shrink-0 gap-1">
+          <div className="flex shrink-0 gap-1.5">
+            <button
+              className="rounded bg-orange-600 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-orange-500"
+              onClick={() => {
+                setTriageOpen(true);
+                setMobileShowStage(true);
+                if (!triageData && !triageLoading) void runTriage();
+              }}
+            >
+              ⚡ Triage Backlog
+            </button>
             <button className={`${btn} text-orange-500`} onClick={onGoBacklog}>
-              Pull from Backlog
+              Browse Backlog
             </button>
             <button
               className={btn}
@@ -2505,20 +2888,54 @@ function FocusView({
                   Ready in Focus
                 </h2>
               </div>
-              <span className="font-mono text-[12px] tabular-nums text-zinc-500">
-                {laneQueuedFocus.length + laneQueuedBuffer.length}
-              </span>
+              <div className="flex items-center gap-2">
+                {backlogTasks.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTriageOpen(true);
+                      setMobileShowStage(true);
+                      if (!triageData && !triageLoading) void runTriage();
+                    }}
+                    className="inline-flex items-center gap-1 rounded border border-orange-500/40 bg-zinc-900/80 px-2 py-0.5 font-mono text-[10px] font-medium text-orange-400 hover:border-orange-500 hover:text-orange-300"
+                    title="Triage top tasks from Backlog"
+                  >
+                    ⚡ Triage
+                  </button>
+                )}
+                <span className="font-mono text-[12px] tabular-nums text-zinc-500">
+                  {laneQueuedFocus.length + laneQueuedBuffer.length}
+                </span>
+              </div>
             </div>
 
             {laneQueuedFocus.length === 0 && laneQueuedBuffer.length === 0 ? (
-              <button
-                type="button"
-                className="block w-full rounded-lg border border-zinc-900 bg-zinc-950/50 px-3.5 py-4 text-left text-[13px] text-zinc-500 hover:border-zinc-800"
-                onClick={onGoBacklog}
-              >
-                Focus holds today's top {cap} tasks.{" "}
-                <span className="text-orange-500">Pull from Backlog →</span>
-              </button>
+              <div className="rounded-lg border border-zinc-900 bg-zinc-950/50 p-3 space-y-2">
+                <div className="flex items-center justify-between text-[12px] text-zinc-400">
+                  <span>Focus slots open (0/{cap})</span>
+                  <span className="font-mono text-[11px] text-zinc-500">
+                    {backlogTasks.length} in backlog
+                  </span>
+                </div>
+                {backlogTasks.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTriageOpen(true);
+                      setMobileShowStage(true);
+                      if (!triageData && !triageLoading) void runTriage();
+                    }}
+                    className="flex w-full items-center justify-center gap-2 rounded border border-orange-500/40 bg-orange-950/30 px-3 py-2 text-[13px] font-medium text-orange-400 hover:border-orange-500 hover:bg-orange-950/50 transition-colors"
+                  >
+                    <span>⚡ Triage Backlog</span>
+                    <span className="font-mono text-[11px] text-orange-300/80">
+                      ({backlogTasks.length})
+                    </span>
+                  </button>
+                ) : (
+                  <p className="text-[13px] text-zinc-500">Backlog is empty.</p>
+                )}
+              </div>
             ) : (
               <ul className="space-y-1.5">
                 {laneQueuedFocus.map((t) => renderSidebarCard(t, false))}
@@ -2637,13 +3054,16 @@ function FocusView({
         {/* RIGHT MAIN STAGE WORKSPACE */}
         <div
           className={`min-w-0 flex-1 md:sticky md:top-20 ${
-            mobileShowStage && selectedTask ? "block" : "hidden md:block"
+            mobileShowStage && (selectedTask || triageOpen) ? "block" : "hidden md:block"
           }`}
         >
-          {mobileShowStage && selectedTask && (
+          {mobileShowStage && (selectedTask || triageOpen) && (
             <button
               type="button"
-              onClick={() => setMobileShowStage(false)}
+              onClick={() => {
+                setMobileShowStage(false);
+                setTriageOpen(false);
+              }}
               className="mb-3 inline-flex items-center gap-1.5 text-[13px] font-medium text-orange-400 md:hidden"
             >
               ← Back to Focus queues
@@ -2651,7 +3071,22 @@ function FocusView({
             </button>
           )}
 
-          {selectedTask ? (
+          {triageOpen && backlogTasks.length > 0 ? (
+            <TriageStage
+              suggestions={triageData?.suggestions ?? []}
+              loading={triageLoading}
+              source={triageData?.source}
+              serverName={triageData?.serverName}
+              modelLabel={triageData?.modelLabel}
+              backlogTasks={backlogTasks}
+              defaultServerId={defaultServerId}
+              onPickFocus={handlePickFocus}
+              onPickStart={handlePickStart}
+              onPickAgent={handlePickAgent}
+              onRefresh={runTriage}
+              onClose={() => setTriageOpen(false)}
+            />
+          ) : selectedTask ? (
             <ul className="list-none">
               <TaskRow
                 key={selectedTask.id}
@@ -2716,13 +3151,27 @@ function FocusView({
               <p className="mt-1 text-[13px] text-zinc-500">
                 Add a task in the left sidebar or pull tasks from your Backlog to begin.
               </p>
-              <button
-                type="button"
-                onClick={onGoBacklog}
-                className="mt-4 rounded-md bg-orange-600 px-3.5 py-1.5 text-[13px] font-medium text-white hover:bg-orange-500"
-              >
-                Pull from Backlog →
-              </button>
+              <div className="mt-4 flex items-center justify-center gap-2">
+                {backlogTasks.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTriageOpen(true);
+                      if (!triageData && !triageLoading) void runTriage();
+                    }}
+                    className="rounded-md bg-orange-600 px-3.5 py-1.5 text-[13px] font-medium text-white hover:bg-orange-500"
+                  >
+                    ⚡ Triage Backlog ({backlogTasks.length})
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onGoBacklog}
+                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3.5 py-1.5 text-[13px] text-zinc-300 hover:border-zinc-600 hover:text-zinc-100"
+                >
+                  Browse Backlog →
+                </button>
+              </div>
             </div>
           )}
         </div>

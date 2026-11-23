@@ -1582,3 +1582,249 @@ export async function fetchOpenCodeSessionSummary(
     return cached?.summary ?? null;
   }
 }
+
+export async function deleteOpenCodeSession(
+  sessionID: string,
+  serverId?: string,
+): Promise<void> {
+  if (!sessionID) return;
+  const srv = resolveServer(serverId);
+  const base = resolveOpenCodeBase(srv.endpoint);
+  try {
+    await fetch(`${base}/session/${sessionID}`, {
+      method: "DELETE",
+      headers: buildServerHeaders(srv),
+    });
+  } catch {
+    /* ignore deletion errors */
+  }
+}
+
+export type BacklogSignal = "blocker" | "deadline" | "recent" | "agent" | "quick";
+
+export type TriageTaskInput = {
+  id: string;
+  content: string;
+  priority: number;
+  description?: string | null;
+  due?: { datetime?: string; date: string } | null;
+  duration?: { amount: number; unit: string } | null;
+  added_at?: string;
+};
+
+export type BacklogSuggestion = {
+  taskId: string;
+  score: number;
+  suggestedMinutes: number;
+  strategy: "focus" | "agent";
+  signals: BacklogSignal[];
+  targetServerId?: string;
+  targetRepo?: string;
+};
+
+export type TriageResult = {
+  suggestions: BacklogSuggestion[];
+  source: "opencode" | "heuristic";
+  serverName?: string;
+  modelLabel?: string;
+};
+
+export async function suggestBacklogTasks(opts: {
+  backlogTasks: TriageTaskInput[];
+  focusTasks?: TriageTaskInput[];
+  recentRepos?: string[];
+  serverId?: string;
+  defaultMinutes?: number;
+}): Promise<TriageResult> {
+  const { backlogTasks, focusTasks = [], recentRepos = [], defaultMinutes = 25 } = opts;
+  if (backlogTasks.length === 0) {
+    return { suggestions: [], source: "heuristic" };
+  }
+
+  // 1. Compute high-precision heuristic baseline
+  const recentRepoSet = new Set(recentRepos.map((r) => r.toLowerCase().trim()).filter(Boolean));
+  for (const ft of focusTasks) {
+    const meta = parseTaskDescription(ft.description);
+    if (meta.repo) recentRepoSet.add(meta.repo.toLowerCase().trim());
+  }
+
+  const BLOCKER_RE = /\b(block|fix|bug|broken|fail|error|panic|crash|incident|p0|p1|urgent)\b/i;
+  const today = new Date().toISOString().split("T")[0];
+
+  const scored: BacklogSuggestion[] = backlogTasks.map((t) => {
+    const meta = parseTaskDescription(t.description);
+    const signals: BacklogSignal[] = [];
+    let score = (t.priority || 1) * 25; // 25 to 100
+
+    // Deadline signal
+    if (t.due?.date) {
+      if (t.due.date <= today) {
+        signals.push("deadline");
+        score += 45;
+      }
+    }
+
+    // Blocker signal
+    if (BLOCKER_RE.test(t.content) || (meta.note && BLOCKER_RE.test(meta.note))) {
+      signals.push("blocker");
+      score += 35;
+    }
+
+    // Continuity / recent repo signal
+    const taskRepo = meta.repo.toLowerCase().trim();
+    if (taskRepo && recentRepoSet.has(taskRepo)) {
+      signals.push("recent");
+      score += 30;
+    }
+
+    // Agent delegation ready signal
+    const isAgent = Boolean(meta.queued || meta.prompt || (meta.repo && meta.prompt));
+    if (isAgent) {
+      signals.push("agent");
+      score += 20;
+    }
+
+    // Quick win signal
+    const dur = t.duration?.amount ?? defaultMinutes;
+    if (dur <= 20) {
+      signals.push("quick");
+      score += 15;
+    }
+
+    return {
+      taskId: t.id,
+      score,
+      suggestedMinutes: dur,
+      strategy: isAgent ? "agent" : "focus",
+      signals,
+      targetServerId: meta.server || opts.serverId,
+      targetRepo: meta.repo,
+    };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  const heuristicTop = scored.slice(0, 3);
+
+  // 2. Try OpenCode if server is online
+  const srv = resolveServer(opts.serverId);
+  const cfg = loadOpenCodeConfig();
+  const isOnline = srv.enabled !== false;
+
+  if (!isOnline) {
+    return {
+      suggestions: heuristicTop,
+      source: "heuristic",
+    };
+  }
+
+  try {
+    const base = resolveOpenCodeBase(srv.endpoint);
+    const testRes = await fetch(`${base}/session?limit=1`, {
+      headers: buildServerHeaders(srv),
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!testRes.ok) {
+      return { suggestions: heuristicTop, source: "heuristic" };
+    }
+
+    const candidates = scored.slice(0, 8).map((s) => {
+      const t = backlogTasks.find((item) => item.id === s.taskId)!;
+      const meta = parseTaskDescription(t.description);
+      return {
+        id: t.id,
+        title: t.content,
+        priority: `P${t.priority || 1}`,
+        repo: meta.repo || undefined,
+        agentPrompt: meta.prompt || undefined,
+        duration: `${s.suggestedMinutes}m`,
+      };
+    });
+
+    const promptText = `Select top 3 tasks from this backlog to pull into focus right now.
+Return ONLY valid JSON array with up to 3 objects: [{"taskId": string, "strategy": "focus" | "agent", "signals": string[]}]
+Signals: "blocker", "deadline", "recent", "agent", "quick".
+Candidates:
+${JSON.stringify(candidates, null, 2)}`;
+
+    const sessionId = await createAndPromptOpenCodeSession({
+      title: `[Triage] Backlog Suggestions`,
+      directory: srv.defaultDir || DEFAULT_WORKSPACE_DIR,
+      promptText,
+      serverId: srv.id,
+      modelKey: srv.defaultModel || cfg.defaultModel,
+    });
+
+    const pollStart = Date.now();
+    let assistantReply = "";
+    while (Date.now() - pollStart < 5000) {
+      await new Promise((r) => setTimeout(r, 500));
+      const msgRes = await fetch(`${base}/session/${sessionId}/message?limit=5`, {
+        headers: buildServerHeaders(srv),
+      });
+      if (!msgRes.ok) break;
+      const json = await msgRes.json();
+      const msgs = (json.data ?? []) as Array<{
+        type?: string;
+        text?: string;
+        content?: Array<{ type?: string; text?: string }>;
+      }>;
+      const assistant = msgs.find((m) => m.type === "assistant");
+      if (assistant) {
+        const text =
+          assistant.text ||
+          assistant.content?.map((c) => c.text).filter(Boolean).join("\n") ||
+          "";
+        if (text.trim()) {
+          assistantReply = text.trim();
+          break;
+        }
+      }
+    }
+
+    void deleteOpenCodeSession(sessionId, srv.id);
+
+    if (assistantReply) {
+      const match = assistantReply.match(/\[[\s\S]*\]/);
+      if (match) {
+        const parsed = JSON.parse(match[0]) as Array<{
+          taskId: string;
+          strategy?: "focus" | "agent";
+          signals?: BacklogSignal[];
+        }>;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const validSuggestions: BacklogSuggestion[] = [];
+          for (const item of parsed) {
+            const orig = scored.find((s) => s.taskId === item.taskId);
+            if (orig) {
+              const combinedSignals = Array.from(
+                new Set([...(item.signals || []), ...orig.signals]),
+              ).filter((sig): sig is BacklogSignal =>
+                ["blocker", "deadline", "recent", "agent", "quick"].includes(sig),
+              );
+              validSuggestions.push({
+                ...orig,
+                strategy: item.strategy === "agent" ? "agent" : orig.strategy,
+                signals: combinedSignals,
+              });
+            }
+          }
+          if (validSuggestions.length > 0) {
+            return {
+              suggestions: validSuggestions.slice(0, 3),
+              source: "opencode",
+              serverName: srv.name,
+              modelLabel: srv.defaultModel || "OpenCode",
+            };
+          }
+        }
+      }
+    }
+  } catch {
+    /* fallback to heuristic */
+  }
+
+  return {
+    suggestions: heuristicTop,
+    source: "heuristic",
+  };
+}
