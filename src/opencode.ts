@@ -679,21 +679,72 @@ export function getServerRepos(serverId?: string, cfg?: OpenCodeConfig): OpenCod
   return srv.repos && srv.repos.length > 0 ? srv.repos : KNOWN_REPOS;
 }
 
-export function dirToShortRepo(dir?: string): string {
+export function dirToShortRepo(dir?: string, extraRepos: OpenCodeRepo[] = []): string {
   if (!dir || dir === DEFAULT_WORKSPACE_DIR) return "";
-  const hit = KNOWN_REPOS.find((r) => dir === r.dir || dir.startsWith(r.dir + "/"));
-  if (hit) return hit.label.replace(/^vyond\//, "");
+  const hit =
+    extraRepos.find((r) => dir === r.dir || dir.startsWith(r.dir + "/")) ??
+    KNOWN_REPOS.find((r) => dir === r.dir || dir.startsWith(r.dir + "/"));
+  if (hit) return hit.label.replace(/^vyond\//, "").replace(/^homelab\//, "");
   const parts = dir.replace(/\/$/, "").split("/");
   return parts.slice(-2).join("/");
 }
 
-export function resolveRepoDir(repoToken?: string, serverId?: string): string {
+export function pathToRepoLabel(dir: string, defaultDir = DEFAULT_WORKSPACE_DIR): string {
+  const clean = dir.replace(/\/+$/, "");
+  const known = KNOWN_REPOS.find((r) => r.dir === clean);
+  if (known) return known.label;
+  if (clean.includes("/Develop/vyond/")) {
+    return "vyond/" + clean.split("/Develop/vyond/")[1];
+  }
+  if (clean.includes("/vyond/")) {
+    return "vyond/" + clean.split("/vyond/")[1];
+  }
+  const def = defaultDir.replace(/\/+$/, "");
+  if (clean === def) return "~";
+  if (clean.startsWith(def + "/")) {
+    const rel = clean.slice(def.length + 1);
+    if (rel.startsWith("Develop/")) {
+      return rel.slice("Develop/".length);
+    }
+    return rel;
+  }
+  const parts = clean.split("/").filter(Boolean);
+  if (parts.length === 0) return "~";
+  return parts.length >= 2 ? parts.slice(-2).join("/") : parts[0];
+}
+
+export function mergeRepos(
+  savedRepos: OpenCodeRepo[] = [],
+  discoveredRepos: OpenCodeRepo[] = [],
+): OpenCodeRepo[] {
+  const byDir = new Map<string, OpenCodeRepo>();
+  for (const r of savedRepos) {
+    if (r && r.dir) byDir.set(r.dir.replace(/\/+$/, ""), r);
+  }
+  for (const r of discoveredRepos) {
+    if (!r || !r.dir) continue;
+    const key = r.dir.replace(/\/+$/, "");
+    if (!byDir.has(key)) {
+      byDir.set(key, r);
+    }
+  }
+  return Array.from(byDir.values());
+}
+
+export function resolveRepoDir(
+  repoToken?: string,
+  serverId?: string,
+  extraRepos: OpenCodeRepo[] = [],
+): string {
   const srv = resolveServer(serverId);
   const srvRoot = srv.defaultDir?.trim() || DEFAULT_WORKSPACE_DIR;
   if (!repoToken || !repoToken.trim()) return srvRoot;
   if (repoToken.startsWith("/")) return repoToken;
+  if (repoToken.startsWith("~/")) {
+    return `${srvRoot.replace(/\/+$/, "")}/${repoToken.slice(2)}`;
+  }
   const clean = repoToken.replace(/^@/, "").toLowerCase();
-  const srvRepos = getServerRepos(srv.id);
+  const srvRepos = mergeRepos(getServerRepos(srv.id), extraRepos);
   const hit =
     srvRepos.find(
       (r) =>
@@ -907,10 +958,76 @@ async function fetchServerModels(srv: OpenCodeServer): Promise<OpenCodeModelOpti
   }
 }
 
+export type OpenCodeProjectApiItem = {
+  id: string;
+  canonical: string;
+  vcs?: string;
+  time?: {
+    created?: number;
+    updated?: number;
+    active?: number;
+  };
+};
+
+const serverProjectsCache = new Map<string, { fetchedAt: number; projects: OpenCodeRepo[] }>();
+
+export async function fetchServerProjects(
+  srv: OpenCodeServer,
+  force = false,
+): Promise<OpenCodeRepo[]> {
+  const cached = serverProjectsCache.get(srv.id);
+  if (!force && cached && Date.now() - cached.fetchedAt < 60_000) {
+    return cached.projects;
+  }
+  const base = resolveOpenCodeBase(srv.endpoint);
+  const headers = buildServerHeaders(srv);
+  try {
+    const res = await fetch(`${base}/project`, { headers });
+    if (!res.ok) return cached?.projects ?? [];
+    const list = (await res.json()) as OpenCodeProjectApiItem[];
+    if (!Array.isArray(list)) return cached?.projects ?? [];
+
+    const defaultWorkspace = srv.defaultDir?.trim() || DEFAULT_WORKSPACE_DIR;
+    const repos: OpenCodeRepo[] = [];
+    for (const p of list) {
+      if (!p || typeof p.canonical !== "string") continue;
+      const dir = p.canonical.replace(/\/+$/, "");
+      if (!dir || dir === "/tmp" || dir.startsWith("/private/var")) continue;
+      const label = pathToRepoLabel(dir, defaultWorkspace);
+      if (!repos.some((r) => r.dir === dir)) {
+        repos.push({ label, dir });
+      }
+    }
+    repos.sort((a, b) => a.label.localeCompare(b.label));
+    serverProjectsCache.set(srv.id, { fetchedAt: Date.now(), projects: repos });
+    return repos;
+  } catch {
+    return cached?.projects ?? [];
+  }
+}
+
+export function getOpenCodeWebUrl(sessionID?: string, srv?: OpenCodeServer): string | null {
+  const s = srv ?? resolveServer();
+  const base = resolveOpenCodeBase(s.endpoint);
+  let root = "";
+  if (base === "/opencode-api" || isLocalLoopbackHttp(base)) {
+    root = "http://127.0.0.1:49374";
+  } else if (base.endsWith("/opencode-api")) {
+    root = base.slice(0, -"/opencode-api".length);
+  } else if (base.endsWith("/api")) {
+    root = base.slice(0, -4);
+  } else {
+    root = base;
+  }
+  if (!root) return null;
+  return sessionID ? `${root}/session/${sessionID}` : root;
+}
+
 async function fetchSingleServerSnapshot(srv: OpenCodeServer): Promise<{
   ok: boolean;
   sessions: OpenCodeLiveSession[];
   models: OpenCodeModelOption[];
+  projects: OpenCodeRepo[];
 }> {
   if (
     (srv.id === "local" || srv.id === "homelab" || isHomelabEndpoint(srv.endpoint)) &&
@@ -922,14 +1039,15 @@ async function fetchSingleServerSnapshot(srv: OpenCodeServer): Promise<{
   const base = resolveOpenCodeBase(srv.endpoint);
   const headers = buildServerHeaders(srv);
   try {
-    const [sesRes, actRes, formRes, permRes, models] = await Promise.all([
+    const [sesRes, actRes, formRes, permRes, models, projects] = await Promise.all([
       fetch(`${base}/session?limit=30&order=desc`, { headers }),
       fetch(`${base}/session/active`, { headers }),
       fetch(`${base}/form`, { headers }),
       fetch(`${base}/permission/request`, { headers }),
       fetchServerModels(srv),
+      fetchServerProjects(srv),
     ]);
-    if (!sesRes.ok) return { ok: false, sessions: [], models: [] };
+    if (!sesRes.ok) return { ok: false, sessions: [], models: [], projects: [] };
 
     const sesJson = (await sesRes.json()) as { data?: OpenCodeSessionInfo[] };
     const actJson = actRes.ok
@@ -971,7 +1089,7 @@ async function fetchSingleServerSnapshot(srv: OpenCodeServer): Promise<{
         id: s.id,
         title: s.title?.trim() || "Untitled session",
         directory,
-        repoShort: dirToShortRepo(directory),
+        repoShort: dirToShortRepo(directory, projects),
         serverId: srv.id,
         serverName: srv.name,
         modelKey: formatModelKey(s.model) || undefined,
@@ -986,9 +1104,9 @@ async function fetchSingleServerSnapshot(srv: OpenCodeServer): Promise<{
       };
     });
 
-    return { ok: true, sessions: list, models };
+    return { ok: true, sessions: list, models, projects };
   } catch {
-    return { ok: false, sessions: [], models: [] };
+    return { ok: false, sessions: [], models: [], projects: [] };
   }
 }
 
@@ -997,6 +1115,7 @@ export async function fetchOpenCodeSnapshot(): Promise<{
   connected: boolean;
   serverOnlineById: Record<string, boolean>;
   modelsByServer: Record<string, OpenCodeModelOption[]>;
+  projectsByServer: Record<string, OpenCodeRepo[]>;
   sessions: OpenCodeLiveSession[];
 }> {
   const cfg = loadOpenCodeConfig();
@@ -1004,7 +1123,13 @@ export async function fetchOpenCodeSnapshot(): Promise<{
     (s) => s.enabled !== false,
   );
   if (enabledServers.length === 0) {
-    return { connected: false, serverOnlineById: {}, modelsByServer: {}, sessions: [] };
+    return {
+      connected: false,
+      serverOnlineById: {},
+      modelsByServer: {},
+      projectsByServer: {},
+      sessions: [],
+    };
   }
 
   const results = await Promise.all(
@@ -1016,6 +1141,7 @@ export async function fetchOpenCodeSnapshot(): Promise<{
 
   const serverOnlineById: Record<string, boolean> = {};
   const modelsByServer: Record<string, OpenCodeModelOption[]> = {};
+  const projectsByServer: Record<string, OpenCodeRepo[]> = {};
   const allSessions: OpenCodeLiveSession[] = [];
   let anyConnected = false;
 
@@ -1024,6 +1150,7 @@ export async function fetchOpenCodeSnapshot(): Promise<{
     if (res.ok) {
       anyConnected = true;
       modelsByServer[srv.id] = res.models;
+      projectsByServer[srv.id] = res.projects;
       allSessions.push(...res.sessions);
     }
   }
@@ -1034,6 +1161,7 @@ export async function fetchOpenCodeSnapshot(): Promise<{
     connected: anyConnected,
     serverOnlineById,
     modelsByServer,
+    projectsByServer,
     sessions: allSessions,
   };
 }

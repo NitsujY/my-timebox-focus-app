@@ -14,13 +14,17 @@ import {
   dirToShortRepo,
   fetchOpenCodeSessionSummary,
   fetchOpenCodeSnapshot,
+  fetchServerProjects,
   formatTaskDescription,
   getOpenCodeEventUrl,
+  getOpenCodeWebUrl,
   interruptOpenCodeSession,
   invalidateSessionSummary,
   KNOWN_REPOS,
   loadOpenCodeConfig,
+  mergeRepos,
   parseTaskDescription,
+  pathToRepoLabel,
   renameOpenCodeSession,
   replyOpenCodeForm,
   replyOpenCodePermission,
@@ -35,6 +39,7 @@ import {
   type OpenCodeConfig,
   type OpenCodeLiveSession,
   type OpenCodeModelOption,
+  type OpenCodeRepo,
   type OpenCodeServer,
   type OpenCodeVerifyResult,
   type SessionFileDiff,
@@ -230,7 +235,12 @@ const shortRepo = (r?: string) => (r ? r.replace(/^vyond\//, "").replace(/^homel
 
 // mini NL parse: "Fix VPN 15m #Focus p1 ~devbox @eks-manifest // check ingress.yaml" -> content + duration + section + priority + server + repo + prompt
 // Todoist priority is inverted (4 = urgent), so p1..p4 maps to 4..1
-function parseAdd(raw: string, sections: SectionMap, servers?: OpenCodeServer[]) {
+function parseAdd(
+  raw: string,
+  sections: SectionMap,
+  servers?: OpenCodeServer[],
+  projectsByServer?: Record<string, OpenCodeRepo[]>,
+) {
   let text = raw;
   let prompt: string | undefined;
   const slashIdx = text.indexOf("//");
@@ -265,7 +275,11 @@ function parseAdd(raw: string, sections: SectionMap, servers?: OpenCodeServer[])
     return " ";
   });
   const activeSrv = servers?.find((s) => s.id === server) ?? servers?.[0];
-  const candidateRepos = activeSrv?.repos?.length ? activeSrv.repos : KNOWN_REPOS;
+  const discovered =
+    (server && projectsByServer?.[server]) ||
+    (activeSrv && projectsByServer?.[activeSrv.id]) ||
+    [];
+  const candidateRepos = mergeRepos(activeSrv?.repos?.length ? activeSrv.repos : KNOWN_REPOS, discovered);
   content = content.replace(/\s@([\w./-]+)(?=\s)/, (_m, r: string) => {
     const match =
       candidateRepos.find(
@@ -334,6 +348,7 @@ export default function App() {
   const [ocModelsByServer, setOcModelsByServer] = useState<Record<string, OpenCodeModelOption[]>>(
     {},
   );
+  const [ocProjectsByServer, setOcProjectsByServer] = useState<Record<string, OpenCodeRepo[]>>({});
   const [ocSessions, setOcSessions] = useState<OpenCodeLiveSession[]>([]);
   const [ocVerifyById, setOcVerifyById] = useState<Record<string, OpenCodeVerifyResult>>({});
   const [ocVerifying, setOcVerifying] = useState(false);
@@ -356,6 +371,7 @@ export default function App() {
     if (snap.connected) {
       setOcSessions(snap.sessions);
       setOcModelsByServer(snap.modelsByServer);
+      setOcProjectsByServer((prev) => ({ ...prev, ...snap.projectsByServer }));
     }
   }, []);
 
@@ -663,6 +679,72 @@ export default function App() {
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 3000);
   };
+
+  const refreshProjectsForServer = useCallback(async (serverId: string) => {
+    const srv = ocConfig.servers.find((s) => s.id === serverId);
+    if (!srv) return [];
+    try {
+      const discovered = await fetchServerProjects(srv, true);
+      setOcProjectsByServer((prev) => ({ ...prev, [serverId]: discovered }));
+      showToast(`Refreshed ${discovered.length} projects on ~${serverId}`);
+      return discovered;
+    } catch {
+      showToast(`Failed to refresh projects on ~${serverId}`);
+      return [];
+    }
+  }, [ocConfig.servers]);
+
+  const addProjectToServer = useCallback(
+    (serverId: string, label: string, dir: string) => {
+      const srv = ocConfig.servers.find((s) => s.id === serverId);
+      if (!srv) return;
+      const existing = srv.repos ?? [];
+      const cleanDir = dir.trim();
+      if (!cleanDir) return;
+      const cleanLabel = label.trim() || pathToRepoLabel(cleanDir, srv.defaultDir);
+      const nextRepos = [
+        ...existing.filter((x) => x.dir !== cleanDir && x.label !== cleanLabel),
+        { label: cleanLabel, dir: cleanDir },
+      ];
+      updateOcConfig({
+        servers: ocConfig.servers.map((s) => (s.id === serverId ? { ...s, repos: nextRepos } : s)),
+      });
+      setOcProjectsByServer((prev) => ({
+        ...prev,
+        [serverId]: mergeRepos(prev[serverId] ?? [], [{ label: cleanLabel, dir: cleanDir }]),
+      }));
+      showToast(`Added "${cleanLabel}" to ~${serverId}`);
+    },
+    [ocConfig.servers, updateOcConfig],
+  );
+
+  const handleSyncServerProjects = useCallback(
+    async (serverId: string) => {
+      const srv = ocConfig.servers.find((s) => s.id === serverId);
+      if (!srv) return 0;
+      try {
+        const discovered = await fetchServerProjects(srv, true);
+        if (discovered.length === 0) {
+          showToast(`No projects returned by ${srv.name}`);
+          return 0;
+        }
+        const merged = mergeRepos(srv.repos ?? [], discovered);
+        const addedCount = merged.length - (srv.repos?.length ?? 0);
+        updateOcConfig({
+          servers: ocConfig.servers.map((s) => (s.id === serverId ? { ...s, repos: merged } : s)),
+        });
+        setOcProjectsByServer((prev) => ({ ...prev, [serverId]: discovered }));
+        showToast(
+          `✓ Synced ${discovered.length} projects from ${srv.name} (${addedCount > 0 ? `+${addedCount} new` : "all up to date"})`,
+        );
+        return discovered.length;
+      } catch (err) {
+        showToast(`Failed to sync projects: ${String(err)}`);
+        return 0;
+      }
+    },
+    [ocConfig.servers, updateOcConfig],
+  );
 
   // Break nudge: accumulate timer-run seconds, toast at 45 min, reset after a 15 min gap
   const WORK_LIMIT = 45 * 60;
@@ -1594,6 +1676,7 @@ export default function App() {
               ).length
             }
             onSyncComments={syncComments}
+            onSyncServerProjects={handleSyncServerProjects}
             onReset={() => {
               localStorage.clear();
               location.reload();
@@ -1625,6 +1708,9 @@ export default function App() {
               ocServers={ocConfig.servers}
               ocServerOnlineById={ocServerOnlineById}
               ocModelsByServer={ocModelsByServer}
+              ocProjectsByServer={ocProjectsByServer}
+              onAddProject={addProjectToServer}
+              onRefreshProjects={refreshProjectsForServer}
               defaultServerId={ocConfig.defaultServerId}
               placeholder="＋ Add to Backlog… (~server @repo // prompt or Tab)"
               sections={sections}
@@ -1649,6 +1735,9 @@ export default function App() {
                 ocServers={ocConfig.servers}
                 ocServerOnlineById={ocServerOnlineById}
                 ocModelsByServer={ocModelsByServer}
+                ocProjectsByServer={ocProjectsByServer}
+                onAddProject={addProjectToServer}
+                onRefreshProjects={refreshProjectsForServer}
                 defaultServerId={ocConfig.defaultServerId}
                 ocSessions={ocSessions}
                 humanSecBy={humanSecBy}
@@ -1688,6 +1777,9 @@ export default function App() {
             ocServers={ocConfig.servers}
             ocServerOnlineById={ocServerOnlineById}
             ocModelsByServer={ocModelsByServer}
+            ocProjectsByServer={ocProjectsByServer}
+            onAddProject={addProjectToServer}
+            onRefreshProjects={refreshProjectsForServer}
             defaultServerId={ocConfig.defaultServerId}
             ocSessions={ocSessions}
             unlinkedOcSessions={unlinkedOcSessions}
@@ -1917,6 +2009,9 @@ function FocusView({
   ocServers,
   ocServerOnlineById,
   ocModelsByServer,
+  ocProjectsByServer,
+  onAddProject,
+  onRefreshProjects,
   defaultServerId,
   ocSessions,
   unlinkedOcSessions,
@@ -1961,6 +2056,9 @@ function FocusView({
   ocServers: OpenCodeServer[];
   ocServerOnlineById: Record<string, boolean>;
   ocModelsByServer: Record<string, OpenCodeModelOption[]>;
+  ocProjectsByServer?: Record<string, OpenCodeRepo[]>;
+  onAddProject?: (serverId: string, label: string, dir: string) => void;
+  onRefreshProjects?: (serverId: string) => Promise<unknown>;
   defaultServerId: string;
   ocSessions: OpenCodeLiveSession[];
   unlinkedOcSessions: OpenCodeLiveSession[];
@@ -2073,6 +2171,9 @@ function FocusView({
               ocServers={ocServers}
               ocServerOnlineById={ocServerOnlineById}
               ocModelsByServer={ocModelsByServer}
+              ocProjectsByServer={ocProjectsByServer}
+              onAddProject={onAddProject}
+              onRefreshProjects={onRefreshProjects}
               defaultServerId={defaultServerId}
               placeholder="＋ Quick add… (~server @repo // prompt)"
               hotkey="b"
@@ -2093,6 +2194,9 @@ function FocusView({
                   ocServers={ocServers}
                   ocServerOnlineById={ocServerOnlineById}
                   ocModelsByServer={ocModelsByServer}
+                  ocProjectsByServer={ocProjectsByServer}
+                  onAddProject={onAddProject}
+                  onRefreshProjects={onRefreshProjects}
                   defaultServerId={defaultServerId}
                   ocSessions={ocSessions}
                   humanSec={humanSecBy[t.id] ?? 0}
@@ -2154,6 +2258,9 @@ function FocusView({
                 ocServers={ocServers}
                 ocServerOnlineById={ocServerOnlineById}
                 ocModelsByServer={ocModelsByServer}
+                ocProjectsByServer={ocProjectsByServer}
+                onAddProject={onAddProject}
+                onRefreshProjects={onRefreshProjects}
                 defaultServerId={defaultServerId}
                 ocSessions={ocSessions}
                 humanSec={humanSecBy[t.id] ?? 0}
@@ -2182,6 +2289,9 @@ function FocusView({
             ocServers={ocServers}
             ocServerOnlineById={ocServerOnlineById}
             ocModelsByServer={ocModelsByServer}
+            ocProjectsByServer={ocProjectsByServer}
+            onAddProject={onAddProject}
+            onRefreshProjects={onRefreshProjects}
             defaultServerId={defaultServerId}
             placeholder="＋ Add to Focus… (~server @repo // prompt or Tab)"
             hotkey="n"
@@ -2255,6 +2365,9 @@ function BacklogList({
   ocServers,
   ocServerOnlineById,
   ocModelsByServer,
+  ocProjectsByServer,
+  onAddProject,
+  onRefreshProjects,
   defaultServerId,
   ocSessions,
   humanSecBy,
@@ -2281,6 +2394,9 @@ function BacklogList({
   ocServers: OpenCodeServer[];
   ocServerOnlineById: Record<string, boolean>;
   ocModelsByServer: Record<string, OpenCodeModelOption[]>;
+  ocProjectsByServer?: Record<string, OpenCodeRepo[]>;
+  onAddProject?: (serverId: string, label: string, dir: string) => void;
+  onRefreshProjects?: (serverId: string) => Promise<unknown>;
   defaultServerId: string;
   ocSessions: OpenCodeLiveSession[];
   humanSecBy: Record<string, number>;
@@ -2323,6 +2439,9 @@ function BacklogList({
             ocServers={ocServers}
             ocServerOnlineById={ocServerOnlineById}
             ocModelsByServer={ocModelsByServer}
+            ocProjectsByServer={ocProjectsByServer}
+            onAddProject={onAddProject}
+            onRefreshProjects={onRefreshProjects}
             defaultServerId={defaultServerId}
             ocSessions={ocSessions}
             humanSec={humanSecBy[t.id] ?? 0}
@@ -2459,6 +2578,9 @@ function TaskRow({
   ocServers = [],
   ocServerOnlineById = {},
   ocModelsByServer = {},
+  ocProjectsByServer = {},
+  onAddProject,
+  onRefreshProjects,
   defaultServerId = "local",
   ocSessions,
   humanSec,
@@ -2494,6 +2616,9 @@ function TaskRow({
   ocServers?: OpenCodeServer[];
   ocServerOnlineById?: Record<string, boolean>;
   ocModelsByServer?: Record<string, OpenCodeModelOption[]>;
+  ocProjectsByServer?: Record<string, OpenCodeRepo[]>;
+  onAddProject?: (serverId: string, label: string, dir: string) => void;
+  onRefreshProjects?: (serverId: string) => Promise<unknown>;
   defaultServerId?: string;
   ocSessions: OpenCodeLiveSession[];
   humanSec: number;
@@ -2800,6 +2925,9 @@ function TaskRow({
           ocServers={ocServers}
           ocServerOnlineById={ocServerOnlineById}
           ocModelsByServer={ocModelsByServer}
+          ocProjectsByServer={ocProjectsByServer}
+          onAddProject={onAddProject}
+          onRefreshProjects={onRefreshProjects}
           defaultServerId={defaultServerId}
           ocSessions={ocSessions}
           liveSession={liveSession}
@@ -3014,6 +3142,9 @@ function RowEditor({
   ocServers = [],
   ocServerOnlineById = {},
   ocModelsByServer = {},
+  ocProjectsByServer = {},
+  onAddProject,
+  onRefreshProjects,
   defaultServerId = "local",
   ocSessions,
   liveSession,
@@ -3043,6 +3174,9 @@ function RowEditor({
   ocServers?: OpenCodeServer[];
   ocServerOnlineById?: Record<string, boolean>;
   ocModelsByServer?: Record<string, OpenCodeModelOption[]>;
+  ocProjectsByServer?: Record<string, OpenCodeRepo[]>;
+  onAddProject?: (serverId: string, label: string, dir: string) => void;
+  onRefreshProjects?: (serverId: string) => Promise<unknown>;
   defaultServerId?: string;
   ocSessions: OpenCodeLiveSession[];
   liveSession?: OpenCodeLiveSession;
@@ -3171,12 +3305,38 @@ function RowEditor({
     }
   }, [inputVal, hasSessionOutput, zen]);
 
+  const [showCustomFolder, setShowCustomFolder] = useState(false);
+  const [customFolderDir, setCustomFolderDir] = useState("");
+  const [refreshingProjects, setRefreshingProjects] = useState(false);
+
   const activeSrvObj = ocServers.find((s) => s.id === server) ?? ocServers[0];
-  const serverRepos = activeSrvObj?.repos?.length ? activeSrvObj.repos : KNOWN_REPOS;
+  const discoveredProjects = ocProjectsByServer?.[server] ?? [];
+  const serverRepos = mergeRepos(
+    activeSrvObj?.repos?.length ? activeSrvObj.repos : KNOWN_REPOS,
+    discoveredProjects,
+  );
   const serverModels = ocModelsByServer[server] ?? [];
   const defaultModelObj = serverModels.find((m) => m.isDefault);
   const isTargetServerOnline = ocServerOnlineById[server] ?? ocConnected;
   const targetLabel = repo ? `${server}/${shortRepo(repo)}` : server;
+
+  const handleAddCustomFolder = () => {
+    const rawDir = customFolderDir.trim();
+    if (!rawDir) return;
+    const srvRoot = activeSrvObj?.defaultDir || "/Users/justinyu";
+    const resolvedDir = rawDir.startsWith("~/")
+      ? `${srvRoot.replace(/\/+$/, "")}/${rawDir.slice(2)}`
+      : rawDir;
+    const derivedLabel = pathToRepoLabel(resolvedDir, srvRoot);
+    if (onAddProject) {
+      onAddProject(server, derivedLabel, resolvedDir);
+    }
+    setRepo(derivedLabel);
+    metaLive.current = { ...metaLive.current, repo: derivedLabel };
+    scheduleFlush();
+    setCustomFolderDir("");
+    setShowCustomFolder(false);
+  };
 
   const activeSid =
     sessions[sessions.length - 1] ??
@@ -3326,6 +3486,17 @@ function RowEditor({
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   {modelSelectEl}
+                  {getOpenCodeWebUrl(activeSid, activeSrvObj) && (
+                    <a
+                      href={getOpenCodeWebUrl(activeSid, activeSrvObj)!}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title="Open session in OpenCode Web UI"
+                      className="shrink-0 font-mono text-[11px] text-orange-400 hover:text-orange-300"
+                    >
+                      Web ↗
+                    </a>
+                  )}
                   <button
                     type="button"
                     onClick={() => navigator.clipboard?.writeText(`opencode -s ${activeSid}`)}
@@ -3337,74 +3508,134 @@ function RowEditor({
                 </div>
               </div>
             ) : (
-              <div className="flex flex-wrap items-center justify-between gap-2 text-[12px]">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="text-zinc-500">Target:</span>
-                  {ocServers.map((s) => {
-                    const active = server === s.id;
-                    const online = ocServerOnlineById[s.id];
-                    return (
-                      <button
-                        key={s.id}
-                        type="button"
-                        onClick={() => {
-                          const nextRepos = s.repos?.length ? s.repos : KNOWN_REPOS;
-                          const nextRepo = nextRepos.some((r) => r.label === repo)
-                            ? repo
-                            : (nextRepos[0]?.label ?? "");
-                          setServer(s.id);
-                          setRepo(nextRepo);
-                          metaLive.current = {
-                            ...metaLive.current,
-                            server: s.id,
-                            repo: nextRepo,
-                          };
+              <div className="space-y-2 text-[12px]">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-zinc-500">Target:</span>
+                    {ocServers.map((s) => {
+                      const active = server === s.id;
+                      const online = ocServerOnlineById[s.id];
+                      return (
+                        <button
+                          key={s.id}
+                          type="button"
+                          onClick={() => {
+                            const nextRepos = s.repos?.length ? s.repos : KNOWN_REPOS;
+                            const nextRepo = nextRepos.some((r) => r.label === repo)
+                              ? repo
+                              : (nextRepos[0]?.label ?? "");
+                            setServer(s.id);
+                            setRepo(nextRepo);
+                            metaLive.current = {
+                              ...metaLive.current,
+                              server: s.id,
+                              repo: nextRepo,
+                            };
+                            scheduleFlush();
+                          }}
+                          className={`inline-flex items-center gap-1.5 rounded px-2 py-0.5 font-mono text-[11px] ${
+                            active
+                              ? "bg-zinc-200 font-medium text-zinc-950"
+                              : "bg-zinc-800/70 text-zinc-400 hover:text-zinc-200"
+                          }`}
+                        >
+                          <span
+                            className={`h-1.5 w-1.5 rounded-full ${
+                              online
+                                ? active
+                                  ? "bg-orange-600"
+                                  : "bg-orange-500"
+                                : "bg-zinc-600"
+                            }`}
+                          />
+                          <span>{s.id}</span>
+                        </button>
+                      );
+                    })}
+
+                    <span className="text-zinc-600">/</span>
+
+                    <div className="flex items-center gap-1">
+                      <select
+                        value={repo}
+                        onChange={(e) => {
+                          if (e.target.value === "__add_custom__") {
+                            setShowCustomFolder(true);
+                            return;
+                          }
+                          setShowCustomFolder(false);
+                          setRepo(e.target.value);
+                          metaLive.current = { ...metaLive.current, repo: e.target.value };
                           scheduleFlush();
                         }}
-                        className={`inline-flex items-center gap-1.5 rounded px-2 py-0.5 font-mono text-[11px] ${
-                          active
-                            ? "bg-zinc-200 font-medium text-zinc-950"
-                            : "bg-zinc-800/70 text-zinc-400 hover:text-zinc-200"
-                        }`}
+                        className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[11px] text-zinc-200 outline-none"
                       >
-                        <span
-                          className={`h-1.5 w-1.5 rounded-full ${
-                            online
-                              ? active
-                                ? "bg-orange-600"
-                                : "bg-orange-500"
-                              : "bg-zinc-600"
-                          }`}
-                        />
-                        <span>{s.id}</span>
+                        <option value="">~ ({activeSrvObj?.defaultDir || "/Users/justinyu"})</option>
+                        {serverRepos.map((r) => (
+                          <option key={r.label} value={r.label}>
+                            {shortRepo(r.label)} ({r.dir})
+                          </option>
+                        ))}
+                        <option value="__add_custom__">+ Open other folder…</option>
+                      </select>
+
+                      <button
+                        type="button"
+                        disabled={refreshingProjects}
+                        onClick={async () => {
+                          if (onRefreshProjects) {
+                            setRefreshingProjects(true);
+                            try {
+                              await onRefreshProjects(server);
+                            } finally {
+                              setRefreshingProjects(false);
+                            }
+                          }
+                        }}
+                        title="Refresh projects from OpenCode"
+                        className="rounded border border-zinc-800 bg-zinc-900/80 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200 disabled:opacity-50"
+                      >
+                        {refreshingProjects ? "…" : "⟳"}
                       </button>
-                    );
-                  })}
+                    </div>
+                  </div>
 
-                  <span className="text-zinc-600">/</span>
-
-                  <select
-                    value={repo}
-                    onChange={(e) => {
-                      setRepo(e.target.value);
-                      metaLive.current = { ...metaLive.current, repo: e.target.value };
-                      scheduleFlush();
-                    }}
-                    className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[11px] text-zinc-200 outline-none"
-                  >
-                    <option value="">~ ({activeSrvObj?.defaultDir || "/Users/justinyu"})</option>
-                    {serverRepos.map((r) => (
-                      <option key={r.label} value={r.label}>
-                        {shortRepo(r.label)} ({r.dir})
-                      </option>
-                    ))}
-                  </select>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-zinc-500">Model:</span>
+                    {modelSelectEl}
+                  </div>
                 </div>
 
-                <div className="flex items-center gap-1.5">
-                  <span className="text-zinc-500">Model:</span>
-                  {modelSelectEl}
-                </div>
+                {showCustomFolder && (
+                  <div className="flex w-full items-center gap-1.5 rounded border border-zinc-800 bg-zinc-950/70 p-1.5">
+                    <input
+                      type="text"
+                      placeholder={`Path (e.g. ~/Develop/my-project or ${activeSrvObj?.defaultDir || "/Users/justinyu"}/...)`}
+                      value={customFolderDir}
+                      onChange={(e) => setCustomFolderDir(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") handleAddCustomFolder();
+                        if (e.key === "Escape") setShowCustomFolder(false);
+                      }}
+                      className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-[11px] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-orange-500"
+                      autoFocus
+                    />
+                    <button
+                      type="button"
+                      onClick={handleAddCustomFolder}
+                      className="shrink-0 rounded bg-orange-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-orange-500"
+                    >
+                      Add & Select
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowCustomFolder(false)}
+                      className="shrink-0 text-[11px] text-zinc-500 hover:text-zinc-300"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -3833,6 +4064,9 @@ function AddRow({
   ocServers = [],
   ocServerOnlineById = {},
   ocModelsByServer = {},
+  ocProjectsByServer = {},
+  onAddProject,
+  onRefreshProjects,
   defaultServerId = "local",
   sections,
   onAdd,
@@ -3846,6 +4080,9 @@ function AddRow({
   ocServers?: OpenCodeServer[];
   ocServerOnlineById?: Record<string, boolean>;
   ocModelsByServer?: Record<string, OpenCodeModelOption[]>;
+  ocProjectsByServer?: Record<string, OpenCodeRepo[]>;
+  onAddProject?: (serverId: string, label: string, dir: string) => void;
+  onRefreshProjects?: (serverId: string) => Promise<unknown>;
   defaultServerId?: string;
   sections: SectionMap;
   onAdd: (raw: string, extra?: AddExtra) => void;
@@ -3857,6 +4094,9 @@ function AddRow({
   const [pickedRepo, setPickedRepo] = useState("");
   const [pickedServerId, setPickedServerId] = useState(defaultServerId);
   const [pickedModel, setPickedModel] = useState("");
+  const [showCustomFolder, setShowCustomFolder] = useState(false);
+  const [customFolderDir, setCustomFolderDir] = useState("");
+  const [refreshingProjects, setRefreshingProjects] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
 
@@ -3886,10 +4126,14 @@ function AddRow({
     if (open) inputRef.current?.focus();
   }, [open]);
 
-  const parsed = parseAdd(v, sections, ocServers);
+  const parsed = parseAdd(v, sections, ocServers, ocProjectsByServer);
   const effectiveServerId = parsed.server || (showDetails ? pickedServerId : defaultServerId);
   const activeSrvObj = ocServers.find((s) => s.id === effectiveServerId) ?? ocServers[0];
-  const serverRepos = activeSrvObj?.repos?.length ? activeSrvObj.repos : KNOWN_REPOS;
+  const discoveredProjects = ocProjectsByServer?.[effectiveServerId] ?? [];
+  const serverRepos = mergeRepos(
+    activeSrvObj?.repos?.length ? activeSrvObj.repos : KNOWN_REPOS,
+    discoveredProjects,
+  );
   const serverModels = ocModelsByServer[effectiveServerId] ?? [];
   const defaultModelObj = serverModels.find((m) => m.isDefault);
   const effectiveRepo = parsed.repo || (showDetails ? pickedRepo : "");
@@ -3897,6 +4141,22 @@ function AddRow({
   const targetLabel = effectiveRepo
     ? `${effectiveServerId}/${shortRepo(effectiveRepo)}`
     : effectiveServerId;
+
+  const handleAddCustomFolder = () => {
+    const rawDir = customFolderDir.trim();
+    if (!rawDir) return;
+    const srvRoot = activeSrvObj?.defaultDir || "/Users/justinyu";
+    const resolvedDir = rawDir.startsWith("~/")
+      ? `${srvRoot.replace(/\/+$/, "")}/${rawDir.slice(2)}`
+      : rawDir;
+    const derivedLabel = pathToRepoLabel(resolvedDir, srvRoot);
+    if (onAddProject) {
+      onAddProject(effectiveServerId, derivedLabel, resolvedDir);
+    }
+    setPickedRepo(derivedLabel);
+    setCustomFolderDir("");
+    setShowCustomFolder(false);
+  };
 
   const submit = (mode: "save" | "drive" | "agent" = "save") => {
     const raw = v.trim();
@@ -4021,18 +4281,47 @@ function AddRow({
 
             <span className="text-zinc-600">/</span>
 
-            <select
-              value={pickedRepo}
-              onChange={(e) => setPickedRepo(e.target.value)}
-              className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[11px] text-zinc-200 outline-none"
-            >
-              <option value="">~ ({activeSrvObj?.defaultDir || "/Users/justinyu"})</option>
-              {serverRepos.map((r) => (
-                <option key={r.label} value={r.label}>
-                  {shortRepo(r.label)} ({r.dir})
-                </option>
-              ))}
-            </select>
+            <div className="flex items-center gap-1">
+              <select
+                value={pickedRepo}
+                onChange={(e) => {
+                  if (e.target.value === "__add_custom__") {
+                    setShowCustomFolder(true);
+                    return;
+                  }
+                  setShowCustomFolder(false);
+                  setPickedRepo(e.target.value);
+                }}
+                className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[11px] text-zinc-200 outline-none"
+              >
+                <option value="">~ ({activeSrvObj?.defaultDir || "/Users/justinyu"})</option>
+                {serverRepos.map((r) => (
+                  <option key={r.label} value={r.label}>
+                    {shortRepo(r.label)} ({r.dir})
+                  </option>
+                ))}
+                <option value="__add_custom__">+ Open other folder…</option>
+              </select>
+
+              <button
+                type="button"
+                disabled={refreshingProjects}
+                onClick={async () => {
+                  if (onRefreshProjects) {
+                    setRefreshingProjects(true);
+                    try {
+                      await onRefreshProjects(effectiveServerId);
+                    } finally {
+                      setRefreshingProjects(false);
+                    }
+                  }
+                }}
+                title="Refresh projects from OpenCode"
+                className="rounded border border-zinc-800 bg-zinc-900/80 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200 disabled:opacity-50"
+              >
+                {refreshingProjects ? "…" : "⟳"}
+              </button>
+            </div>
 
             <span className="ml-auto text-zinc-500">Model:</span>
             <select
@@ -4051,6 +4340,37 @@ function AddRow({
               ))}
             </select>
           </div>
+
+          {showCustomFolder && (
+            <div className="flex w-full items-center gap-1.5 rounded border border-zinc-800 bg-zinc-950/70 p-1.5">
+              <input
+                type="text"
+                placeholder={`Path (e.g. ~/Develop/my-project or ${activeSrvObj?.defaultDir || "/Users/justinyu"}/...)`}
+                value={customFolderDir}
+                onChange={(e) => setCustomFolderDir(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleAddCustomFolder();
+                  if (e.key === "Escape") setShowCustomFolder(false);
+                }}
+                className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-[11px] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-orange-500"
+                autoFocus
+              />
+              <button
+                type="button"
+                onClick={handleAddCustomFolder}
+                className="shrink-0 rounded bg-orange-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-orange-500"
+              >
+                Add & Select
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowCustomFolder(false)}
+                className="shrink-0 text-[11px] text-zinc-500 hover:text-zinc-300"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
 
           <textarea
             ref={promptRef}
@@ -5105,6 +5425,7 @@ function SettingsPage({
   onProject,
   unsynced,
   onSyncComments,
+  onSyncServerProjects,
 }: {
   prefs: Prefs;
   onPrefs: (p: Partial<Prefs>) => void;
@@ -5126,10 +5447,12 @@ function SettingsPage({
   onProject: (id: string) => void;
   unsynced: number;
   onSyncComments: () => void;
+  onSyncServerProjects?: (serverId: string) => Promise<number | void>;
 }) {
   const [editingSrvId, setEditingSrvId] = useState<string | null>(null);
   const [newRepoLabel, setNewRepoLabel] = useState("");
   const [newRepoDir, setNewRepoDir] = useState("");
+  const [syncingSrvId, setSyncingSrvId] = useState<string | null>(null);
   const [newId, setNewId] = useState("");
   const [newName, setNewName] = useState("");
   const [newEndpoint, setNewEndpoint] = useState("");
@@ -5306,6 +5629,24 @@ function SettingsPage({
                 {/* Associated Projects / Repos */}
                 <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
                   <span className="mr-0.5 text-[11px] text-zinc-500">Projects:</span>
+                  {onSyncServerProjects && (
+                    <button
+                      type="button"
+                      disabled={syncingSrvId === srv.id}
+                      onClick={async () => {
+                        setSyncingSrvId(srv.id);
+                        try {
+                          await onSyncServerProjects(srv.id);
+                        } finally {
+                          setSyncingSrvId(null);
+                        }
+                      }}
+                      className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[10px] text-orange-400 hover:border-orange-500/50 hover:text-orange-300 disabled:opacity-50"
+                      title="Fetch all projects known to OpenCode on this server"
+                    >
+                      {syncingSrvId === srv.id ? "Syncing…" : "⟳ Sync from OpenCode"}
+                    </button>
+                  )}
                   {srvRepos.length === 0 ? (
                     <span className="font-mono text-[11px] text-zinc-600">
                       ~ ({srv.defaultDir || "/Users/justinyu"})
@@ -5407,13 +5748,18 @@ function SettingsPage({
                         <button
                           type="button"
                           onClick={() => {
-                            const lbl = newRepoLabel.trim();
-                            if (!lbl) return;
-                            const dir =
-                              newRepoDir.trim() ||
-                              `${(srv.defaultDir || "/workspace").replace(/\/+$/, "")}/${shortRepo(lbl)}`;
+                            const rawDir = newRepoDir.trim();
+                            const srvRoot = srv.defaultDir || "/workspace";
+                            const dir = rawDir.startsWith("~/")
+                              ? `${srvRoot.replace(/\/+$/, "")}/${rawDir.slice(2)}`
+                              : rawDir;
+                            if (!dir) return;
+                            const lbl = newRepoLabel.trim() || pathToRepoLabel(dir, srvRoot);
                             updateServerField(srv.id, {
-                              repos: [...srvRepos.filter((x) => x.label !== lbl), { label: lbl, dir }],
+                              repos: [
+                                ...srvRepos.filter((x) => x.label !== lbl && x.dir !== dir),
+                                { label: lbl, dir },
+                              ],
                             });
                             setNewRepoLabel("");
                             setNewRepoDir("");
