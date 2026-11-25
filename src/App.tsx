@@ -1506,8 +1506,8 @@ export default function App() {
   const onlineServerCount = ocConfig.servers.filter((s) => ocServerOnlineById[s.id]).length;
 
   return (
-    <div className="min-h-screen flex flex-col">
-      <header className="sticky top-0 z-10 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur">
+    <div className="min-h-screen md:h-screen md:overflow-hidden flex flex-col">
+      <header className="shrink-0 z-10 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur">
         <div
           className={`mx-auto flex w-full items-center justify-between gap-2 px-4 py-2.5 sm:px-6 lg:px-8 ${
             view === "focus" ? "max-w-none" : "max-w-5xl"
@@ -1647,8 +1647,10 @@ export default function App() {
         />
       </header>
       <main
-        className={`mx-auto w-full flex-1 flex flex-col px-4 pt-4 pb-12 sm:px-6 lg:px-8 ${
-          view === "focus" ? "max-w-none" : "max-w-5xl"
+        className={`mx-auto w-full flex-1 min-h-0 flex flex-col px-4 sm:px-6 lg:px-8 ${
+          view === "focus"
+            ? "pt-3 pb-3 max-w-none md:overflow-hidden"
+            : "pt-6 pb-12 max-w-5xl overflow-y-auto"
         }`}
       >
         {error && <p className="mb-4 text-[13px] text-zinc-500">{error}</p>}
@@ -2145,7 +2147,7 @@ function TriageStage({
   };
 
   return (
-    <div className="rounded-xl border border-zinc-800/90 bg-zinc-950 p-5 space-y-4 shadow-sm min-h-[calc(100vh-8.5rem)]">
+    <div className="rounded-xl border border-zinc-800/90 bg-zinc-950 p-5 space-y-4 shadow-sm flex-1 flex flex-col justify-between">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/80 pb-3 font-mono text-[11px]">
         <div className="flex items-center gap-2">
           <span className="h-2 w-2 rounded-full bg-orange-500 animate-pulse" />
@@ -2751,7 +2753,7 @@ function FocusView({
     Object.values(ocVerifyById ?? {}).some((v) => v?.error?.includes("401"));
 
   return (
-    <div className="space-y-4 flex-1 flex flex-col">
+    <div className="space-y-3 flex-1 flex flex-col">
       {queuedTasks.length > 0 && (
         <div className="flex items-center justify-between gap-3 rounded-md border border-zinc-800 bg-zinc-900/90 px-3.5 py-2.5 text-[13px]">
           <div className="flex min-w-0 items-center gap-2 text-zinc-300">
@@ -2826,15 +2828,15 @@ function FocusView({
 
       {/* Draggable Triage Sidebar + Wide Main Stage */}
       <div
-        className={`flex flex-1 flex-col md:flex-row items-stretch ${
+        className={`flex flex-1 min-h-0 flex-col md:flex-row items-stretch ${
           isResizing ? "select-none cursor-col-resize" : ""
         }`}
       >
-        {/* LEFT TRIAGE SIDEBAR (Sticky on md+ with self-contained scrolling so sessions don't blow out page height) */}
+        {/* LEFT TRIAGE SIDEBAR */}
         <aside
           aria-label="Focus task queues"
           style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
-          className={`w-full shrink-0 space-y-6 md:w-[var(--sidebar-w)] md:sticky md:top-20 md:max-h-[calc(100vh-6rem)] md:overflow-y-auto md:pr-1 md:overscroll-contain [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden ${
+          className={`w-full shrink-0 space-y-6 md:w-[var(--sidebar-w)] md:h-full md:overflow-y-auto md:pr-1 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden ${
             mobileShowStage && selectedTask ? "hidden md:block" : "block"
           }`}
         >
@@ -3049,7 +3051,7 @@ function FocusView({
           title="Drag to resize sidebar · Double-click to reset"
           onPointerDown={startResize}
           onDoubleClick={resetSidebarWidth}
-          className="group hidden md:flex w-6 shrink-0 cursor-col-resize items-stretch justify-center self-stretch py-2 select-none md:sticky md:top-20 md:h-[calc(100vh-6rem)]"
+          className="group hidden md:flex w-6 shrink-0 cursor-col-resize items-stretch justify-center self-stretch py-2 select-none md:h-full"
         >
           <div
             className={`w-px transition-colors duration-150 ${
@@ -3060,9 +3062,9 @@ function FocusView({
           />
         </div>
 
-        {/* RIGHT MAIN STAGE WORKSPACE (Normal flow: page scrolling depends on task details) */}
+        {/* RIGHT MAIN STAGE WORKSPACE */}
         <div
-          className={`min-w-0 flex-1 flex flex-col ${
+          className={`min-w-0 flex-1 min-h-0 flex flex-col md:h-full ${
             mobileShowStage && (selectedTask || triageOpen) ? "block" : "hidden md:flex"
           }`}
         >
@@ -3155,7 +3157,7 @@ function FocusView({
               />
             </div>
           ) : (
-            <div className="flex-1 flex flex-col items-center justify-center rounded-xl border border-zinc-800/80 bg-zinc-900/30 p-8 text-center min-h-[calc(100vh-8.5rem)]">
+            <div className="flex-1 flex flex-col items-center justify-center rounded-xl border border-zinc-800/80 bg-zinc-900/30 p-8 text-center">
               <p className="text-[15px] font-medium text-zinc-200">
                 No active tasks in Focus
               </p>
@@ -3738,7 +3740,7 @@ function TaskRow({
   );
 
   const rowLeftBorder = stageMode
-    ? "border border-zinc-800/90 bg-zinc-900/40 p-5 sm:p-6 lg:p-7 min-h-[calc(100vh-8.5rem)] flex-1 flex flex-col"
+    ? "border border-zinc-800/90 bg-zinc-900/40 p-4 sm:p-5 lg:p-6 flex-1 min-h-0 flex flex-col justify-between md:h-full md:overflow-hidden"
     : expanded
       ? "border-l-2 border-l-orange-500 bg-zinc-900/80 ring-1 ring-zinc-800"
       : isBlockedOnHuman
@@ -4969,10 +4971,10 @@ function RowEditor({
   }
 
   return (
-    <div className={stageMode ? "flex-1 flex flex-col" : undefined}>
-      <div className={stageMode ? "flex-1 flex flex-col" : undefined}>
+    <div className={stageMode ? "flex-1 min-h-0 flex flex-col md:h-full" : undefined}>
+      <div className={stageMode ? "flex-1 min-h-0 flex flex-col md:h-full justify-between" : undefined}>
         {stageMode ? (
-          <div className="space-y-3 pb-4 border-b border-zinc-800/80">
+          <div className="shrink-0 space-y-3 pb-3 border-b border-zinc-800/80">
             <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-[12px] text-zinc-400">
               <div className="flex min-w-0 flex-wrap items-center gap-2">
                 <span
@@ -5095,11 +5097,11 @@ function RowEditor({
           </div>
         )}
 
-        <div className={stageMode ? "flex-1 flex flex-col justify-between space-y-5 pt-3" : "row-expand"}>
+        <div className={stageMode ? "flex-1 min-h-0 flex flex-col justify-between pt-3" : "row-expand"}>
           <div
             className={
               stageMode
-                ? "flex-1 flex flex-col justify-between space-y-5"
+                ? "flex-1 min-h-0 flex flex-col justify-between"
                 : "space-y-3 border-t border-zinc-800/70 px-3.5 pt-3 pb-3.5"
             }
           >
@@ -5277,7 +5279,7 @@ function RowEditor({
             ))}
 
             {/* Scrollable workspace region */}
-            <div className="space-y-3">
+            <div className={stageMode ? "flex-1 min-h-0 overflow-y-auto space-y-4 pr-1.5 py-1 [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent]" : "space-y-3"}>
               {/* Live Tool Pipeline when Agent is Working */}
               {liveSession?.status === "running" &&
                 summary?.recentTools &&
@@ -5522,7 +5524,7 @@ function RowEditor({
             )}
 
             {/* 5. Steer / Prompt Composer */}
-            <div className={`rounded-xl border border-zinc-800/90 bg-zinc-950 focus-within:border-zinc-700 ${stageMode ? "p-4 space-y-2.5" : "p-2.5"}`}>
+            <div className={`rounded-xl border border-zinc-800/90 bg-zinc-950 focus-within:border-zinc-700 ${stageMode ? "shrink-0 p-3.5 space-y-2 mt-3" : "p-2.5"}`}>
               {stageMode && (
                 <div className="flex items-center justify-between font-mono text-[11px] text-zinc-400">
                   <span className="font-medium text-zinc-300">

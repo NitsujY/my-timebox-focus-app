@@ -743,9 +743,9 @@ export default function MockFlightDeck({ onExitMock }: { onExitMock?: () => void
     : undefined;
 
   return (
-    <div className="min-h-screen bg-[#09090b] text-zinc-100 flex flex-col">
+    <div className="min-h-screen md:h-screen md:overflow-hidden bg-[#09090b] text-zinc-100 flex flex-col">
       {/* Equal-Edge Header */}
-      <header className="sticky top-0 z-20 border-b border-zinc-800/80 bg-[#09090b]/95 backdrop-blur">
+      <header className="shrink-0 z-20 border-b border-zinc-800/80 bg-[#09090b]/95 backdrop-blur">
         <div className="mx-auto flex w-full max-w-[1600px] items-center justify-between gap-4 px-5 py-3 sm:px-8">
           <div className="flex items-center gap-5">
             <span className="text-[16px] font-semibold tracking-tight text-zinc-100">
@@ -787,13 +787,13 @@ export default function MockFlightDeck({ onExitMock }: { onExitMock?: () => void
       </header>
 
       {/* Main Content — Equal Left & Right Edges, Works at 1440, 1024, 768, 390 */}
-      <main className="mx-auto flex w-full max-w-none flex-1 flex-col px-5 pt-5 pb-20 sm:px-8">
+      <main className="mx-auto flex w-full max-w-none flex-1 min-h-0 flex-col px-4 pt-3 pb-3 sm:px-6 lg:px-8 md:overflow-hidden">
         {archMode === "triage-sidebar" ? (
           /* =========================================================================
              OPTION A: LEFT GROUPED TRIAGE SIDEBAR + WIDE MAIN STAGE (RESIZABLE)
              ========================================================================= */
           <div
-            className={`flex flex-1 flex-col md:flex-row md:items-start ${
+            className={`flex flex-1 min-h-0 flex-col md:flex-row items-stretch ${
               isResizing ? "select-none cursor-col-resize" : ""
             }`}
           >
@@ -801,7 +801,7 @@ export default function MockFlightDeck({ onExitMock }: { onExitMock?: () => void
             <aside
               aria-label="Task queues"
               style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
-              className={`w-full shrink-0 space-y-6 md:w-[var(--sidebar-w)] md:sticky md:top-20 md:max-h-[calc(100vh-6rem)] md:overflow-y-auto md:pr-1 md:overscroll-contain [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden ${
+              className={`w-full shrink-0 space-y-6 md:w-[var(--sidebar-w)] md:h-full md:overflow-y-auto md:pr-1 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden ${
                 mobileShowDetail ? "hidden md:block" : "block"
               }`}
             >
@@ -1034,7 +1034,7 @@ export default function MockFlightDeck({ onExitMock }: { onExitMock?: () => void
                 setSidebarWidth(400);
                 localStorage.setItem("tb_sidebar_width", "400");
               }}
-              className="group hidden md:flex w-6 shrink-0 cursor-col-resize items-stretch justify-center self-stretch py-2 select-none md:sticky md:top-20 md:h-[calc(100vh-6rem)]"
+              className="group hidden md:flex w-6 shrink-0 cursor-col-resize items-stretch justify-center self-stretch py-2 select-none md:h-full"
             >
               <div
                 className={`w-px transition-colors duration-150 ${
@@ -1047,8 +1047,8 @@ export default function MockFlightDeck({ onExitMock }: { onExitMock?: () => void
 
             {/* RIGHT MAIN STAGE: Generous Workspace */}
             <div
-              className={`min-w-0 flex-1 ${
-                mobileShowDetail ? "block" : "hidden md:block"
+              className={`min-w-0 flex-1 min-h-0 flex flex-col md:h-full ${
+                mobileShowDetail ? "block" : "hidden md:flex"
               }`}
             >
               {mobileShowDetail && (
@@ -1302,7 +1302,7 @@ export default function MockFlightDeck({ onExitMock }: { onExitMock?: () => void
       </main>
 
       {/* Bottom Simulation Bar */}
-      <footer className="fixed inset-x-0 bottom-0 z-20 border-t border-zinc-800/80 bg-[#09090b]/95 backdrop-blur">
+      <footer className="shrink-0 z-20 border-t border-zinc-800/80 bg-[#09090b]/95 backdrop-blur">
         <div className="mx-auto flex w-full max-w-[1600px] flex-wrap items-center justify-between gap-4 px-5 py-2.5 text-[13px] text-zinc-400 sm:px-8">
           <span>
             Sidebar Triage Prototype — works cleanly at 1440px, 1024px, 768px, and 390px
@@ -1383,10 +1383,10 @@ function MainStageWorkspace({
   return (
     <section
       aria-label="Active task workspace"
-      className="rounded-xl border border-zinc-800/90 bg-zinc-900/40 p-6 sm:p-8 space-y-6 min-h-[calc(100vh-8.5rem)] flex flex-col justify-between"
+      className="rounded-xl border border-zinc-800/90 bg-zinc-900/40 p-5 sm:p-6 flex-1 min-h-0 flex flex-col justify-between md:h-full md:overflow-hidden"
     >
       {/* Top Status & Server Context */}
-      <div className="border-b border-zinc-800/80 pb-5">
+      <div className="shrink-0 border-b border-zinc-800/80 pb-4">
         <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-[12px] text-zinc-400">
           <div className="flex items-center gap-2">
             <span
@@ -1420,6 +1420,9 @@ function MainStageWorkspace({
           className="mt-2.5 w-full bg-transparent text-[22px] font-semibold tracking-[-0.015em] text-zinc-100 outline-none"
         />
       </div>
+
+      {/* Scrollable Stage Content: Question, Permission, Pipeline, Diff, Markdown, Notes */}
+      <div className="flex-1 min-h-0 overflow-y-auto space-y-5 pr-1.5 py-4 [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent]">
 
       {/* 1. IF WAITING FOR ANSWER: QUESTION */}
       {session?.status === "question" && session.questionPrompt && (
@@ -1624,8 +1627,10 @@ function MainStageWorkspace({
         />
       </div>
 
+      </div>
+
       {/* 7. STEER / PROMPT COMPOSER */}
-      <div className="space-y-3">
+      <div className="shrink-0 space-y-2.5 pt-3 border-t border-zinc-800/80">
         <label htmlFor="stage-prompt" className="block text-[13px] font-medium text-zinc-300">
           {session ? "Steer agent or send custom reply" : "Initial prompt for agent"}
         </label>
