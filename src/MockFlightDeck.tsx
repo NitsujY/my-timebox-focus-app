@@ -743,7 +743,7 @@ export default function MockFlightDeck({ onExitMock }: { onExitMock?: () => void
     : undefined;
 
   return (
-    <div className="min-h-screen md:h-screen md:overflow-hidden bg-[#09090b] text-zinc-100 flex flex-col">
+    <div className="min-h-screen md:h-screen bg-[#09090b] text-zinc-100 flex flex-col">
       {/* Equal-Edge Header */}
       <header className="shrink-0 z-20 border-b border-zinc-800/80 bg-[#09090b]/95 backdrop-blur">
         <div className="mx-auto flex w-full max-w-[1600px] items-center justify-between gap-4 px-5 py-3 sm:px-8">
@@ -787,7 +787,7 @@ export default function MockFlightDeck({ onExitMock }: { onExitMock?: () => void
       </header>
 
       {/* Main Content — Equal Left & Right Edges, Works at 1440, 1024, 768, 390 */}
-      <main className="mx-auto flex w-full max-w-none flex-1 min-h-0 flex-col px-4 pt-3 pb-3 sm:px-6 lg:px-8 md:overflow-hidden">
+      <main className="mx-auto flex w-full max-w-none flex-1 min-h-0 flex-col px-4 pt-3 pb-3 sm:px-6 lg:px-8 overflow-y-auto">
         {archMode === "triage-sidebar" ? (
           /* =========================================================================
              OPTION A: LEFT GROUPED TRIAGE SIDEBAR + WIDE MAIN STAGE (RESIZABLE)
@@ -801,7 +801,7 @@ export default function MockFlightDeck({ onExitMock }: { onExitMock?: () => void
             <aside
               aria-label="Task queues"
               style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
-              className={`w-full shrink-0 space-y-6 md:w-[var(--sidebar-w)] md:h-full md:overflow-y-auto md:pr-1 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden ${
+              className={`w-full shrink-0 space-y-6 md:w-[var(--sidebar-w)] md:h-full md:overflow-y-auto md:pr-1.5 [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent] ${
                 mobileShowDetail ? "hidden md:block" : "block"
               }`}
             >
@@ -1383,7 +1383,7 @@ function MainStageWorkspace({
   return (
     <section
       aria-label="Active task workspace"
-      className="rounded-xl border border-zinc-800/90 bg-zinc-900/40 p-5 sm:p-6 flex-1 min-h-0 flex flex-col justify-between md:h-full md:overflow-hidden"
+      className="rounded-xl border border-zinc-800/90 bg-zinc-900/40 p-5 sm:p-6 flex-1 min-h-0 flex flex-col md:h-full"
     >
       {/* Top Status & Server Context */}
       <div className="shrink-0 border-b border-zinc-800/80 pb-4">

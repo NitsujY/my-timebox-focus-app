@@ -1515,7 +1515,7 @@ export default function App() {
   const onlineServerCount = ocConfig.servers.filter((s) => ocServerOnlineById[s.id]).length;
 
   return (
-    <div className="min-h-screen md:h-screen md:overflow-hidden flex flex-col">
+    <div className="min-h-screen md:h-screen flex flex-col">
       <header className="shrink-0 z-10 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur">
         <div
           className={`mx-auto flex w-full items-center justify-between gap-2 px-4 py-2.5 sm:px-6 lg:px-8 ${
@@ -1658,7 +1658,7 @@ export default function App() {
       <main
         className={`mx-auto w-full flex-1 min-h-0 flex flex-col px-4 sm:px-6 lg:px-8 ${
           view === "focus"
-            ? "pt-3 pb-3 max-w-none md:overflow-hidden"
+            ? "pt-3 pb-3 max-w-none overflow-y-auto"
             : "pt-6 pb-12 max-w-5xl overflow-y-auto"
         }`}
       >
@@ -2206,88 +2206,90 @@ function TriageStage({
           <p>No remaining suggestions in backlog.</p>
         </div>
       ) : (
-        <ul className="space-y-3">
-          {suggestions.map((s, idx) => {
-            const t = backlogTasks.find((item) => item.id === s.taskId);
-            if (!t) return null;
-            const meta = parseTaskDescription(t.description);
-            const repoDisplay = shortRepo(meta.repo);
+        <div className="flex-1 min-h-0 overflow-y-auto pr-1 [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent]">
+          <ul className="space-y-3">
+            {suggestions.map((s, idx) => {
+              const t = backlogTasks.find((item) => item.id === s.taskId);
+              if (!t) return null;
+              const meta = parseTaskDescription(t.description);
+              const repoDisplay = shortRepo(meta.repo);
 
-            return (
-              <li
-                key={t.id}
-                className="group flex flex-col gap-2 rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-3.5 transition-colors hover:border-zinc-700 hover:bg-zinc-900/70"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-start gap-2.5 min-w-0">
-                    <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded border border-zinc-700 bg-zinc-900 font-mono text-[11px] font-medium text-orange-400">
-                      {idx + 1}
-                    </span>
-                    <div className="min-w-0 space-y-1.5">
-                      <p className="text-[15px] font-medium leading-snug text-zinc-100">
-                        {t.content}
-                      </p>
-                      <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
-                        {renderPriorityBadge(t.priority)}
-                        {repoDisplay && (
+              return (
+                <li
+                  key={t.id}
+                  className="group flex flex-col gap-2 rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-3.5 transition-colors hover:border-zinc-700 hover:bg-zinc-900/70"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-2.5 min-w-0">
+                      <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded border border-zinc-700 bg-zinc-900 font-mono text-[11px] font-medium text-orange-400">
+                        {idx + 1}
+                      </span>
+                      <div className="min-w-0 space-y-1.5">
+                        <p className="text-[15px] font-medium leading-snug text-zinc-100">
+                          {t.content}
+                        </p>
+                        <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
+                          {renderPriorityBadge(t.priority)}
+                          {repoDisplay && (
+                            <span className="rounded border border-zinc-800 bg-zinc-900/80 px-1.5 py-0.5 text-zinc-400">
+                              {repoDisplay}
+                            </span>
+                          )}
                           <span className="rounded border border-zinc-800 bg-zinc-900/80 px-1.5 py-0.5 text-zinc-400">
-                            {repoDisplay}
+                            ⏱ {s.suggestedMinutes}m
                           </span>
-                        )}
-                        <span className="rounded border border-zinc-800 bg-zinc-900/80 px-1.5 py-0.5 text-zinc-400">
-                          ⏱ {s.suggestedMinutes}m
-                        </span>
-                        {s.signals.map((sig) => renderSignalBadge(sig))}
+                          {s.signals.map((sig) => renderSignalBadge(sig))}
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  <div className="flex shrink-0 items-center gap-1.5 pt-0.5 font-mono text-[11px]">
-                    {s.strategy === "agent" ? (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => onPickAgent(t, s.targetServerId)}
-                          title={`Delegate to OpenCode (${s.targetServerId || defaultServerId}) (Key ${idx + 1})`}
-                          className="rounded border border-orange-500/50 bg-orange-950/60 px-2.5 py-1 font-medium text-orange-300 hover:border-orange-500 hover:bg-orange-900/80"
-                        >
-                          {idx + 1}: ◈ Run {s.targetServerId || defaultServerId}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onPickFocus(t)}
-                          title="Pull into Focus queue"
-                          className="rounded border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
-                        >
-                          🎯 Focus
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => onPickFocus(t)}
-                          title={`Pull into Focus queue (Key ${idx + 1})`}
-                          className="rounded border border-orange-500/50 bg-orange-950/60 px-2.5 py-1 font-medium text-orange-300 hover:border-orange-500 hover:bg-orange-900/80"
-                        >
-                          {idx + 1}: 🎯 Focus
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onPickStart(t, s.suggestedMinutes)}
-                          title={`Move to Focus and start ${s.suggestedMinutes}m timer`}
-                          className="rounded border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
-                        >
-                          ▶ {s.suggestedMinutes}m
-                        </button>
-                      </>
-                    )}
+                    <div className="flex shrink-0 items-center gap-1.5 pt-0.5 font-mono text-[11px]">
+                      {s.strategy === "agent" ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => onPickAgent(t, s.targetServerId)}
+                            title={`Delegate to OpenCode (${s.targetServerId || defaultServerId}) (Key ${idx + 1})`}
+                            className="rounded border border-orange-500/50 bg-orange-950/60 px-2.5 py-1 font-medium text-orange-300 hover:border-orange-500 hover:bg-orange-900/80"
+                          >
+                            {idx + 1}: ◈ Run {s.targetServerId || defaultServerId}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onPickFocus(t)}
+                            title="Pull into Focus queue"
+                            className="rounded border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                          >
+                            🎯 Focus
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => onPickFocus(t)}
+                            title={`Pull into Focus queue (Key ${idx + 1})`}
+                            className="rounded border border-orange-500/50 bg-orange-950/60 px-2.5 py-1 font-medium text-orange-300 hover:border-orange-500 hover:bg-orange-900/80"
+                          >
+                            {idx + 1}: 🎯 Focus
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onPickStart(t, s.suggestedMinutes)}
+                            title={`Move to Focus and start ${s.suggestedMinutes}m timer`}
+                            className="rounded border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                          >
+                            ▶ {s.suggestedMinutes}m
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       )}
     </div>
   );
@@ -2782,7 +2784,7 @@ function FocusView({
     Object.values(ocVerifyById ?? {}).some((v) => v?.error?.includes("401"));
 
   return (
-    <div className="space-y-3 flex-1 flex flex-col">
+    <div className="space-y-3 flex-1 min-h-0 flex flex-col md:h-full">
       {queuedTasks.length > 0 && (
         <div className="flex items-center justify-between gap-3 rounded-md border border-zinc-800 bg-zinc-900/90 px-3.5 py-2.5 text-[13px]">
           <div className="flex min-w-0 items-center gap-2 text-zinc-300">
@@ -2865,7 +2867,7 @@ function FocusView({
         <aside
           aria-label="Focus task queues"
           style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
-          className={`w-full shrink-0 space-y-6 md:w-[var(--sidebar-w)] md:h-full md:overflow-y-auto md:pr-1 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden ${
+          className={`w-full shrink-0 space-y-6 md:w-[var(--sidebar-w)] md:h-full md:overflow-y-auto md:pr-1.5 [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent] ${
             mobileShowStage && selectedTask ? "hidden md:block" : "block"
           }`}
         >
@@ -3127,7 +3129,7 @@ function FocusView({
               onClose={() => setTriageOpen(false)}
             />
           ) : selectedTask ? (
-            <div className="flex-1 flex flex-col">
+            <div className="flex-1 min-h-0 flex flex-col md:h-full">
               <TaskRow
                 key={selectedTask.id}
                 t={selectedTask}
@@ -3787,7 +3789,7 @@ function TaskRow({
   );
 
   const rowLeftBorder = stageMode
-    ? "border border-zinc-800/90 bg-zinc-900/40 p-4 sm:p-5 lg:p-6 flex-1 min-h-0 flex flex-col justify-between md:h-full md:overflow-hidden"
+    ? "border border-zinc-800/90 bg-zinc-900/40 p-4 sm:p-5 lg:p-6 flex-1 min-h-0 flex flex-col md:h-full"
     : expanded
       ? "border-l-2 border-l-orange-500 bg-zinc-900/80 ring-1 ring-zinc-800"
       : isBlockedOnHuman
@@ -5036,7 +5038,7 @@ function RowEditor({
 
   return (
     <div className={stageMode ? "flex-1 min-h-0 flex flex-col md:h-full" : undefined}>
-      <div className={stageMode ? "flex-1 min-h-0 flex flex-col md:h-full justify-between" : undefined}>
+      <div className={stageMode ? "flex-1 min-h-0 flex flex-col md:h-full" : undefined}>
         {stageMode ? (
           <div className="shrink-0 space-y-3 pb-3 border-b border-zinc-800/80">
             <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-[12px] text-zinc-400">
@@ -5161,11 +5163,11 @@ function RowEditor({
           </div>
         )}
 
-        <div className={stageMode ? "flex-1 min-h-0 flex flex-col justify-between pt-3" : "row-expand"}>
+        <div className={stageMode ? "flex-1 min-h-0 flex flex-col pt-3" : "row-expand"}>
           <div
             className={
               stageMode
-                ? "flex-1 min-h-0 flex flex-col justify-between"
+                ? "flex-1 min-h-0 flex flex-col"
                 : "space-y-3 border-t border-zinc-800/70 px-3.5 pt-3 pb-3.5"
             }
           >
@@ -5579,35 +5581,35 @@ function RowEditor({
                   </div>
                 </div>
               )}
-            </div>
 
-            {/* Task Notes & Context (prominently displayed in stageMode) */}
-            {stageMode && (
-              <div className="rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-4 sm:p-5 space-y-2">
-                <div className="flex items-center justify-between font-mono text-[11px] text-zinc-400">
-                  <div className="flex items-center gap-2">
-                    <span className="h-2 w-2 rounded-full bg-orange-500/70" />
-                    <span className="font-semibold uppercase tracking-wider text-zinc-300">
-                      Task Notes &amp; Context
+              {/* Task Notes & Context (prominently displayed in stageMode) */}
+              {stageMode && (
+                <div className="rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-4 sm:p-5 space-y-2">
+                  <div className="flex items-center justify-between font-mono text-[11px] text-zinc-400">
+                    <div className="flex items-center gap-2">
+                      <span className="h-2 w-2 rounded-full bg-orange-500/70" />
+                      <span className="font-semibold uppercase tracking-wider text-zinc-300">
+                        Task Notes &amp; Context
+                      </span>
+                    </div>
+                    <span className="text-zinc-500">
+                      {note.trim() ? `${note.trim().split(/\s+/).filter(Boolean).length} words` : "Empty"} · auto-saves to description
                     </span>
                   </div>
-                  <span className="text-zinc-500">
-                    {note.trim() ? `${note.trim().split(/\s+/).filter(Boolean).length} words` : "Empty"} · auto-saves to description
-                  </span>
+                  <textarea
+                    ref={noteRef}
+                    value={note}
+                    onChange={(e) => {
+                      setNote(e.target.value);
+                      scheduleFlush();
+                    }}
+                    placeholder="Task notes, specs, steps, links, API snippets, or context…"
+                    rows={2}
+                    className="w-full resize-none overflow-hidden bg-transparent text-[14px] sm:text-[15px] leading-relaxed text-zinc-100 placeholder:text-zinc-600 outline-none"
+                  />
                 </div>
-                <textarea
-                  ref={noteRef}
-                  value={note}
-                  onChange={(e) => {
-                    setNote(e.target.value);
-                    scheduleFlush();
-                  }}
-                  placeholder="Task notes, specs, steps, links, API snippets, or context…"
-                  rows={2}
-                  className="w-full resize-none overflow-hidden bg-transparent text-[14px] sm:text-[15px] leading-relaxed text-zinc-100 placeholder:text-zinc-600 outline-none"
-                />
-              </div>
-            )}
+              )}
+            </div>
 
             {/* 5. Steer / Prompt Composer */}
             <div className={`rounded-xl border border-zinc-800/90 bg-zinc-950 focus-within:border-zinc-700 ${stageMode ? "shrink-0 p-3.5 space-y-2 mt-3" : "p-2.5"}`}>
@@ -5621,7 +5623,7 @@ function RowEditor({
               )}
               <textarea
                 ref={promptRef}
-                className="w-full resize-none overflow-hidden bg-transparent text-[13px] sm:text-[14px] leading-relaxed text-zinc-100 outline-none placeholder:text-zinc-600"
+                className="w-full resize-none overflow-y-auto max-h-36 bg-transparent text-[13px] sm:text-[14px] leading-relaxed text-zinc-100 outline-none placeholder:text-zinc-600"
                 placeholder={
                   hasSessionOutput
                     ? `Steer OpenCode on ${targetLabel}…`
