@@ -787,7 +787,7 @@ export default function MockFlightDeck({ onExitMock }: { onExitMock?: () => void
       </header>
 
       {/* Main Content — Equal Left & Right Edges, Works at 1440, 1024, 768, 390 */}
-      <main className="mx-auto flex w-full max-w-[1600px] flex-1 flex-col px-5 pt-5 pb-20 sm:px-8">
+      <main className="mx-auto flex w-full max-w-none flex-1 flex-col px-5 pt-5 pb-20 sm:px-8">
         {archMode === "triage-sidebar" ? (
           /* =========================================================================
              OPTION A: LEFT GROUPED TRIAGE SIDEBAR + WIDE MAIN STAGE (RESIZABLE)
@@ -801,7 +801,7 @@ export default function MockFlightDeck({ onExitMock }: { onExitMock?: () => void
             <aside
               aria-label="Task queues"
               style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
-              className={`w-full shrink-0 space-y-6 md:w-[var(--sidebar-w)] ${
+              className={`w-full shrink-0 space-y-6 md:w-[var(--sidebar-w)] md:sticky md:top-20 md:max-h-[calc(100vh-6rem)] md:overflow-y-auto md:pr-1 md:overscroll-contain [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent] ${
                 mobileShowDetail ? "hidden md:block" : "block"
               }`}
             >
@@ -1034,7 +1034,7 @@ export default function MockFlightDeck({ onExitMock }: { onExitMock?: () => void
                 setSidebarWidth(400);
                 localStorage.setItem("tb_sidebar_width", "400");
               }}
-              className="group hidden md:flex w-6 shrink-0 cursor-col-resize items-stretch justify-center self-stretch py-2 select-none"
+              className="group hidden md:flex w-6 shrink-0 cursor-col-resize items-stretch justify-center self-stretch py-2 select-none md:sticky md:top-20 md:h-[calc(100vh-6rem)]"
             >
               <div
                 className={`w-px transition-colors duration-150 ${
@@ -1047,7 +1047,7 @@ export default function MockFlightDeck({ onExitMock }: { onExitMock?: () => void
 
             {/* RIGHT MAIN STAGE: Generous Workspace */}
             <div
-              className={`min-w-0 flex-1 md:sticky md:top-20 ${
+              className={`min-w-0 flex-1 ${
                 mobileShowDetail ? "block" : "hidden md:block"
               }`}
             >
@@ -1383,7 +1383,7 @@ function MainStageWorkspace({
   return (
     <section
       aria-label="Active task workspace"
-      className="rounded-xl border border-zinc-800/90 bg-zinc-900/40 p-6 sm:p-8 space-y-6"
+      className="rounded-xl border border-zinc-800/90 bg-zinc-900/40 p-6 sm:p-8 space-y-6 min-h-[calc(100vh-8.5rem)] flex flex-col justify-between"
     >
       {/* Top Status & Server Context */}
       <div className="border-b border-zinc-800/80 pb-5">

@@ -1510,7 +1510,7 @@ export default function App() {
       <header className="sticky top-0 z-10 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur">
         <div
           className={`mx-auto flex w-full items-center justify-between gap-2 px-4 py-2.5 sm:px-6 lg:px-8 ${
-            view === "focus" ? "max-w-[1680px]" : "max-w-5xl"
+            view === "focus" ? "max-w-none" : "max-w-5xl"
           }`}
         >
           <div className="flex shrink-0 items-center gap-2.5">
@@ -1648,7 +1648,7 @@ export default function App() {
       </header>
       <main
         className={`mx-auto w-full px-4 pt-6 pb-12 sm:px-6 lg:px-8 ${
-          view === "focus" ? "max-w-[1680px]" : "max-w-5xl"
+          view === "focus" ? "max-w-none" : "max-w-5xl"
         }`}
       >
         {error && <p className="mb-4 text-[13px] text-zinc-500">{error}</p>}
@@ -1821,6 +1821,7 @@ export default function App() {
             ocConnected={ocConnected}
             ocServers={ocConfig.servers}
             ocServerOnlineById={ocServerOnlineById}
+            ocVerifyById={ocVerifyById}
             ocModelsByServer={ocModelsByServer}
             ocProjectsByServer={ocProjectsByServer}
             onAddProject={addProjectToServer}
@@ -2144,7 +2145,7 @@ function TriageStage({
   };
 
   return (
-    <div className="rounded-xl border border-zinc-800/90 bg-zinc-950 p-5 space-y-4 shadow-sm">
+    <div className="rounded-xl border border-zinc-800/90 bg-zinc-950 p-5 space-y-4 shadow-sm min-h-[calc(100vh-8.5rem)]">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/80 pb-3 font-mono text-[11px]">
         <div className="flex items-center gap-2">
           <span className="h-2 w-2 rounded-full bg-orange-500 animate-pulse" />
@@ -2298,6 +2299,7 @@ function FocusView({
   ocConnected,
   ocServers,
   ocServerOnlineById,
+  ocVerifyById,
   ocModelsByServer,
   ocProjectsByServer,
   onAddProject,
@@ -2347,6 +2349,7 @@ function FocusView({
   ocConnected: boolean;
   ocServers: OpenCodeServer[];
   ocServerOnlineById: Record<string, boolean>;
+  ocVerifyById?: Record<string, OpenCodeVerifyResult>;
   ocModelsByServer: Record<string, OpenCodeModelOption[]>;
   ocProjectsByServer?: Record<string, OpenCodeRepo[]>;
   onAddProject?: (serverId: string, label: string, dir: string) => void;
@@ -2743,6 +2746,10 @@ function FocusView({
     );
   };
 
+  const isAuthRequired =
+    !ocConnected &&
+    Object.values(ocVerifyById ?? {}).some((v) => v?.error?.includes("401"));
+
   return (
     <div className="space-y-4">
       {queuedTasks.length > 0 && (
@@ -2754,7 +2761,9 @@ function FocusView({
                 ? autoRunQueued
                   ? `Launching ${queuedTasks.length} queued task${queuedTasks.length === 1 ? "" : "s"} on connected OpenCode server…`
                   : `${queuedTasks.length} task${queuedTasks.length === 1 ? "" : "s"} queued for OpenCode`
-                : `${queuedTasks.length} task${queuedTasks.length === 1 ? "" : "s"} queued in Todoist — will run when assigned server connects`}
+                : isAuthRequired
+                  ? `${queuedTasks.length} task${queuedTasks.length === 1 ? "" : "s"} queued — OpenCode password required`
+                  : `${queuedTasks.length} task${queuedTasks.length === 1 ? "" : "s"} queued in Todoist — will run when assigned server connects`}
             </span>
           </div>
           {ocConnected && !autoRunQueued ? (
@@ -2769,9 +2778,9 @@ function FocusView({
             <button
               type="button"
               onClick={onOpenOcSettings}
-              className="shrink-0 text-[12px] text-orange-500 hover:text-orange-400"
+              className="shrink-0 rounded border border-orange-500/40 bg-orange-950/30 px-2.5 py-1 text-[12px] font-medium text-orange-400 hover:border-orange-500 hover:bg-orange-950/50"
             >
-              Servers ⚙
+              {isAuthRequired ? "Set Password ⚙" : "Servers ⚙"}
             </button>
           ) : null}
         </div>
@@ -2821,11 +2830,11 @@ function FocusView({
           isResizing ? "select-none cursor-col-resize" : ""
         }`}
       >
-        {/* LEFT TRIAGE SIDEBAR (Resizable on md+ screens) */}
+        {/* LEFT TRIAGE SIDEBAR (Sticky on md+ with self-contained scrolling so sessions don't blow out page height) */}
         <aside
           aria-label="Focus task queues"
           style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
-          className={`w-full shrink-0 space-y-6 md:w-[var(--sidebar-w)] ${
+          className={`w-full shrink-0 space-y-6 md:w-[var(--sidebar-w)] md:sticky md:top-20 md:max-h-[calc(100vh-6rem)] md:overflow-y-auto md:pr-1 md:overscroll-contain [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent] ${
             mobileShowStage && selectedTask ? "hidden md:block" : "block"
           }`}
         >
@@ -3040,7 +3049,7 @@ function FocusView({
           title="Drag to resize sidebar · Double-click to reset"
           onPointerDown={startResize}
           onDoubleClick={resetSidebarWidth}
-          className="group hidden md:flex w-6 shrink-0 cursor-col-resize items-stretch justify-center self-stretch py-2 select-none"
+          className="group hidden md:flex w-6 shrink-0 cursor-col-resize items-stretch justify-center self-stretch py-2 select-none md:sticky md:top-20 md:h-[calc(100vh-6rem)]"
         >
           <div
             className={`w-px transition-colors duration-150 ${
@@ -3051,9 +3060,9 @@ function FocusView({
           />
         </div>
 
-        {/* RIGHT MAIN STAGE WORKSPACE */}
+        {/* RIGHT MAIN STAGE WORKSPACE (Normal flow: page scrolling depends on task details) */}
         <div
-          className={`min-w-0 flex-1 md:sticky md:top-20 ${
+          className={`min-w-0 flex-1 ${
             mobileShowStage && (selectedTask || triageOpen) ? "block" : "hidden md:block"
           }`}
         >
@@ -3099,6 +3108,8 @@ function FocusView({
                 ocConnected={ocConnected}
                 ocServers={ocServers}
                 ocServerOnlineById={ocServerOnlineById}
+                ocVerifyById={ocVerifyById}
+                onOpenOcSettings={onOpenOcSettings}
                 ocModelsByServer={ocModelsByServer}
                 ocProjectsByServer={ocProjectsByServer}
                 onAddProject={onAddProject}
@@ -3343,7 +3354,7 @@ function InlineDiffViewer({
         )}
       </div>
 
-      <div className="max-h-56 space-y-0.5 overflow-x-auto overflow-y-auto p-2.5 leading-relaxed">
+      <div className="max-h-96 space-y-0.5 overflow-x-auto overflow-y-auto p-2.5 leading-relaxed">
         {patchLines.length === 0 ? (
           <div className="text-zinc-500">
             Modified {activeFile.file} (+{activeFile.additions} -{activeFile.deletions})
@@ -3401,6 +3412,8 @@ function TaskRow({
   ocConnected = false,
   ocServers = [],
   ocServerOnlineById = {},
+  ocVerifyById = {},
+  onOpenOcSettings,
   ocModelsByServer = {},
   ocProjectsByServer = {},
   onAddProject,
@@ -3440,6 +3453,8 @@ function TaskRow({
   ocConnected?: boolean;
   ocServers?: OpenCodeServer[];
   ocServerOnlineById?: Record<string, boolean>;
+  ocVerifyById?: Record<string, OpenCodeVerifyResult>;
+  onOpenOcSettings?: () => void;
   ocModelsByServer?: Record<string, OpenCodeModelOption[]>;
   ocProjectsByServer?: Record<string, OpenCodeRepo[]>;
   onAddProject?: (serverId: string, label: string, dir: string) => void;
@@ -3723,7 +3738,7 @@ function TaskRow({
   );
 
   const rowLeftBorder = stageMode
-    ? "border border-zinc-800/90 bg-zinc-900/45 p-1 sm:p-2"
+    ? "border border-zinc-800/90 bg-zinc-900/45 p-1 sm:p-2 min-h-[calc(100vh-8.5rem)] flex flex-col"
     : expanded
       ? "border-l-2 border-l-orange-500 bg-zinc-900/80 ring-1 ring-zinc-800"
       : isBlockedOnHuman
@@ -3753,6 +3768,8 @@ function TaskRow({
           ocConnected={ocConnected}
           ocServers={ocServers}
           ocServerOnlineById={ocServerOnlineById}
+          ocVerifyById={ocVerifyById}
+          onOpenOcSettings={onOpenOcSettings}
           ocModelsByServer={ocModelsByServer}
           ocProjectsByServer={ocProjectsByServer}
           onAddProject={onAddProject}
@@ -3971,6 +3988,8 @@ function RowEditor({
   ocConnected = false,
   ocServers = [],
   ocServerOnlineById = {},
+  ocVerifyById = {},
+  onOpenOcSettings,
   ocModelsByServer = {},
   ocProjectsByServer = {},
   onAddProject,
@@ -4004,6 +4023,8 @@ function RowEditor({
   ocConnected?: boolean;
   ocServers?: OpenCodeServer[];
   ocServerOnlineById?: Record<string, boolean>;
+  ocVerifyById?: Record<string, OpenCodeVerifyResult>;
+  onOpenOcSettings?: () => void;
   ocModelsByServer?: Record<string, OpenCodeModelOption[]>;
   ocProjectsByServer?: Record<string, OpenCodeRepo[]>;
   onAddProject?: (serverId: string, label: string, dir: string) => void;
@@ -4247,7 +4268,7 @@ function RowEditor({
       <div className="fixed inset-0 z-50 flex flex-col bg-zinc-950 text-zinc-100 overflow-hidden select-text">
         {/* ZEN TOP BAR */}
         <header className="shrink-0 border-b border-zinc-800/80 bg-zinc-950/95 px-4 py-3 sm:px-8 sm:py-3.5 backdrop-blur">
-          <div className="mx-auto flex w-full max-w-[1720px] items-center justify-between gap-3 sm:gap-6">
+          <div className="mx-auto flex w-full max-w-none items-center justify-between gap-3 sm:gap-6">
             <div className="flex min-w-0 flex-1 items-center gap-2.5 sm:gap-3.5">
               <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-orange-500/30 bg-orange-500/10 px-2.5 py-0.5 font-mono text-[11px] font-medium uppercase tracking-wider text-orange-400">
                 <span className="h-1.5 w-1.5 rounded-full bg-orange-500 animate-pulse" />
@@ -4334,7 +4355,7 @@ function RowEditor({
         </header>
 
         {/* ZEN WORKSPACE */}
-        <div className="flex-1 min-h-0 w-full max-w-[1720px] mx-auto p-4 sm:p-6 lg:p-8 flex flex-col">
+        <div className="flex-1 min-h-0 w-full max-w-none mx-auto p-4 sm:p-6 lg:p-8 flex flex-col">
           {!hasSessionOutput ? (
             /* ===============================================================
                CLEAN SETUP: Expansive full-screen writing & dispatch canvas
@@ -4534,10 +4555,23 @@ function RowEditor({
 
                   {/* Queued Banner if Queued */}
                   {queued && !liveSession && (
-                    <div className="flex items-center justify-between gap-2 rounded-xl border border-amber-500/30 bg-zinc-950/90 px-3.5 py-2 text-[12px]">
-                      <span className="text-amber-300">
-                        ⏳ Queued in Todoist — will start when {server} connects
-                      </span>
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/30 bg-zinc-950/90 px-3.5 py-2 text-[12px]">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-amber-300">
+                          ⏳ Queued in Todoist — will start when {server} connects
+                        </span>
+                        {!isTargetServerOnline &&
+                          ocVerifyById?.[server]?.error?.includes("401") &&
+                          onOpenOcSettings && (
+                            <button
+                              type="button"
+                              onClick={onOpenOcSettings}
+                              className="rounded border border-amber-500/50 bg-amber-950/60 px-2 py-0.5 text-[11px] font-medium text-amber-200 hover:bg-amber-900/60"
+                            >
+                              Set password ⚙
+                            </button>
+                          )}
+                      </div>
                       <button
                         type="button"
                         onClick={() => {
@@ -4925,8 +4959,8 @@ function RowEditor({
   }
 
   return (
-    <div>
-      <div>
+    <div className={stageMode ? "flex-1 flex flex-col" : undefined}>
+      <div className={stageMode ? "flex-1 flex flex-col" : undefined}>
         {/* title morphs in place */}
         <div
           className={`flex items-center gap-2.5 ${
@@ -4983,8 +5017,12 @@ function RowEditor({
           )}
         </div>
 
-        <div className="row-expand">
-          <div className="space-y-3 border-t border-zinc-800/70 px-3.5 pt-3 pb-3.5">
+        <div className={`row-expand ${stageMode ? "flex-1 flex flex-col" : ""}`}>
+          <div
+            className={`space-y-3 border-t border-zinc-800/70 px-3.5 pt-3 pb-3.5 ${
+              stageMode ? "flex-1 flex flex-col justify-between" : ""
+            }`}
+          >
             {/* 1. Target & Model Bar */}
             {activeSid ? (
               <div className="flex flex-wrap items-center justify-between gap-2 text-[12px]">
@@ -5275,7 +5313,7 @@ function RowEditor({
                   <div
                     className={
                       stageMode
-                        ? "max-h-[420px] overflow-y-auto"
+                        ? "min-h-[120px]"
                         : "max-h-56 overflow-y-auto"
                     }
                   >
@@ -5300,7 +5338,11 @@ function RowEditor({
 
                       {showCheckpoints && (
                         <ol
-                          className="mt-1.5 space-y-2.5 border-l border-zinc-800 pl-3 text-[12px] max-h-48 overflow-y-auto"
+                          className={`mt-1.5 space-y-2.5 border-l border-zinc-800 pl-3 text-[12px] ${
+                            stageMode
+                              ? "max-h-96 overflow-y-auto"
+                              : "max-h-48 overflow-y-auto"
+                          }`}
                         >
                           {turns.map((turn) => (
                             <li key={turn.id} className="space-y-1 text-zinc-400">
@@ -5327,10 +5369,23 @@ function RowEditor({
 
               {/* 4. Queued Banner (when waiting for an offline server) */}
               {queued && !liveSession && (
-                <div className="flex items-center justify-between gap-2 rounded border border-amber-500/30 bg-zinc-950 px-3 py-1.5 text-[12px]">
-                  <span className="text-amber-300">
-                    ⏳ Queued in Todoist — will start when {server} connects
-                  </span>
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-amber-500/30 bg-zinc-950 px-3 py-1.5 text-[12px]">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-amber-300">
+                      ⏳ Queued in Todoist — will start when {server} connects
+                    </span>
+                    {!isTargetServerOnline &&
+                      ocVerifyById?.[server]?.error?.includes("401") &&
+                      onOpenOcSettings && (
+                        <button
+                          type="button"
+                          onClick={onOpenOcSettings}
+                          className="rounded border border-amber-500/50 bg-amber-950/60 px-2 py-0.5 text-[11px] font-medium text-amber-200 hover:bg-amber-900/60"
+                        >
+                          Set password ⚙
+                        </button>
+                      )}
+                  </div>
                   <div className="flex shrink-0 items-center gap-2">
                     {isTargetServerOnline && (
                       <button
@@ -8029,7 +8084,7 @@ function ProjectChips({
     <div className="border-t border-zinc-900 bg-zinc-950/60">
       <div
         className={`mx-auto flex w-full items-center gap-1 overflow-x-auto px-4 py-1.5 sm:px-6 lg:px-8 ${
-          wide ? "max-w-[1680px]" : "max-w-5xl"
+          wide ? "max-w-none" : "max-w-5xl"
         }`}
       >
         <span className="mr-1 shrink-0 font-mono text-[11px] text-zinc-600">
