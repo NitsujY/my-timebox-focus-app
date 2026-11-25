@@ -3460,7 +3460,7 @@ function TaskRow({
   useEffect(() => {
     if (!expanded) return;
     const down = (e: PointerEvent) => {
-      if (!stageMode && rootRef.current && !rootRef.current.contains(e.target as Node))
+      if (!stageMode && !zen && rootRef.current && !rootRef.current.contains(e.target as Node))
         onToggle();
     };
     const key = (e: KeyboardEvent) => {
@@ -4222,33 +4222,720 @@ function RowEditor({
     </select>
   );
 
+  const [isBrowserFs, setIsBrowserFs] = useState(
+    typeof document !== "undefined" && Boolean(document.fullscreenElement),
+  );
+
+  useEffect(() => {
+    const onFsChange = () => {
+      setIsBrowserFs(Boolean(document.fullscreenElement));
+    };
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => document.removeEventListener("fullscreenchange", onFsChange);
+  }, []);
+
+  const toggleBrowserFullscreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else {
+      document.exitFullscreen().catch(() => {});
+    }
+  };
+
+  if (zen) {
+    return (
+      <div className="fixed inset-0 z-50 flex flex-col bg-zinc-950 text-zinc-100 overflow-hidden select-text">
+        {/* ZEN TOP BAR */}
+        <header className="shrink-0 border-b border-zinc-800/80 bg-zinc-950/95 px-4 py-3 sm:px-8 sm:py-3.5 backdrop-blur">
+          <div className="mx-auto flex w-full max-w-[1720px] items-center justify-between gap-3 sm:gap-6">
+            <div className="flex min-w-0 flex-1 items-center gap-2.5 sm:gap-3.5">
+              <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-orange-500/30 bg-orange-500/10 px-2.5 py-0.5 font-mono text-[11px] font-medium uppercase tracking-wider text-orange-400">
+                <span className="h-1.5 w-1.5 rounded-full bg-orange-500 animate-pulse" />
+                Zen Mode
+              </span>
+
+              <input
+                autoFocus
+                value={title}
+                onChange={(e) => {
+                  setTitle(e.target.value);
+                  scheduleFlush();
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                }}
+                placeholder="Task title…"
+                className="min-w-0 flex-1 bg-transparent text-[18px] sm:text-[22px] lg:text-[24px] font-semibold tracking-[-0.015em] text-zinc-100 placeholder:text-zinc-600 outline-none"
+              />
+
+              {saveState && (
+                <span className="shrink-0 font-mono text-[12px] text-zinc-500">
+                  {saveState === "saving" ? "Saving…" : "Saved ✓"}
+                </span>
+              )}
+            </div>
+
+            <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+              <DurationChips
+                t={t}
+                durations={durations}
+                defaultMinutes={defaultMinutes}
+                onDuration={onDuration}
+              />
+
+              {onStartCountdown && (
+                <button
+                  type="button"
+                  onClick={onStartCountdown}
+                  title="Open classic countdown timer"
+                  className="rounded-lg border border-zinc-800 bg-zinc-900/80 px-2.5 py-1.5 text-[12px] text-zinc-300 hover:border-zinc-700 hover:bg-zinc-800 hover:text-white transition-colors"
+                >
+                  ⏱ Timer
+                </button>
+              )}
+
+              {onComplete && (
+                <button
+                  type="button"
+                  onClick={onComplete}
+                  title="Mark Task Done"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-[12px] font-medium text-zinc-200 hover:border-zinc-700 hover:bg-zinc-800 hover:text-white transition-colors"
+                >
+                  <span>✓</span>
+                  <span className="hidden sm:inline">Done</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={toggleBrowserFullscreen}
+                title={isBrowserFs ? "Exit Native Fullscreen (F11)" : "Enter Native Fullscreen (F11)"}
+                aria-label={isBrowserFs ? "Exit Native Fullscreen" : "Enter Native Fullscreen"}
+                className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 font-mono text-[13px] text-zinc-400 hover:border-zinc-700 hover:bg-zinc-800 hover:text-zinc-100 transition-colors"
+              >
+                {isBrowserFs ? "⤡" : "⛶"}
+              </button>
+
+              {onToggleZen && (
+                <button
+                  type="button"
+                  onClick={onToggleZen}
+                  title="Exit Zen Mode (Esc or ⌘E)"
+                  aria-label="Exit Zen Mode"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-orange-500/40 bg-orange-600/10 px-3 py-1.5 text-[12px] font-medium text-orange-400 hover:bg-orange-600/20 hover:text-orange-300 transition-colors"
+                >
+                  <span>⤡</span>
+                  <span className="hidden sm:inline">Exit Zen</span>
+                  <span className="hidden md:inline font-mono text-[10px] text-orange-400/70">Esc</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </header>
+
+        {/* ZEN WORKSPACE */}
+        <div className="flex-1 min-h-0 w-full max-w-[1720px] mx-auto p-4 sm:p-6 lg:p-8 flex flex-col">
+          {!hasSessionOutput ? (
+            /* ===============================================================
+               CLEAN SETUP: Expansive full-screen writing & dispatch canvas
+               =============================================================== */
+            <div className="grid h-full min-h-0 gap-6 lg:grid-cols-12 overflow-y-auto lg:overflow-hidden">
+              {/* LEFT: Expansive Task Notes & Spec Editor (Full Height) */}
+              <div className="flex flex-col h-full min-h-[360px] lg:min-h-0 rounded-2xl border border-zinc-800/80 bg-zinc-900/30 p-5 sm:p-6 backdrop-blur-sm lg:col-span-7 xl:col-span-8">
+                <div className="flex items-center justify-between pb-3 border-b border-zinc-800/60">
+                  <div className="flex items-center gap-2">
+                    <span className="h-2 w-2 rounded-full bg-orange-500/70" />
+                    <h3 className="text-[13px] font-semibold uppercase tracking-wider text-zinc-300">
+                      Task Notes & Context
+                    </h3>
+                  </div>
+                  <span className="font-mono text-[11px] text-zinc-500">
+                    {note.trim() ? `${note.trim().split(/\s+/).filter(Boolean).length} words` : "Empty"} · Markdown enabled
+                  </span>
+                </div>
+                <textarea
+                  value={note}
+                  onChange={(e) => {
+                    setNote(e.target.value);
+                    scheduleFlush();
+                  }}
+                  placeholder="Deep focus scratchpad… Write detailed specifications, steps, links, API snippets, or problem diagnosis here. Everything auto-saves to your task description."
+                  className="flex-1 min-h-[280px] lg:min-h-0 w-full resize-none bg-transparent pt-4 text-[15px] sm:text-[16px] leading-relaxed text-zinc-100 placeholder:text-zinc-600 outline-none selection:bg-orange-500/30 font-normal"
+                />
+              </div>
+
+              {/* RIGHT: Clean Agent Dispatch & Target Configuration */}
+              <div className="flex flex-col h-full min-h-0 justify-between gap-5 rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-5 sm:p-6 backdrop-blur-sm lg:col-span-5 xl:col-span-4">
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between pb-3 border-b border-zinc-800/60">
+                    <div className="flex items-center gap-2">
+                      <span className={`h-2 w-2 rounded-full ${isTargetServerOnline ? "bg-orange-500" : "bg-zinc-600"}`} />
+                      <h3 className="text-[13px] font-semibold uppercase tracking-wider text-zinc-300">
+                        Agent Target
+                      </h3>
+                    </div>
+                    <span className="font-mono text-[11px] text-zinc-500">
+                      {isTargetServerOnline ? "Server Online" : "Server Offline (Queues)"}
+                    </span>
+                  </div>
+
+                  {/* Target Server Buttons */}
+                  <div className="space-y-1.5">
+                    <label className="block font-mono text-[11px] text-zinc-500 uppercase tracking-wider">
+                      Execution Server
+                    </label>
+                    <div className="flex flex-wrap gap-1.5">
+                      {ocServers.map((s) => {
+                        const active = server === s.id;
+                        const online = ocServerOnlineById[s.id];
+                        return (
+                          <button
+                            key={s.id}
+                            type="button"
+                            onClick={() => {
+                              const nextRepos = s.repos?.length ? s.repos : KNOWN_REPOS;
+                              const nextRepo = nextRepos.some((r) => r.label === repo) ? repo : (nextRepos[0]?.label ?? "");
+                              setServer(s.id);
+                              setRepo(nextRepo);
+                              metaLive.current = { ...metaLive.current, server: s.id, repo: nextRepo };
+                              scheduleFlush();
+                            }}
+                            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 font-mono text-[12px] transition-colors ${
+                              active
+                                ? "bg-zinc-200 font-medium text-zinc-950"
+                                : "bg-zinc-800/70 text-zinc-400 hover:text-zinc-200"
+                            }`}
+                          >
+                            <span
+                              className={`h-1.5 w-1.5 rounded-full ${
+                                online ? (active ? "bg-orange-600" : "bg-orange-500") : "bg-zinc-600"
+                              }`}
+                            />
+                            <span>{s.id}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Project Directory Picker */}
+                  <div className="space-y-1.5">
+                    <label className="block font-mono text-[11px] text-zinc-500 uppercase tracking-wider">
+                      Target Project
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={repo}
+                        onChange={(e) => {
+                          if (e.target.value === "__add_custom__") {
+                            setShowCustomFolder(true);
+                            return;
+                          }
+                          setShowCustomFolder(false);
+                          setRepo(e.target.value);
+                          metaLive.current = { ...metaLive.current, repo: e.target.value };
+                          scheduleFlush();
+                        }}
+                        className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 font-mono text-[12px] text-zinc-200 outline-none hover:border-zinc-700"
+                      >
+                        <option value="">~ ({activeSrvObj?.defaultDir || "/Users/justinyu"})</option>
+                        {serverRepos.map((r) => (
+                          <option key={r.label} value={r.label}>
+                            {shortRepo(r.label)} ({r.dir})
+                          </option>
+                        ))}
+                        <option value="__add_custom__">+ Open other folder…</option>
+                      </select>
+                      <button
+                        type="button"
+                        disabled={refreshingProjects}
+                        onClick={async () => {
+                          if (onRefreshProjects) {
+                            setRefreshingProjects(true);
+                            try {
+                              await onRefreshProjects(server);
+                            } finally {
+                              setRefreshingProjects(false);
+                            }
+                          }
+                        }}
+                        title="Refresh projects from OpenCode"
+                        className="shrink-0 rounded-lg border border-zinc-800 bg-zinc-900/80 px-2.5 py-2 font-mono text-[11px] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200 disabled:opacity-50"
+                      >
+                        {refreshingProjects ? "…" : "⟳"}
+                      </button>
+                    </div>
+
+                    {showCustomFolder && (
+                      <div className="mt-2 flex w-full items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950/90 p-2">
+                        <input
+                          type="text"
+                          placeholder={`Path (e.g. ~/Develop/my-project)`}
+                          value={customFolderDir}
+                          onChange={(e) => setCustomFolderDir(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") handleAddCustomFolder();
+                            if (e.key === "Escape") setShowCustomFolder(false);
+                          }}
+                          className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 font-mono text-[12px] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-orange-500"
+                          autoFocus
+                        />
+                        <button
+                          type="button"
+                          onClick={handleAddCustomFolder}
+                          className="shrink-0 rounded bg-orange-600 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-orange-500"
+                        >
+                          Add & Select
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowCustomFolder(false)}
+                          className="shrink-0 text-[11px] text-zinc-500 hover:text-zinc-300"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* AI Model Selection */}
+                  <div className="space-y-1.5">
+                    <label className="block font-mono text-[11px] text-zinc-500 uppercase tracking-wider">
+                      Model Selection
+                    </label>
+                    <div className="w-full">
+                      {modelSelectEl}
+                    </div>
+                  </div>
+
+                  {/* Move to another Todoist list if available */}
+                  {onMoveProject && projects && projects.length > 0 && !t.id.startsWith("tmp-") && (
+                    <div className="space-y-1.5">
+                      <label className="block font-mono text-[11px] text-zinc-500 uppercase tracking-wider">
+                        Todoist Project
+                      </label>
+                      <select
+                        aria-label="Move to another list"
+                        className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-[12px] text-zinc-300 outline-none hover:border-zinc-700"
+                        value=""
+                        onChange={(e) => e.target.value && onMoveProject(t, e.target.value)}
+                      >
+                        <option value="" disabled>
+                          Move to another list…
+                        </option>
+                        {projects.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {/* Queued Banner if Queued */}
+                  {queued && !liveSession && (
+                    <div className="flex items-center justify-between gap-2 rounded-xl border border-amber-500/30 bg-zinc-950/90 px-3.5 py-2 text-[12px]">
+                      <span className="text-amber-300">
+                        ⏳ Queued in Todoist — will start when {server} connects
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setQueued(false);
+                          metaLive.current = { ...metaLive.current, queued: false };
+                          flush();
+                        }}
+                        className="text-zinc-400 hover:text-zinc-200"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Prompt Composer & Launch Action */}
+                <div className="space-y-3 pt-4 border-t border-zinc-800/60">
+                  <div className="flex items-center justify-between">
+                    <label className="font-mono text-[11px] text-zinc-400 uppercase tracking-wider">
+                      Initial Prompt for {targetLabel}
+                    </label>
+                    <span className="font-mono text-[11px] text-zinc-500">
+                      Press ⌘↵ to start
+                    </span>
+                  </div>
+
+                  <textarea
+                    ref={promptRef}
+                    rows={5}
+                    value={prompt}
+                    onChange={(e) => {
+                      setPrompt(e.target.value);
+                      scheduleFlush();
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                        e.preventDefault();
+                        submitToAgent();
+                      }
+                    }}
+                    placeholder={`Describe the objective for OpenCode on ${targetLabel}…`}
+                    className="w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/90 p-3.5 text-[14px] leading-relaxed text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-orange-500/70 transition-colors"
+                  />
+
+                  <div className="flex items-center justify-between pt-1">
+                    <div className="flex items-center gap-2">
+                      {onDemote && (
+                        <button
+                          type="button"
+                          onClick={() => onDemote(t)}
+                          className="rounded-lg border border-zinc-800 px-3 py-1.5 text-[12px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-colors"
+                        >
+                          ↓ Move to Backlog
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => (confirming ? onDelete(t) : setConfirming(true))}
+                        className={`text-[12px] px-2 py-1 transition-colors ${
+                          confirming ? "text-red-500 font-medium" : "text-zinc-600 hover:text-zinc-400"
+                        }`}
+                      >
+                        {confirming ? "Confirm Delete?" : "Delete"}
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={submitToAgent}
+                      className="inline-flex items-center gap-2 rounded-xl bg-orange-600 px-5 py-2.5 text-[13px] font-semibold text-white shadow-lg shadow-orange-950/40 hover:bg-orange-500 transition-colors cursor-pointer"
+                    >
+                      <span>▶</span>
+                      <span>{isTargetServerOnline ? `Run on ${targetLabel}` : `Queue for ${targetLabel}`}</span>
+                      <span className="font-mono text-[11px] text-orange-200/80">⌘↵</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            /* ===============================================================
+               ACTIVE SESSION SETUP: Two-pane review stream + steer workspace
+               =============================================================== */
+            <div className="grid h-full min-h-0 gap-6 lg:grid-cols-12 overflow-y-auto lg:overflow-hidden">
+              {/* LEFT: Live Workstream, Diff Viewer, Markdown & Checkpoints */}
+              <div className="flex flex-col h-full min-h-[400px] lg:min-h-0 rounded-2xl border border-zinc-800/80 bg-zinc-900/30 p-5 sm:p-6 backdrop-blur-sm lg:col-span-7 xl:col-span-8">
+                {/* Header with Server, Session ID, Web UI */}
+                <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-zinc-800/60">
+                  <div className="flex items-center gap-2.5 font-mono text-[12px]">
+                    <span className={`h-2 w-2 rounded-full ${isTargetServerOnline ? "bg-orange-500" : "bg-zinc-600"}`} />
+                    <span className="font-semibold text-zinc-100">{targetLabel}</span>
+                    <span className="text-zinc-600">/</span>
+                    <span className="truncate text-zinc-400">
+                      {liveSession?.directory || serverRepos.find((r) => r.label === repo)?.dir || activeSrvObj?.defaultDir}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2.5">
+                    {sessions.length > 1 && (
+                      <select
+                        value={activeSid}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          unlinkedExplicitlyRef.current = !val;
+                          const next = val ? Array.from(new Set([...sessions, val])) : [];
+                          setSessions(next);
+                          metaLive.current = { ...metaLive.current, sessions: next };
+                          scheduleFlush();
+                        }}
+                        className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[11px] text-zinc-300 outline-none"
+                      >
+                        {sessions.map((sid) => (
+                          <option key={sid} value={sid}>
+                            {sid.slice(0, 10)}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    {getOpenCodeWebUrl(activeSid, activeSrvObj) && (
+                      <a
+                        href={getOpenCodeWebUrl(activeSid, activeSrvObj)!}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-mono text-[11px] text-orange-400 hover:text-orange-300"
+                      >
+                        Web UI ↗
+                      </a>
+                    )}
+                    {activeSid && (
+                      <button
+                        type="button"
+                        onClick={() => navigator.clipboard?.writeText(`opencode -s ${activeSid}`)}
+                        title={`Copy CLI command: opencode -s ${activeSid}`}
+                        className="rounded border border-zinc-800 bg-zinc-900/60 px-2 py-0.5 font-mono text-[11px] text-zinc-400 hover:text-zinc-200"
+                      >
+                        CLI: {activeSid.slice(0, 10)} ↗
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Scrollable Workstream Body */}
+                <div className="flex-1 min-h-0 overflow-y-auto space-y-4 pt-4 pr-1">
+                  {/* Live Tool Pipeline */}
+                  {liveSession?.status === "running" && summary?.recentTools && summary.recentTools.length > 0 && (
+                    <div className="space-y-1.5 rounded-xl border border-zinc-800/80 bg-zinc-950/90 p-3.5 font-mono text-[12px]">
+                      {summary.recentTools.map((step, idx) => {
+                        const isLast = idx === summary.recentTools.length - 1;
+                        return (
+                          <div
+                            key={idx}
+                            className={`flex items-center gap-2 truncate ${
+                              isLast ? "font-medium text-zinc-100" : "text-zinc-500"
+                            }`}
+                          >
+                            <span
+                              className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                                isLast ? "bg-orange-500 animate-pulse" : "bg-zinc-600"
+                              }`}
+                            />
+                            <span className="truncate">{step.label}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Question / Option Picker Form */}
+                  {liveSession?.form && (
+                    <div className="space-y-2 rounded-xl border border-orange-500/40 bg-zinc-950/90 p-4 text-[13px]">
+                      {liveSession.form.fields.map((field) => (
+                        <div key={field.key} className="space-y-2">
+                          <div className="text-[15px] font-semibold text-zinc-100">
+                            {field.title || liveSession.form?.title}
+                          </div>
+                          {field.description && (
+                            <p className="text-[13px] text-zinc-400">{field.description}</p>
+                          )}
+                          {field.options && field.options.length > 0 && (
+                            <div className="grid gap-2 pt-1 sm:grid-cols-2">
+                              {field.options.map((opt, idx) => (
+                                <button
+                                  key={opt.value}
+                                  type="button"
+                                  onClick={() => onAnswerForm(field.key, opt.value, opt.label)}
+                                  className="flex flex-col items-start rounded-lg border border-zinc-800 bg-zinc-900/60 px-3.5 py-2.5 text-left transition-colors hover:border-orange-500/70 hover:bg-zinc-900"
+                                >
+                                  <span className="text-[13px] font-medium text-zinc-100">
+                                    {idx + 1}. {opt.label}
+                                  </span>
+                                  {opt.description && (
+                                    <span className="mt-1 text-[12px] leading-snug text-zinc-400">
+                                      {opt.description}
+                                    </span>
+                                  )}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Permission Approval */}
+                  {liveSession?.permission && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-orange-500/40 bg-zinc-950/90 px-4 py-3 text-[12px]">
+                      <div className="min-w-0 truncate font-mono text-zinc-200">
+                        <span className="text-orange-400">Allow {liveSession.permission.action}: </span>
+                        {liveSession.permission.resources.join(" ")}
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => onApprove("once")}
+                          className="rounded bg-orange-600 px-3 py-1 font-medium text-white hover:bg-orange-500"
+                        >
+                          Allow once
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onApprove("always")}
+                          className="rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-zinc-200 hover:border-zinc-600"
+                        >
+                          Always
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onApprove("reject")}
+                          className="rounded px-2.5 py-1 text-zinc-400 hover:bg-zinc-900 hover:text-red-400"
+                        >
+                          Reject
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Inline File Diff Viewer */}
+                  {summary?.filesChanged && summary.filesChanged.length > 0 && (
+                    <InlineDiffViewer
+                      files={summary.filesChanged}
+                      onAcceptAndComplete={onComplete}
+                    />
+                  )}
+
+                  {/* Latest Assistant Outcome (Markdown) */}
+                  {(summary?.lastAssistantText || summary?.lastToolCall) && (
+                    <div className="space-y-3 pt-2">
+                      <div className="rounded-xl border border-zinc-800/60 bg-zinc-950/60 p-4 sm:p-5">
+                        {summary.lastAssistantText ? (
+                          <SimpleMarkdown text={summary.lastAssistantText} />
+                        ) : (
+                          <p className="font-mono text-[13px] text-zinc-500">
+                            Running {summary.lastToolCall}…
+                          </p>
+                        )}
+                      </div>
+
+                      {turns.length > 1 && (
+                        <div className="pt-2">
+                          <button
+                            type="button"
+                            onClick={() => setShowCheckpoints((s) => !s)}
+                            className="font-mono text-[11px] text-zinc-500 hover:text-zinc-300"
+                          >
+                            {showCheckpoints ? "▾ Hide checkpoints" : `▸ ${turns.length} checkpoints`}
+                          </button>
+
+                          {showCheckpoints && (
+                            <ol className="mt-2 space-y-2.5 border-l border-zinc-800 pl-3.5 text-[12px]">
+                              {turns.map((turn) => (
+                                <li key={turn.id} className="space-y-1 text-zinc-400">
+                                  <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-zinc-500">
+                                    <span>{turn.role === "user" ? "you" : server}</span>
+                                    {turn.tools.slice(0, 3).map((tb, idx) => (
+                                      <span
+                                        key={idx}
+                                        className="max-w-60 truncate rounded border border-zinc-800/80 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-400"
+                                      >
+                                        {tb}
+                                      </span>
+                                    ))}
+                                  </div>
+                                  {turn.text && <SimpleMarkdown text={turn.text} />}
+                                </li>
+                              ))}
+                            </ol>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* RIGHT: Task Notes & Steer Control */}
+              <div className="flex flex-col h-full min-h-0 justify-between gap-5 rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-5 sm:p-6 backdrop-blur-sm lg:col-span-5 xl:col-span-4">
+                {/* Task Notes / Context (Top) */}
+                <div className="flex flex-col flex-1 min-h-[160px] space-y-2">
+                  <div className="flex items-center justify-between pb-2 border-b border-zinc-800/60">
+                    <label className="font-mono text-[11px] text-zinc-400 uppercase tracking-wider">
+                      Task Notes / Context
+                    </label>
+                    <span className="font-mono text-[11px] text-zinc-500">
+                      Auto-saved
+                    </span>
+                  </div>
+                  <textarea
+                    value={note}
+                    onChange={(e) => {
+                      setNote(e.target.value);
+                      scheduleFlush();
+                    }}
+                    placeholder="Notes, references, next steps…"
+                    className="flex-1 min-h-0 w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/70 p-3.5 text-[13px] leading-relaxed text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-zinc-700 font-normal"
+                  />
+                </div>
+
+                {/* Model & Steer Composer (Bottom) */}
+                <div className="space-y-3 pt-3 border-t border-zinc-800/60">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="font-mono text-[11px] text-zinc-400 uppercase tracking-wider">
+                      Steer OpenCode
+                    </label>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-mono text-[11px] text-zinc-500">Model:</span>
+                      {modelSelectEl}
+                    </div>
+                  </div>
+
+                  <textarea
+                    ref={promptRef}
+                    rows={4}
+                    value={replyText}
+                    onChange={(e) => setReplyText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                        e.preventDefault();
+                        submitToAgent();
+                      }
+                    }}
+                    placeholder={`Steer OpenCode on ${targetLabel} (⌘↵ to send)…`}
+                    className="w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/90 p-3.5 text-[14px] leading-relaxed text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-orange-500/70 transition-colors"
+                  />
+
+                  <div className="flex items-center justify-between pt-1">
+                    <div className="flex items-center gap-2">
+                      {onDemote && (
+                        <button
+                          type="button"
+                          onClick={() => onDemote(t)}
+                          className="rounded-lg border border-zinc-800 px-3 py-1.5 text-[12px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-colors"
+                        >
+                          ↓ Move to Backlog
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => (confirming ? onDelete(t) : setConfirming(true))}
+                        className={`text-[12px] px-2 py-1 transition-colors ${
+                          confirming ? "text-red-500 font-medium" : "text-zinc-600 hover:text-zinc-400"
+                        }`}
+                      >
+                        {confirming ? "Confirm Delete?" : "Delete"}
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={submitToAgent}
+                      className="inline-flex items-center gap-2 rounded-xl bg-orange-600 px-5 py-2.5 text-[13px] font-semibold text-white shadow-lg shadow-orange-950/40 hover:bg-orange-500 transition-colors cursor-pointer"
+                    >
+                      <span>↑</span>
+                      <span>Send Steer</span>
+                      <span className="font-mono text-[11px] text-orange-200/80">⌘↵</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div
-      className={
-        zen
-          ? "fixed inset-0 z-30 flex flex-col bg-zinc-950/98 backdrop-blur"
-          : ""
-      }
-    >
-      <div
-        className={
-          zen
-            ? "mx-auto flex h-full w-full max-w-4xl flex-col px-4 py-4 sm:px-8 sm:py-6"
-            : ""
-        }
-      >
+    <div>
+      <div>
         {/* title morphs in place */}
         <div
           className={`flex items-center gap-2.5 ${
-            zen
-              ? "border-b border-zinc-800 pb-3"
-              : stageMode
-                ? "px-3.5 py-2.5"
-                : `px-3 ${large ? "min-h-13" : "min-h-10"}`
+            stageMode
+              ? "px-3.5 py-2.5"
+              : `px-3 ${large ? "min-h-13" : "min-h-10"}`
           }`}
           onClick={(e) => {
             if (
-              !zen &&
               !stageMode &&
               !(e.target as HTMLElement).closest("input,button,select,textarea")
             )
@@ -4258,13 +4945,11 @@ function RowEditor({
           <input
             autoFocus={!stageMode}
             className={`min-w-0 flex-1 bg-transparent p-0 text-left outline-none ${
-              zen
-                ? "text-[18px] font-semibold text-zinc-100"
-                : stageMode
-                  ? "text-[19px] sm:text-[21px] font-semibold tracking-[-0.015em] text-zinc-100"
-                  : large
-                    ? "text-[15px] font-medium"
-                    : "text-[14px]"
+              stageMode
+                ? "text-[19px] sm:text-[21px] font-semibold tracking-[-0.015em] text-zinc-100"
+                : large
+                  ? "text-[15px] font-medium"
+                  : "text-[14px]"
             }`}
             value={title}
             onChange={(e) => {
@@ -4273,7 +4958,7 @@ function RowEditor({
             }}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
-                if (zen || stageMode) (e.target as HTMLInputElement).blur();
+                if (stageMode) (e.target as HTMLInputElement).blur();
                 else onClose();
               }
             }}
@@ -4290,22 +4975,16 @@ function RowEditor({
               type="button"
               onClick={onToggleZen}
               className="shrink-0 rounded px-2 py-1 font-mono text-[13px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
-              title={zen ? "Exit full screen (⌘E or Esc)" : "Full screen focus mode (⌘E or F)"}
-              aria-label={zen ? "Exit full screen" : "Full screen focus mode"}
+              title="Full screen focus mode (⌘E or F)"
+              aria-label="Full screen focus mode"
             >
-              {zen ? "⤡" : "⤢"}
+              ⤢
             </button>
           )}
         </div>
 
-        <div className={zen ? "flex min-h-0 flex-1 flex-col pt-3" : "row-expand"}>
-          <div
-            className={
-              zen
-                ? "flex min-h-0 flex-1 flex-col gap-4"
-                : "space-y-3 border-t border-zinc-800/70 px-3.5 pt-3 pb-3.5"
-            }
-          >
+        <div className="row-expand">
+          <div className="space-y-3 border-t border-zinc-800/70 px-3.5 pt-3 pb-3.5">
             {/* 1. Target & Model Bar */}
             {activeSid ? (
               <div className="flex flex-wrap items-center justify-between gap-2 text-[12px]">
@@ -4478,8 +5157,8 @@ function RowEditor({
               </div>
             )}
 
-            {/* Scrollable workspace region in Zen mode */}
-            <div className={zen ? "min-h-0 flex-1 space-y-4 overflow-y-auto pr-1" : "space-y-3"}>
+            {/* Scrollable workspace region */}
+            <div className="space-y-3">
               {/* Live Tool Pipeline when Agent is Working */}
               {liveSession?.status === "running" &&
                 summary?.recentTools &&
@@ -4595,11 +5274,9 @@ function RowEditor({
                 <div className="space-y-2 border-t border-zinc-800/60 pt-2.5">
                   <div
                     className={
-                      zen
-                        ? ""
-                        : stageMode
-                          ? "max-h-[420px] overflow-y-auto"
-                          : "max-h-56 overflow-y-auto"
+                      stageMode
+                        ? "max-h-[420px] overflow-y-auto"
+                        : "max-h-56 overflow-y-auto"
                     }
                   >
                     {summary.lastAssistantText ? (
@@ -4623,9 +5300,7 @@ function RowEditor({
 
                       {showCheckpoints && (
                         <ol
-                          className={`mt-1.5 space-y-2.5 border-l border-zinc-800 pl-3 text-[12px] ${
-                            zen ? "" : "max-h-48 overflow-y-auto"
-                          }`}
+                          className="mt-1.5 space-y-2.5 border-l border-zinc-800 pl-3 text-[12px] max-h-48 overflow-y-auto"
                         >
                           {turns.map((turn) => (
                             <li key={turn.id} className="space-y-1 text-zinc-400">
@@ -4647,25 +5322,6 @@ function RowEditor({
                       )}
                     </div>
                   )}
-                </div>
-              )}
-
-              {/* In Zen Mode, always show a comfortable Task Notes & Context editor */}
-              {zen && (
-                <div className="space-y-1.5 border-t border-zinc-800/60 pt-3">
-                  <label className="block font-mono text-[11px] text-zinc-500">
-                    Task Notes / Context
-                  </label>
-                  <textarea
-                    rows={4}
-                    value={note}
-                    onChange={(e) => {
-                      setNote(e.target.value);
-                      scheduleFlush();
-                    }}
-                    placeholder="Write notes, links, or next-step context for this task…"
-                    className="w-full resize-y rounded border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-[13px] leading-relaxed text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-zinc-700"
-                  />
                 </div>
               )}
 
@@ -4711,7 +5367,7 @@ function RowEditor({
                     ? `Steer OpenCode on ${targetLabel}…`
                     : `Prompt for ${targetLabel}…`
                 }
-                rows={zen ? 4 : 2}
+                rows={2}
                 value={inputVal}
                 onChange={(e) => {
                   if (hasSessionOutput) {
@@ -4744,7 +5400,7 @@ function RowEditor({
                       className="text-zinc-500 hover:text-zinc-300"
                       title="Toggle full-screen focus mode (⌘E)"
                     >
-                      {zen ? "⤡ Inline view" : "⤢ Zen mode"}
+                      ⤢ Zen mode
                     </button>
                   )}
                 </div>
@@ -4879,19 +5535,17 @@ function RowEditor({
                   </button>
                 </div>
 
-                {!zen && (
-                  <div className="flex items-center gap-2">
-                    <input
-                      value={note}
-                      onChange={(e) => {
-                        setNote(e.target.value);
-                        scheduleFlush();
-                      }}
-                      placeholder="Next-step note…"
-                      className="flex-1 rounded border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-[13px] text-zinc-200 outline-none placeholder:text-zinc-600"
-                    />
-                  </div>
-                )}
+                <div className="flex items-center gap-2">
+                  <input
+                    value={note}
+                    onChange={(e) => {
+                      setNote(e.target.value);
+                      scheduleFlush();
+                    }}
+                    placeholder="Next-step note…"
+                    className="flex-1 rounded border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-[13px] text-zinc-200 outline-none placeholder:text-zinc-600"
+                  />
+                </div>
               </div>
             )}
           </div>
