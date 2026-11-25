@@ -72,7 +72,7 @@ export const DEFAULT_SERVERS: OpenCodeServer[] = [
     id: "local",
     name: "MacBook Local",
     endpoint: "",
-    password: "",
+    password: "JejvYTz1123-qJKgdA9DAvgetYODwYef18yrTw99Kb8",
     defaultDir: DEFAULT_WORKSPACE_DIR,
     repos: KNOWN_REPOS,
     enabled: true,
@@ -110,7 +110,7 @@ export const DEFAULT_SERVERS: OpenCodeServer[] = [
 
 export const DEFAULT_OC_CONFIG: OpenCodeConfig = {
   endpoint: "",
-  password: "",
+  password: "JejvYTz1123-qJKgdA9DAvgetYODwYef18yrTw99Kb8",
   autoRunQueued: true,
   defaultServerId: "local",
   defaultModel: "",
@@ -170,6 +170,7 @@ export function loadOpenCodeConfig(): OpenCodeConfig {
         return {
           ...preset,
           ...s,
+          password: s.password ? s.password : (preset?.password ?? ""),
           endpoint: isLegacyHomelabSample ? "http://opencode:4096/api" : s.endpoint,
           enabled: isUnconfiguredSample
             ? false
@@ -190,7 +191,7 @@ export function loadOpenCodeConfig(): OpenCodeConfig {
         {
           ...DEFAULT_SERVERS[0],
           endpoint: parsed.endpoint ?? "",
-          password: parsed.password ?? "",
+          password: parsed.password || DEFAULT_SERVERS[0].password || "",
         },
         ...DEFAULT_SERVERS.slice(1),
       ];
