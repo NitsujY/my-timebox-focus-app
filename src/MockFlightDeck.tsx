@@ -801,7 +801,7 @@ export default function MockFlightDeck({ onExitMock }: { onExitMock?: () => void
             <aside
               aria-label="Task queues"
               style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
-              className={`w-full shrink-0 space-y-6 md:w-[var(--sidebar-w)] md:sticky md:top-20 md:max-h-[calc(100vh-6rem)] md:overflow-y-auto md:pr-1 md:overscroll-contain [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent] ${
+              className={`w-full shrink-0 space-y-6 md:w-[var(--sidebar-w)] md:sticky md:top-20 md:max-h-[calc(100vh-6rem)] md:overflow-y-auto md:pr-1 md:overscroll-contain [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden ${
                 mobileShowDetail ? "hidden md:block" : "block"
               }`}
             >
@@ -1543,7 +1543,7 @@ function MainStageWorkspace({
             </button>
           </div>
 
-          <div className="max-h-64 overflow-x-auto overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-950 p-4 font-mono text-[12px] leading-relaxed">
+          <div className="overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950 p-4 font-mono text-[12px] leading-relaxed">
             {activeDiff.patch.split("\n").map((line, i) => {
               const isAdd = line.startsWith("+") && !line.startsWith("+++");
               const isDel = line.startsWith("-") && !line.startsWith("---");
@@ -1602,7 +1602,29 @@ function MainStageWorkspace({
         </div>
       )}
 
-      {/* 6. STEER / PROMPT COMPOSER */}
+      {/* 6. TASK NOTES & CONTEXT */}
+      <div className="rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-4 sm:p-5 space-y-2">
+        <div className="flex items-center justify-between font-mono text-[11px] text-zinc-400">
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-orange-500/70" />
+            <span className="font-semibold uppercase tracking-wider text-zinc-300">
+              Task Notes &amp; Context
+            </span>
+          </div>
+          <span className="text-zinc-500">
+            {task.specPrompt.trim() ? `${task.specPrompt.trim().split(/\s+/).filter(Boolean).length} words` : "Empty"} · auto-saves
+          </span>
+        </div>
+        <textarea
+          value={task.specPrompt}
+          onChange={(e) => onUpdate({ specPrompt: e.target.value })}
+          placeholder="Deep focus scratchpad… Write detailed specifications, steps, links, API snippets, or problem diagnosis here."
+          rows={3}
+          className="w-full resize-y bg-transparent text-[14px] sm:text-[15px] leading-relaxed text-zinc-100 placeholder:text-zinc-600 outline-none"
+        />
+      </div>
+
+      {/* 7. STEER / PROMPT COMPOSER */}
       <div className="space-y-3">
         <label htmlFor="stage-prompt" className="block text-[13px] font-medium text-zinc-300">
           {session ? "Steer agent or send custom reply" : "Initial prompt for agent"}

@@ -1506,7 +1506,7 @@ export default function App() {
   const onlineServerCount = ocConfig.servers.filter((s) => ocServerOnlineById[s.id]).length;
 
   return (
-    <div className="min-h-screen">
+    <div className="min-h-screen flex flex-col">
       <header className="sticky top-0 z-10 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur">
         <div
           className={`mx-auto flex w-full items-center justify-between gap-2 px-4 py-2.5 sm:px-6 lg:px-8 ${
@@ -1647,7 +1647,7 @@ export default function App() {
         />
       </header>
       <main
-        className={`mx-auto w-full px-4 pt-6 pb-12 sm:px-6 lg:px-8 ${
+        className={`mx-auto w-full flex-1 flex flex-col px-4 pt-4 pb-12 sm:px-6 lg:px-8 ${
           view === "focus" ? "max-w-none" : "max-w-5xl"
         }`}
       >
@@ -2751,7 +2751,7 @@ function FocusView({
     Object.values(ocVerifyById ?? {}).some((v) => v?.error?.includes("401"));
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 flex-1 flex flex-col">
       {queuedTasks.length > 0 && (
         <div className="flex items-center justify-between gap-3 rounded-md border border-zinc-800 bg-zinc-900/90 px-3.5 py-2.5 text-[13px]">
           <div className="flex min-w-0 items-center gap-2 text-zinc-300">
@@ -2826,7 +2826,7 @@ function FocusView({
 
       {/* Draggable Triage Sidebar + Wide Main Stage */}
       <div
-        className={`flex flex-col md:flex-row md:items-start ${
+        className={`flex flex-1 flex-col md:flex-row items-stretch ${
           isResizing ? "select-none cursor-col-resize" : ""
         }`}
       >
@@ -2834,7 +2834,7 @@ function FocusView({
         <aside
           aria-label="Focus task queues"
           style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
-          className={`w-full shrink-0 space-y-6 md:w-[var(--sidebar-w)] md:sticky md:top-20 md:max-h-[calc(100vh-6rem)] md:overflow-y-auto md:pr-1 md:overscroll-contain [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent] ${
+          className={`w-full shrink-0 space-y-6 md:w-[var(--sidebar-w)] md:sticky md:top-20 md:max-h-[calc(100vh-6rem)] md:overflow-y-auto md:pr-1 md:overscroll-contain [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden ${
             mobileShowStage && selectedTask ? "hidden md:block" : "block"
           }`}
         >
@@ -3062,8 +3062,8 @@ function FocusView({
 
         {/* RIGHT MAIN STAGE WORKSPACE (Normal flow: page scrolling depends on task details) */}
         <div
-          className={`min-w-0 flex-1 ${
-            mobileShowStage && (selectedTask || triageOpen) ? "block" : "hidden md:block"
+          className={`min-w-0 flex-1 flex flex-col ${
+            mobileShowStage && (selectedTask || triageOpen) ? "block" : "hidden md:flex"
           }`}
         >
           {mobileShowStage && (selectedTask || triageOpen) && (
@@ -3096,7 +3096,7 @@ function FocusView({
               onClose={() => setTriageOpen(false)}
             />
           ) : selectedTask ? (
-            <ul className="list-none">
+            <div className="flex-1 flex flex-col">
               <TaskRow
                 key={selectedTask.id}
                 t={selectedTask}
@@ -3153,9 +3153,9 @@ function FocusView({
                   onDelete(taskToDelete);
                 }}
               />
-            </ul>
+            </div>
           ) : (
-            <div className="rounded-xl border border-zinc-800/80 bg-zinc-900/30 p-8 text-center">
+            <div className="flex-1 flex flex-col items-center justify-center rounded-xl border border-zinc-800/80 bg-zinc-900/30 p-8 text-center min-h-[calc(100vh-8.5rem)]">
               <p className="text-[15px] font-medium text-zinc-200">
                 No active tasks in Focus
               </p>
@@ -3354,7 +3354,7 @@ function InlineDiffViewer({
         )}
       </div>
 
-      <div className="max-h-96 space-y-0.5 overflow-x-auto overflow-y-auto p-2.5 leading-relaxed">
+      <div className="space-y-0.5 overflow-x-auto p-2.5 leading-relaxed">
         {patchLines.length === 0 ? (
           <div className="text-zinc-500">
             Modified {activeFile.file} (+{activeFile.additions} -{activeFile.deletions})
@@ -3738,7 +3738,7 @@ function TaskRow({
   );
 
   const rowLeftBorder = stageMode
-    ? "border border-zinc-800/90 bg-zinc-900/45 p-1 sm:p-2 min-h-[calc(100vh-8.5rem)] flex flex-col"
+    ? "border border-zinc-800/90 bg-zinc-900/40 p-5 sm:p-6 lg:p-7 min-h-[calc(100vh-8.5rem)] flex-1 flex flex-col"
     : expanded
       ? "border-l-2 border-l-orange-500 bg-zinc-900/80 ring-1 ring-zinc-800"
       : isBlockedOnHuman
@@ -4053,6 +4053,7 @@ function RowEditor({
   onDelete: (t: Task) => void;
 }) {
   const initialMeta = useMemo(() => parseTaskDescription(t.description), [t.description]);
+  const { triage } = useMemo(() => resolveTaskTriage(t, ocSessions), [t, ocSessions]);
   const [title, setTitle] = useState(t.content);
   const [note, setNote] = useState(initialMeta.note);
   const [prompt, setPrompt] = useState(initialMeta.prompt);
@@ -4147,6 +4148,7 @@ function RowEditor({
   };
 
   const promptRef = useRef<HTMLTextAreaElement>(null);
+  const noteRef = useRef<HTMLTextAreaElement>(null);
   const inputVal = hasSessionOutput ? replyText : prompt;
   useEffect(() => {
     const el = promptRef.current;
@@ -4156,6 +4158,14 @@ function RowEditor({
       el.style.height = `${Math.max(minH, el.scrollHeight)}px`;
     }
   }, [inputVal, hasSessionOutput, zen]);
+
+  useEffect(() => {
+    const el = noteRef.current;
+    if (el) {
+      el.style.height = "0";
+      el.style.height = `${Math.max(72, el.scrollHeight)}px`;
+    }
+  }, [note, stageMode]);
 
   const [showCustomFolder, setShowCustomFolder] = useState(false);
   const [customFolderDir, setCustomFolderDir] = useState("");
@@ -4961,70 +4971,141 @@ function RowEditor({
   return (
     <div className={stageMode ? "flex-1 flex flex-col" : undefined}>
       <div className={stageMode ? "flex-1 flex flex-col" : undefined}>
-        {/* title morphs in place */}
-        <div
-          className={`flex items-center gap-2.5 ${
-            stageMode
-              ? "px-3.5 py-2.5"
-              : `px-3 ${large ? "min-h-13" : "min-h-10"}`
-          }`}
-          onClick={(e) => {
-            if (
-              !stageMode &&
-              !(e.target as HTMLElement).closest("input,button,select,textarea")
-            )
-              onClose();
-          }}
-        >
-          <input
-            autoFocus={!stageMode}
-            className={`min-w-0 flex-1 bg-transparent p-0 text-left outline-none ${
-              stageMode
-                ? "text-[19px] sm:text-[21px] font-semibold tracking-[-0.015em] text-zinc-100"
-                : large
-                  ? "text-[15px] font-medium"
-                  : "text-[14px]"
-            }`}
-            value={title}
-            onChange={(e) => {
-              setTitle(e.target.value);
-              scheduleFlush();
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                if (stageMode) (e.target as HTMLInputElement).blur();
-                else onClose();
-              }
-            }}
-          />
-          {saveState && (
-            <span className="shrink-0 text-[12px] text-zinc-500 transition-opacity duration-150">
-              {saveState === "saving" ? "Saving…" : "Saved ✓"}
-            </span>
-          )}
-          {dur}
-          {actions}
-          {onToggleZen && (
-            <button
-              type="button"
-              onClick={onToggleZen}
-              className="shrink-0 rounded px-2 py-1 font-mono text-[13px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
-              title="Full screen focus mode (⌘E or F)"
-              aria-label="Full screen focus mode"
-            >
-              ⤢
-            </button>
-          )}
-        </div>
+        {stageMode ? (
+          <div className="space-y-3 pb-4 border-b border-zinc-800/80">
+            <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-[12px] text-zinc-400">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <span
+                  className={`h-2 w-2 shrink-0 rounded-full ${
+                    triage === "needs_you"
+                      ? "bg-orange-500"
+                      : triage === "working"
+                        ? "bg-zinc-200 animate-pulse"
+                        : "bg-zinc-600"
+                  }`}
+                />
+                <span className="font-medium text-zinc-200">{targetLabel}</span>
+                <span className="truncate text-zinc-500 max-w-sm">
+                  {liveSession?.directory ||
+                    serverRepos.find((r) => r.label === repo)?.dir ||
+                    activeSrvObj?.defaultDir ||
+                    "/Users/justinyu"}
+                </span>
+                {activeSid && getOpenCodeWebUrl(activeSid, activeSrvObj) && (
+                  <a
+                    href={getOpenCodeWebUrl(activeSid, activeSrvObj)!}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="Open session in OpenCode Web UI"
+                    className="text-orange-400 hover:text-orange-300"
+                  >
+                    Web ↗
+                  </a>
+                )}
+                {activeSid && (
+                  <button
+                    type="button"
+                    onClick={() => navigator.clipboard?.writeText(`opencode -s ${activeSid}`)}
+                    title={`Copy "opencode -s ${activeSid}"`}
+                    className="text-zinc-500 hover:text-zinc-300"
+                  >
+                    {activeSid.slice(0, 10)} ↗
+                  </button>
+                )}
+              </div>
 
-        <div className={`row-expand ${stageMode ? "flex-1 flex flex-col" : ""}`}>
+              <div className="flex shrink-0 items-center gap-2">
+                {modelSelectEl}
+                {dur}
+                {actions}
+                {onToggleZen && (
+                  <button
+                    type="button"
+                    onClick={onToggleZen}
+                    className="shrink-0 rounded px-2 py-1 font-mono text-[13px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                    title="Full screen focus mode (⌘E or F)"
+                    aria-label="Full screen focus mode"
+                  >
+                    ⤢
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2.5">
+              <input
+                className="w-full bg-transparent text-[22px] sm:text-[24px] font-semibold tracking-[-0.015em] text-zinc-100 outline-none"
+                value={title}
+                onChange={(e) => {
+                  setTitle(e.target.value);
+                  scheduleFlush();
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                }}
+                placeholder="Task title…"
+              />
+              {saveState && (
+                <span className="shrink-0 font-mono text-[12px] text-zinc-500">
+                  {saveState === "saving" ? "Saving…" : "Saved ✓"}
+                </span>
+              )}
+            </div>
+          </div>
+        ) : (
           <div
-            className={`space-y-3 border-t border-zinc-800/70 px-3.5 pt-3 pb-3.5 ${
-              stageMode ? "flex-1 flex flex-col justify-between" : ""
-            }`}
+            className={`flex items-center gap-2.5 px-3 ${large ? "min-h-13" : "min-h-10"}`}
+            onClick={(e) => {
+              if (!(e.target as HTMLElement).closest("input,button,select,textarea"))
+                onClose();
+            }}
           >
-            {/* 1. Target & Model Bar */}
-            {activeSid ? (
+            <input
+              autoFocus
+              className={`min-w-0 flex-1 bg-transparent p-0 text-left outline-none ${
+                large ? "text-[15px] font-medium" : "text-[14px]"
+              }`}
+              value={title}
+              onChange={(e) => {
+                setTitle(e.target.value);
+                scheduleFlush();
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") onClose();
+              }}
+            />
+            {saveState && (
+              <span className="shrink-0 text-[12px] text-zinc-500 transition-opacity duration-150">
+                {saveState === "saving" ? "Saving…" : "Saved ✓"}
+              </span>
+            )}
+            {dur}
+            {actions}
+            {onToggleZen && (
+              <button
+                type="button"
+                onClick={onToggleZen}
+                className="shrink-0 rounded px-2 py-1 font-mono text-[13px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                title="Full screen focus mode (⌘E or F)"
+                aria-label="Full screen focus mode"
+              >
+                ⤢
+              </button>
+            )}
+          </div>
+        )}
+
+        <div className={stageMode ? "flex-1 flex flex-col justify-between space-y-5 pt-3" : "row-expand"}>
+          <div
+            className={
+              stageMode
+                ? "flex-1 flex flex-col justify-between space-y-5"
+                : "space-y-3 border-t border-zinc-800/70 px-3.5 pt-3 pb-3.5"
+            }
+          >
+            {/* 1. Target & Model Bar (inline mode only; stageMode has it in top bar) */}
+            {!stageMode && (
+              activeSid ? (
               <div className="flex flex-wrap items-center justify-between gap-2 text-[12px]">
                 <div className="flex min-w-0 flex-wrap items-center gap-2 font-mono text-[11px] text-zinc-400">
                   <span
@@ -5193,7 +5274,7 @@ function RowEditor({
                   </div>
                 )}
               </div>
-            )}
+            ))}
 
             {/* Scrollable workspace region */}
             <div className="space-y-3">
@@ -5340,7 +5421,7 @@ function RowEditor({
                         <ol
                           className={`mt-1.5 space-y-2.5 border-l border-zinc-800 pl-3 text-[12px] ${
                             stageMode
-                              ? "max-h-96 overflow-y-auto"
+                              ? ""
                               : "max-h-48 overflow-y-auto"
                           }`}
                         >
@@ -5412,11 +5493,47 @@ function RowEditor({
               )}
             </div>
 
+            {/* Task Notes & Context (prominently displayed in stageMode) */}
+            {stageMode && (
+              <div className="rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-4 sm:p-5 space-y-2">
+                <div className="flex items-center justify-between font-mono text-[11px] text-zinc-400">
+                  <div className="flex items-center gap-2">
+                    <span className="h-2 w-2 rounded-full bg-orange-500/70" />
+                    <span className="font-semibold uppercase tracking-wider text-zinc-300">
+                      Task Notes &amp; Context
+                    </span>
+                  </div>
+                  <span className="text-zinc-500">
+                    {note.trim() ? `${note.trim().split(/\s+/).filter(Boolean).length} words` : "Empty"} · auto-saves to description
+                  </span>
+                </div>
+                <textarea
+                  ref={noteRef}
+                  value={note}
+                  onChange={(e) => {
+                    setNote(e.target.value);
+                    scheduleFlush();
+                  }}
+                  placeholder="Task notes, specs, steps, links, API snippets, or context…"
+                  rows={2}
+                  className="w-full resize-none overflow-hidden bg-transparent text-[14px] sm:text-[15px] leading-relaxed text-zinc-100 placeholder:text-zinc-600 outline-none"
+                />
+              </div>
+            )}
+
             {/* 5. Steer / Prompt Composer */}
-            <div className="rounded-md border border-zinc-800 bg-zinc-950 p-2.5 focus-within:border-zinc-700">
+            <div className={`rounded-xl border border-zinc-800/90 bg-zinc-950 focus-within:border-zinc-700 ${stageMode ? "p-4 space-y-2.5" : "p-2.5"}`}>
+              {stageMode && (
+                <div className="flex items-center justify-between font-mono text-[11px] text-zinc-400">
+                  <span className="font-medium text-zinc-300">
+                    {hasSessionOutput ? `Steer OpenCode on ${targetLabel}` : `Prompt for ${targetLabel}`}
+                  </span>
+                  <span className="text-zinc-500">⌘↵ to send</span>
+                </div>
+              )}
               <textarea
                 ref={promptRef}
-                className="w-full resize-none overflow-hidden bg-transparent text-[13px] leading-relaxed text-zinc-100 outline-none placeholder:text-zinc-600"
+                className="w-full resize-none overflow-hidden bg-transparent text-[13px] sm:text-[14px] leading-relaxed text-zinc-100 outline-none placeholder:text-zinc-600"
                 placeholder={
                   hasSessionOutput
                     ? `Steer OpenCode on ${targetLabel}…`
@@ -5439,7 +5556,7 @@ function RowEditor({
                   }
                 }}
               />
-              <div className="mt-1.5 flex items-center justify-between border-t border-zinc-900 pt-1.5 text-[12px]">
+              <div className="mt-1.5 flex items-center justify-between border-t border-zinc-800/60 pt-2 text-[12px]">
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
@@ -5467,9 +5584,9 @@ function RowEditor({
                       onClick={() => onDemote(t)}
                       title="Move to Backlog"
                       aria-label="Move to Backlog"
-                      className="inline-flex h-7 w-7 items-center justify-center rounded text-[14px] text-zinc-400 transition-colors hover:bg-zinc-900 hover:text-zinc-200"
+                      className="inline-flex h-7 items-center justify-center rounded px-2 text-[12px] text-zinc-400 transition-colors hover:bg-zinc-900 hover:text-zinc-200"
                     >
-                      ↓
+                      ↓ Backlog
                     </button>
                   )}
                   {onComplete && (
@@ -5478,9 +5595,9 @@ function RowEditor({
                       onClick={onComplete}
                       title="Done"
                       aria-label="Done"
-                      className="inline-flex h-7 w-7 items-center justify-center rounded text-[14px] text-zinc-400 transition-colors hover:bg-zinc-900 hover:text-zinc-200"
+                      className="inline-flex h-7 items-center justify-center rounded px-2.5 text-[12px] font-medium text-zinc-200 transition-colors hover:bg-zinc-900 hover:text-zinc-100"
                     >
-                      ✓
+                      ✓ Done
                     </button>
                   )}
                   <button
@@ -5500,9 +5617,9 @@ function RowEditor({
                           ? `Run on ${targetLabel}`
                           : `Queue for ${targetLabel}`
                     }
-                    className="inline-flex h-7 w-7 items-center justify-center rounded bg-orange-600 text-[13px] font-medium text-white transition-colors hover:bg-orange-500"
+                    className="inline-flex h-7 items-center justify-center rounded bg-orange-600 px-3 text-[13px] font-medium text-white transition-colors hover:bg-orange-500"
                   >
-                    {hasSessionOutput ? "↑" : "▶"}
+                    {hasSessionOutput ? "↑ Send Steer" : "▶ Run Agent"}
                   </button>
                 </div>
               </div>
@@ -8083,7 +8200,7 @@ function ProjectChips({
   return (
     <div className="border-t border-zinc-900 bg-zinc-950/60">
       <div
-        className={`mx-auto flex w-full items-center gap-1 overflow-x-auto px-4 py-1.5 sm:px-6 lg:px-8 ${
+        className={`mx-auto flex w-full items-center gap-1 overflow-x-auto px-4 py-1.5 sm:px-6 lg:px-8 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden ${
           wide ? "max-w-none" : "max-w-5xl"
         }`}
       >
