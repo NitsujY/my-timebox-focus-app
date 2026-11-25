@@ -849,21 +849,30 @@ export default function App() {
     if (!p.content) return;
     const sectionId = (p.sectionName && sections[p.sectionName.toLowerCase()]) || fallbackSection;
     const repo = extra?.repo || p.repo || "";
-    const targetSrv = resolveServer(extra?.server || p.server || ocConfig.defaultServerId, ocConfig);
-    const serverId = targetSrv.id;
-    const model =
-      extra?.model ||
-      targetSrv.defaultModel ||
-      ocConfig.defaultModel ||
-      "";
+    const explicitServer = extra?.server || p.server;
+    const hasAgentContext = Boolean(
+      explicitServer ||
+      repo ||
+      extra?.prompt ||
+      p.prompt ||
+      extra?.mode === "agent" ||
+      (extra?.sessions && extra.sessions.length > 0),
+    );
+    const targetSrv = hasAgentContext
+      ? resolveServer(explicitServer || ocConfig.defaultServerId, ocConfig)
+      : null;
+    const serverId = targetSrv ? targetSrv.id : "";
+    const model = hasAgentContext
+      ? (extra?.model || targetSrv?.defaultModel || ocConfig.defaultModel || "")
+      : "";
     const prompt = extra?.prompt || p.prompt || "";
     const note = extra?.note || "";
     const linkedSessions = extra?.sessions ? [...extra.sessions] : [];
 
     // If launching OpenCode agent immediately on task creation (or queueing if target server is offline)
     let queuedForAgent = false;
-    const isTargetOnline = ocServerOnlineById[serverId] ?? ocConnected;
-    if (extra?.mode === "agent") {
+    const isTargetOnline = serverId ? (ocServerOnlineById[serverId] ?? ocConnected) : false;
+    if (extra?.mode === "agent" && serverId) {
       if (isTargetOnline) {
         try {
           const sid = await createAndPromptOpenCodeSession({
@@ -1791,6 +1800,7 @@ export default function App() {
                 onApprove={approvePermission}
                 onAnswerForm={answerFormOption}
                 onInterrupt={stopTaskSession}
+                onStart={(t, minutes) => setActive({ task: t, minutes })}
                 onMove={roles.focus ? (x) => moveTo(x, roles.focus!) : undefined}
                 onMoveProject={otherProjects.length ? moveToProject : undefined}
                 projects={otherProjects}
@@ -2607,17 +2617,22 @@ function FocusView({
   const renderSidebarCard = (t: Task, isBuffer = false) => {
     const { triage, liveSession, meta } = resolveTaskTriage(t, ocSessions);
     const active = selectedTask?.id === t.id;
-    const assignedServerId = liveSession?.serverId || meta.server || defaultServerId;
-    const isAssignedOnline = ocServerOnlineById[assignedServerId] ?? ocConnected;
+    const isAgentTask = Boolean(
+      liveSession || meta.server || meta.repo || meta.prompt || meta.queued || (meta.sessions && meta.sessions.length > 0),
+    );
+    const assignedServerId = liveSession?.serverId || meta.server || (isAgentTask ? defaultServerId : "");
+    const isAssignedOnline = assignedServerId ? (ocServerOnlineById[assignedServerId] ?? ocConnected) : false;
     const repoShort = shortRepo(meta.repo || liveSession?.repoShort);
-    const targetBadge = [
-      ocServers.length > 1 || (meta.server && meta.server !== defaultServerId)
-        ? assignedServerId
-        : null,
-      repoShort,
-    ]
-      .filter(Boolean)
-      .join("/");
+    const targetBadge = isAgentTask
+      ? [
+          ocServers.length > 1 || (meta.server && meta.server !== defaultServerId)
+            ? assignedServerId
+            : null,
+          repoShort,
+        ]
+          .filter(Boolean)
+          .join("/")
+      : null;
     const aSec = agentSecBy[t.id] ?? 0;
     const hSec = humanSecBy[t.id] ?? 0;
     const spent = (spentBy[t.id] ?? 0) + Math.floor(hSec / 60);
@@ -2708,7 +2723,21 @@ function FocusView({
                   → Focus
                 </button>
               )}
-              {triage === "queued" && (!isQueuedForAgent || isAssignedOnline) && (
+              {triage === "queued" && !isAgentTask && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onStart(t, planned);
+                  }}
+                  title={`Start ${planned}m Pomodoro timer`}
+                  aria-label={`Start ${planned}m Pomodoro timer`}
+                  className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 text-[10px] font-medium text-zinc-200 hover:border-orange-500/60 hover:text-orange-300 transition-colors"
+                >
+                  ⏱ Start
+                </button>
+              )}
+              {triage === "queued" && isAgentTask && (!isQueuedForAgent || isAssignedOnline) && (
                 <button
                   type="button"
                   onClick={(e) => {
@@ -3217,6 +3246,7 @@ function BacklogList({
   onMoveProject,
   projects,
   onComplete,
+  onStart,
   onUpdate,
   onDuration,
   onDelete,
@@ -3249,6 +3279,7 @@ function BacklogList({
   onApprove: (t: Task, decision?: "once" | "always" | "reject") => void;
   onAnswerForm: (t: Task, fieldKey: string, value: string, label: string) => void;
   onInterrupt: (t: Task) => void;
+  onStart?: (t: Task, minutes: number) => void;
   onMove?: (t: Task) => void;
   onMoveProject?: (t: Task, projectId: string) => void;
   projects?: Project[];
@@ -3292,6 +3323,7 @@ function BacklogList({
             onMoveProject={onMoveProject}
             projects={projects}
             onComplete={() => onComplete(t)}
+            onStart={onStart}
             onUpdate={onUpdate}
             onDuration={onDuration}
             onDelete={onDelete}
@@ -3520,8 +3552,11 @@ function TaskRow({
   const needsApproval = Boolean(liveSession?.permission);
   const isBlockedOnHuman = hasQuestion || needsApproval;
   const isQueuedForAgent = !liveSession && Boolean(meta.queued);
-  const assignedServerId = liveSession?.serverId || meta.server || defaultServerId;
-  const isAssignedServerOnline = ocServerOnlineById[assignedServerId] ?? ocConnected;
+  const isAgentTask = Boolean(
+    liveSession || meta.server || meta.repo || meta.prompt || meta.queued || (meta.sessions && meta.sessions.length > 0),
+  );
+  const assignedServerId = liveSession?.serverId || meta.server || (isAgentTask ? defaultServerId : "");
+  const isAssignedServerOnline = assignedServerId ? (ocServerOnlineById[assignedServerId] ?? ocConnected) : false;
 
   const activeSid = meta.sessions[meta.sessions.length - 1] ?? "";
   const [summary, setSummary] = useState<SessionSummary | null>(null);
@@ -3565,19 +3600,21 @@ function TaskRow({
   const aiMin = Math.floor(agentSec / 60);
 
   const repoShort = shortRepo(meta.repo || liveSession?.repoShort);
-  const showServerBadge = ocServers.length > 1 || (meta.server && meta.server !== defaultServerId);
+  const showServerBadge = isAgentTask && (ocServers.length > 1 || (meta.server && meta.server !== defaultServerId));
   const activeModelKey = liveSession?.modelKey || meta.model || "";
   const activeModelShort = shortModelLabel(
     activeModelKey,
-    ocModelsByServer[assignedServerId],
+    assignedServerId ? ocModelsByServer[assignedServerId] : undefined,
   );
-  const targetBadge = [
-    showServerBadge ? assignedServerId : null,
-    repoShort,
-    meta.model ? activeModelShort : null,
-  ]
-    .filter(Boolean)
-    .join("/");
+  const targetBadge = isAgentTask
+    ? [
+        showServerBadge ? assignedServerId : null,
+        repoShort,
+        meta.model ? activeModelShort : null,
+      ]
+        .filter(Boolean)
+        .join("/")
+    : null;
 
   const filesChanged = summary?.filesChanged ?? [];
   const totalAdditions = summary?.totalAdditions ?? 0;
@@ -3702,16 +3739,26 @@ function TaskRow({
         <button
           className="shrink-0 rounded px-2 py-1 text-[12px] text-orange-500 transition-colors duration-150 hover:bg-zinc-800"
           title={
-            isAssignedServerOnline
-              ? `Run on ${assignedServerId}`
-              : `Queue for ${assignedServerId}`
+            isAgentTask
+              ? isAssignedServerOnline
+                ? `Run on ${assignedServerId}`
+                : `Queue for ${assignedServerId}`
+              : `Start ${planned}m Pomodoro timer`
           }
           aria-label={
-            isAssignedServerOnline
-              ? `Run on ${assignedServerId}`
-              : `Queue for ${assignedServerId}`
+            isAgentTask
+              ? isAssignedServerOnline
+                ? `Run on ${assignedServerId}`
+                : `Queue for ${assignedServerId}`
+              : `Start ${planned}m Pomodoro timer`
           }
-          onClick={() => onHandToAgent(undefined, assignedServerId)}
+          onClick={() => {
+            if (isAgentTask) {
+              onHandToAgent(undefined, assignedServerId);
+            } else if (onStart) {
+              onStart(t, planned);
+            }
+          }}
         >
           ▶
         </button>
@@ -4061,7 +4108,7 @@ function RowEditor({
   const [prompt, setPrompt] = useState(initialMeta.prompt);
   const [repo, setRepo] = useState(initialMeta.repo);
   const [server, setServer] = useState(
-    liveSession?.serverId || initialMeta.server || defaultServerId,
+    liveSession?.serverId || initialMeta.server || "",
   );
   const [model, setModel] = useState(initialMeta.model || liveSession?.modelKey || "");
   const [sessions, setSessions] = useState<string[]>(initialMeta.sessions);
@@ -4418,6 +4465,23 @@ function RowEditor({
                       Execution Server
                     </label>
                     <div className="flex flex-wrap gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setServer("");
+                          setRepo("");
+                          setModel("");
+                          metaLive.current = { ...metaLive.current, server: "", repo: "", model: "" };
+                          scheduleFlush();
+                        }}
+                        className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 font-mono text-[12px] transition-colors ${
+                          !server
+                            ? "bg-zinc-200 font-medium text-zinc-950"
+                            : "bg-zinc-800/70 text-zinc-400 hover:text-zinc-200"
+                        }`}
+                      >
+                        <span>None (Human)</span>
+                      </button>
                       {ocServers.map((s) => {
                         const active = server === s.id;
                         const online = ocServerOnlineById[s.id];
@@ -5151,6 +5215,28 @@ function RowEditor({
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="text-zinc-500">Target:</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setServer("");
+                        setRepo("");
+                        setModel("");
+                        metaLive.current = {
+                          ...metaLive.current,
+                          server: "",
+                          repo: "",
+                          model: "",
+                        };
+                        scheduleFlush();
+                      }}
+                      className={`inline-flex items-center gap-1.5 rounded px-2 py-0.5 font-mono text-[11px] ${
+                        !server
+                          ? "bg-zinc-200 font-medium text-zinc-950"
+                          : "bg-zinc-800/70 text-zinc-400 hover:text-zinc-200"
+                      }`}
+                    >
+                      <span>None (Human)</span>
+                    </button>
                     {ocServers.map((s) => {
                       const active = server === s.id;
                       const online = ocServerOnlineById[s.id];
@@ -5834,20 +5920,31 @@ function AddRow({
   }, [open]);
 
   const parsed = parseAdd(v, sections, ocServers, ocProjectsByServer);
-  const effectiveServerId = parsed.server || (showDetails ? pickedServerId : defaultServerId);
-  const activeSrvObj = ocServers.find((s) => s.id === effectiveServerId) ?? ocServers[0];
-  const discoveredProjects = ocProjectsByServer?.[effectiveServerId] ?? [];
+  const effectiveServerId =
+    parsed.server ||
+    (showDetails
+      ? pickedServerId === "none"
+        ? ""
+        : pickedServerId
+      : parsed.repo || parsed.prompt || promptText.trim()
+        ? defaultServerId
+        : "");
+  const activeSrvObj =
+    ocServers.find((s) => s.id === (effectiveServerId || defaultServerId)) ?? ocServers[0];
+  const discoveredProjects = ocProjectsByServer?.[effectiveServerId || defaultServerId] ?? [];
   const serverRepos = mergeRepos(
     activeSrvObj?.repos?.length ? activeSrvObj.repos : KNOWN_REPOS,
     discoveredProjects,
   );
-  const serverModels = ocModelsByServer[effectiveServerId] ?? [];
+  const serverModels = ocModelsByServer[effectiveServerId || defaultServerId] ?? [];
   const defaultModelObj = serverModels.find((m) => m.isDefault);
   const effectiveRepo = parsed.repo || (showDetails ? pickedRepo : "");
-  const isTargetServerOnline = ocServerOnlineById[effectiveServerId] ?? ocConnected;
+  const isTargetServerOnline = effectiveServerId
+    ? (ocServerOnlineById[effectiveServerId] ?? ocConnected)
+    : false;
   const targetLabel = effectiveRepo
-    ? `${effectiveServerId}/${shortRepo(effectiveRepo)}`
-    : effectiveServerId;
+    ? `${effectiveServerId || "agent"}/${shortRepo(effectiveRepo)}`
+    : effectiveServerId || "Human";
 
   const handleAddCustomFolder = () => {
     const rawDir = customFolderDir.trim();
@@ -5858,7 +5955,7 @@ function AddRow({
       : rawDir;
     const derivedLabel = pathToRepoLabel(resolvedDir, srvRoot);
     if (onAddProject) {
-      onAddProject(effectiveServerId, derivedLabel, resolvedDir);
+      onAddProject(effectiveServerId || defaultServerId, derivedLabel, resolvedDir);
     }
     setPickedRepo(derivedLabel);
     setCustomFolderDir("");
@@ -5869,9 +5966,12 @@ function AddRow({
     const raw = v.trim();
     if (!raw) return;
     const combinedPrompt = [parsed.prompt, promptText.trim()].filter(Boolean).join("\n");
+    const agentMode = mode === "agent";
+    const serverToUse =
+      effectiveServerId || (agentMode ? defaultServerId : undefined);
     onAdd(raw, {
       repo: effectiveRepo || undefined,
-      server: effectiveServerId || undefined,
+      server: serverToUse || undefined,
       model: pickedModel || undefined,
       prompt: combinedPrompt || undefined,
       mode,
@@ -5952,6 +6052,20 @@ function AddRow({
           {/* Single Unified Server → Project Bar */}
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="text-zinc-500">Target:</span>
+            <button
+              type="button"
+              onClick={() => {
+                setPickedServerId("none");
+                setPickedRepo("");
+              }}
+              className={`inline-flex items-center gap-1.5 rounded px-2 py-0.5 font-mono text-[11px] ${
+                !effectiveServerId
+                  ? "bg-zinc-200 font-medium text-zinc-950"
+                  : "bg-zinc-800/70 text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              <span>None (Human)</span>
+            </button>
             {ocServers.map((s) => {
               const active = effectiveServerId === s.id;
               const online = ocServerOnlineById[s.id];
