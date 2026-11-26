@@ -1273,6 +1273,9 @@ export default function App() {
 
   const launchingQueueRef = useRef<Set<string>>(new Set());
 
+  // ponytail: single sequential auto-loop reuses handToAgent + native OpenCode question tool
+  const [autoPilot, setAutoPilot] = useState(false);
+
   const runQueuedTasks = useCallback(
     async (list: Task[] = queuedForAgentTasks) => {
       if (!ocConnected) return;
@@ -1297,6 +1300,59 @@ export default function App() {
       void runQueuedTasks(queuedForAgentTasks);
     }
   }, [ocConnected, ocConfig.autoRunQueued, queuedForAgentTasks, runQueuedTasks]);
+
+  useEffect(() => {
+    if (!autoPilot || !ocConnected) return;
+    if (ocSessions.some((s) => s.status === "running")) return;
+
+    const focusList = sortTasks(
+      tasks.filter((t) => !t.id.startsWith("tmp-") && t.section_id === roles.focus),
+    );
+    const backlogList = sortTasks(
+      tasks.filter(
+        (t) =>
+          !t.id.startsWith("tmp-") &&
+          (t.section_id == null || t.section_id === roles.backlog),
+      ),
+    );
+    const isUnstarted = (t: Task) =>
+      !launchingQueueRef.current.has(t.id) &&
+      parseTaskDescription(t.description).sessions.length === 0;
+
+    const nextFocus = focusList.find(isUnstarted);
+    const nextBacklog = backlogList.find(isUnstarted);
+    const target = nextFocus ?? nextBacklog;
+    if (!target) {
+      setAutoPilot(false);
+      showToast("Auto-Loop finished all unstarted Focus & Backlog tasks");
+      return;
+    }
+
+    const meta = parseTaskDescription(target.description);
+    const srv = resolveServer(meta.server || ocConfig.defaultServerId, ocConfig);
+    if (!ocServerOnlineById[srv.id]) return;
+
+    const isBacklog = !nextFocus;
+    const base = meta.prompt || meta.note || target.content;
+    const prompt = isBacklog
+      ? `Rough backlog idea: "${target.content}"\n${base}\n\nDo NOT implement yet. Inspect the codebase, propose a concise 3-bullet plan, and call the \`question\` tool to ask for my confirmation and any missing requirements.`
+      : `${base}\n\nComplete this task end-to-end. If blocked by an ambiguity or decision, call the \`question\` tool and wait for my answer.`;
+
+    launchingQueueRef.current.add(target.id);
+    void handToAgent(target, prompt, srv.id).finally(() => {
+      launchingQueueRef.current.delete(target.id);
+    });
+  }, [
+    autoPilot,
+    ocConnected,
+    ocSessions,
+    tasks,
+    roles.focus,
+    roles.backlog,
+    ocConfig,
+    ocServerOnlineById,
+    handToAgent,
+  ]);
 
   // Approve or reject pending OpenCode tool permission inline
   const approvePermission = async (
@@ -1643,6 +1699,25 @@ export default function App() {
                 </>
               )}
             </button>
+            {ocConnected && (
+              <button
+                type="button"
+                onClick={() => setAutoPilot((v) => !v)}
+                className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 font-mono text-[11px] leading-none transition-colors ${
+                  autoPilot
+                    ? "border-orange-500/60 bg-orange-500/15 text-orange-300"
+                    : "border-zinc-800/90 bg-zinc-900/70 text-zinc-400 hover:border-zinc-700 hover:bg-zinc-800/80 hover:text-zinc-200"
+                }`}
+                title="Auto-loop through unstarted Focus (execute) and Backlog (spec & ask) tasks one at a time"
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    autoPilot ? "bg-orange-400 animate-pulse" : "bg-zinc-600"
+                  }`}
+                />
+                <span>{autoPilot ? "Auto-Loop ON" : "Auto-Loop"}</span>
+              </button>
+            )}
           </div>
           <nav className="flex shrink-0 items-center justify-center gap-0.5 sm:gap-1">
             {(["focus", "backlog", "review", "analysis"] as const).map((v) => (
