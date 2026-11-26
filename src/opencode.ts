@@ -1481,9 +1481,14 @@ export async function fetchOpenCodeSessionSummary(
 
       if (m.error?.message?.trim()) {
         lastErrorText = `⚠️ ${m.error.message.trim()}`;
+        const prevTurn = groupedTurns[groupedTurns.length - 1];
+        if (prevTurn && prevTurn.role === "assistant" && !prevTurn.text) {
+          prevTurn.text = lastErrorText;
+        }
       }
 
       if (m.type === "user") {
+        lastErrorText = "";
         const userParts: string[] = [];
         const directUserText = (m.text || m.metadata?.displayText || "").trim();
         if (directUserText) userParts.push(directUserText);

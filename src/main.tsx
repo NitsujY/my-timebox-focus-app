@@ -4,6 +4,16 @@ import "./index.css";
 import App from "./App";
 import MockFlightDeck from "./MockFlightDeck";
 
+if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+  let refreshing = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!refreshing) {
+      refreshing = true;
+      window.location.reload();
+    }
+  });
+}
+
 function Root() {
   const [mockMode, setMockMode] = useState(() =>
     new URLSearchParams(window.location.search).has("mock"),

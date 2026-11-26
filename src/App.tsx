@@ -4778,7 +4778,9 @@ function RowEditor({
   const [replyText, setReplyText] = useState("");
   const [pendingSteer, setPendingSteer] = useState<{ text: string; sentAt: number } | null>(null);
   const hasSessionOutput = Boolean(
-    liveSession ||
+    sessions.length > 0 ||
+      initialMeta.sessions.length > 0 ||
+      liveSession ||
       summary?.lastAssistantText ||
       summary?.lastToolCall ||
       (summary?.turns && summary.turns.length > 0) ||
@@ -4794,7 +4796,12 @@ function RowEditor({
   useEffect(() => {
     if (liveSession?.modelKey && !userChangedModelRef.current) {
       setModel(liveSession.modelKey);
+      if (metaLive.current.model !== liveSession.modelKey) {
+        metaLive.current = { ...metaLive.current, model: liveSession.modelKey };
+        scheduleFlush();
+      }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveSession?.modelKey]);
 
   useEffect(() => {
@@ -5011,7 +5018,13 @@ function RowEditor({
       if (initialMsg) {
         setPendingSteer({ text: initialMsg, sentAt: Date.now() });
       }
-      onHandToAgent(prompt, server, model || undefined, repo, note);
+      onHandToAgent(
+        prompt,
+        server,
+        activeSid ? explicitModelOverride : (model || undefined),
+        repo,
+        note,
+      );
       window.setTimeout(() => scrollThreadToBottom(true), 40);
     }
   };
