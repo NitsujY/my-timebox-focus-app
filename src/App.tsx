@@ -1139,18 +1139,19 @@ export default function App() {
       modelOverride?: string,
       repoOverride?: string,
       noteOverride?: string,
+      keepSection = false,
     ) => {
       const resolvedId = tmpIdMapRef.current.get(t.id) ?? t.id;
       const currentTask =
         tasksRef.current.find((x) => x.id === resolvedId || x.id === t.id) ?? t;
       if (drivingTaskId === currentTask.id || drivingTaskId === t.id) setDrivingTaskId(null);
 
-      // When triggering from Backlog (or another non-focus section), move directly to Focus
-      if (roles.focus && currentTask.section_id !== roles.focus) {
+      // When triggering manually from Backlog (or another non-focus section), move directly to Focus
+      if (!keepSection && roles.focus && currentTask.section_id !== roles.focus) {
         void moveTo(currentTask, roles.focus);
+        setView((curView) => (curView === "backlog" ? "focus" : curView));
       }
       setExpandedId(currentTask.id);
-      setView((curView) => (curView === "backlog" ? "focus" : curView));
 
       const meta = parseTaskDescription(currentTask.description);
       const effectiveNote = noteOverride ?? meta.note;
@@ -1336,10 +1337,18 @@ export default function App() {
     const base = meta.prompt || meta.note || target.content;
     const prompt = isBacklog
       ? `Rough backlog idea: "${target.content}"\n${base}\n\nDo NOT implement yet. Inspect the codebase, propose a concise 3-bullet plan, and call the \`question\` tool to ask for my confirmation and any missing requirements.`
-      : `${base}\n\nComplete this task end-to-end. If blocked by an ambiguity or decision, call the \`question\` tool and wait for my answer.`;
+      : `${base}\n\nComplete the majority of this task end-to-end (implement, verify/build, and summarize what was done). If blocked by an ambiguity or decision, call the \`question\` tool and wait for my answer. Do NOT close the Todoist task; leave it parked for my review.`;
 
     launchingQueueRef.current.add(target.id);
-    void handToAgent(target, prompt, srv.id).finally(() => {
+    void handToAgent(
+      target,
+      prompt,
+      srv.id,
+      undefined,
+      undefined,
+      undefined,
+      isBacklog,
+    ).finally(() => {
       launchingQueueRef.current.delete(target.id);
     });
   }, [
@@ -2663,15 +2672,17 @@ function FocusView({
   }, [focusTasks, bufferTasks]);
 
   const laneNeedsYou = useMemo(() => {
-    return combinedTasks
-      .filter((t) => resolveTaskTriage(t, ocSessions).triage === "needs_you")
-      .sort((a, b) => {
-        const ra = resolveTaskTriage(a, ocSessions).liveSession;
-        const rb = resolveTaskTriage(b, ocSessions).liveSession;
-        const score = (s?: OpenCodeLiveSession) =>
-          s?.form ? 0 : s?.permission ? 1 : 2;
-        return score(ra) - score(rb);
-      });
+    return combinedTasks.filter((t) => {
+      const r = resolveTaskTriage(t, ocSessions);
+      return r.triage === "needs_you" && Boolean(r.liveSession?.form || r.liveSession?.permission);
+    });
+  }, [combinedTasks, ocSessions]);
+
+  const laneParked = useMemo(() => {
+    return combinedTasks.filter((t) => {
+      const r = resolveTaskTriage(t, ocSessions);
+      return r.triage === "needs_you" && !r.liveSession?.form && !r.liveSession?.permission;
+    });
   }, [combinedTasks, ocSessions]);
 
   const laneWorking = useMemo(
@@ -2690,13 +2701,14 @@ function FocusView({
   );
 
   const orderedBoardTasks = useMemo(
-    () => [...laneNeedsYou, ...laneWorking, ...laneQueuedFocus, ...laneQueuedBuffer],
-    [laneNeedsYou, laneWorking, laneQueuedFocus, laneQueuedBuffer],
+    () => [...laneNeedsYou, ...laneParked, ...laneWorking, ...laneQueuedFocus, ...laneQueuedBuffer],
+    [laneNeedsYou, laneParked, laneWorking, laneQueuedFocus, laneQueuedBuffer],
   );
 
   const selectedTask =
     orderedBoardTasks.find((t) => t.id === selectedId) ??
     laneNeedsYou[0] ??
+    laneParked[0] ??
     laneWorking[0] ??
     laneQueuedFocus[0] ??
     laneQueuedBuffer[0] ??
@@ -2746,7 +2758,7 @@ function FocusView({
       : liveSession?.permission
         ? "Permission"
         : triage === "needs_you"
-          ? "Ready for review"
+          ? "Parked · Ready for review"
           : triage === "working"
             ? `Processing${aSec > 0 ? ` · ${fmt(aSec)}` : ""}`
             : isQueuedForAgent
@@ -2785,7 +2797,9 @@ function FocusView({
               <span
                 className={
                   triage === "needs_you"
-                    ? "font-medium text-orange-400"
+                    ? liveSession?.form || liveSession?.permission
+                      ? "font-medium text-orange-400"
+                      : "font-medium text-emerald-400"
                     : triage === "working"
                       ? "text-zinc-200"
                       : isQueuedForAgent
@@ -2995,6 +3009,26 @@ function FocusView({
               </ul>
             )}
           </section>
+
+          {/* GROUP 1B: PARKED (AGENT FINISHED · READY FOR REVIEW) */}
+          {laneParked.length > 0 && (
+            <section className="space-y-2">
+              <div className="flex items-center justify-between px-1">
+                <div className="flex items-center gap-2">
+                  <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                  <h2 className="text-[12px] font-semibold uppercase tracking-wider text-emerald-400">
+                    Parked (Ready for Review)
+                  </h2>
+                </div>
+                <span className="font-mono text-[12px] tabular-nums text-emerald-400">
+                  {laneParked.length}
+                </span>
+              </div>
+              <ul className="space-y-1.5">
+                {laneParked.map((t) => renderSidebarCard(t, t.section_id === bufferId))}
+              </ul>
+            </section>
+          )}
 
           {/* GROUP 2: AGENT PROCESSING */}
           <section className="space-y-2">
@@ -3482,7 +3516,31 @@ function BacklogView({
     if (openMobile) setMobileShowStage(true);
   };
 
-  const visibleTasks = showAll ? backlogTasks : backlogTasks.slice(0, PAGE);
+  const backlogNeedsYou = useMemo(
+    () =>
+      backlogTasks.filter((t) => {
+        const r = resolveTaskTriage(t, ocSessions);
+        return r.triage === "needs_you" && Boolean(r.liveSession?.form || r.liveSession?.permission);
+      }),
+    [backlogTasks, ocSessions],
+  );
+  const backlogParked = useMemo(
+    () =>
+      backlogTasks.filter((t) => {
+        const r = resolveTaskTriage(t, ocSessions);
+        return r.triage === "needs_you" && !r.liveSession?.form && !r.liveSession?.permission;
+      }),
+    [backlogTasks, ocSessions],
+  );
+  const backlogWorking = useMemo(
+    () => backlogTasks.filter((t) => resolveTaskTriage(t, ocSessions).triage === "working"),
+    [backlogTasks, ocSessions],
+  );
+  const backlogQueued = useMemo(
+    () => backlogTasks.filter((t) => resolveTaskTriage(t, ocSessions).triage === "queued"),
+    [backlogTasks, ocSessions],
+  );
+  const visibleTasks = showAll ? backlogQueued : backlogQueued.slice(0, PAGE);
 
   const renderBacklogCard = (t: Task) => {
     const { triage, liveSession, meta } = resolveTaskTriage(t, ocSessions);
@@ -3561,10 +3619,28 @@ function BacklogView({
                   {priLabel}
                 </span>
               )}
-              <span className="text-zinc-500">
-                {isQueuedForAgent
-                  ? `Queued for ${assignedServerId}`
-                  : `${spent > 0 ? `${spent}m/` : ""}${planned}m`}
+              <span
+                className={
+                  triage === "needs_you"
+                    ? liveSession?.form || liveSession?.permission
+                      ? "font-medium text-orange-400"
+                      : "font-medium text-emerald-400"
+                    : triage === "working"
+                      ? "text-zinc-200"
+                      : "text-zinc-500"
+                }
+              >
+                {liveSession?.form
+                  ? "Question"
+                  : liveSession?.permission
+                    ? "Permission"
+                    : triage === "needs_you"
+                      ? "Parked · Ready for review"
+                      : triage === "working"
+                        ? "Processing"
+                        : isQueuedForAgent
+                          ? `Queued for ${assignedServerId}`
+                          : `${spent > 0 ? `${spent}m/` : ""}${planned}m`}
               </span>
             </div>
 
@@ -3640,6 +3716,63 @@ function BacklogView({
             mobileShowStage && (selectedTask || triageOpen) ? "hidden md:block" : "block"
           }`}
         >
+          {backlogNeedsYou.length > 0 && (
+            <section className="space-y-2">
+              <div className="flex items-center justify-between px-1">
+                <div className="flex items-center gap-2">
+                  <span className="h-2 w-2 rounded-full bg-orange-500" />
+                  <h2 className="text-[12px] font-semibold uppercase tracking-wider text-orange-400">
+                    Waiting for Your Answer
+                  </h2>
+                </div>
+                <span className="font-mono text-[12px] tabular-nums text-orange-400">
+                  {backlogNeedsYou.length}
+                </span>
+              </div>
+              <ul className="space-y-1.5">
+                {backlogNeedsYou.map((t) => renderBacklogCard(t))}
+              </ul>
+            </section>
+          )}
+
+          {backlogParked.length > 0 && (
+            <section className="space-y-2">
+              <div className="flex items-center justify-between px-1">
+                <div className="flex items-center gap-2">
+                  <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                  <h2 className="text-[12px] font-semibold uppercase tracking-wider text-emerald-400">
+                    Parked (Ready for Review)
+                  </h2>
+                </div>
+                <span className="font-mono text-[12px] tabular-nums text-emerald-400">
+                  {backlogParked.length}
+                </span>
+              </div>
+              <ul className="space-y-1.5">
+                {backlogParked.map((t) => renderBacklogCard(t))}
+              </ul>
+            </section>
+          )}
+
+          {backlogWorking.length > 0 && (
+            <section className="space-y-2">
+              <div className="flex items-center justify-between px-1">
+                <div className="flex items-center gap-2">
+                  <span className="h-2 w-2 rounded-full bg-zinc-200 animate-pulse" />
+                  <h2 className="text-[12px] font-semibold uppercase tracking-wider text-zinc-300">
+                    Agent Processing
+                  </h2>
+                </div>
+                <span className="font-mono text-[12px] tabular-nums text-zinc-400">
+                  {backlogWorking.length}
+                </span>
+              </div>
+              <ul className="space-y-1.5">
+                {backlogWorking.map((t) => renderBacklogCard(t))}
+              </ul>
+            </section>
+          )}
+
           <section className="space-y-2.5">
             <div className="flex items-center justify-between px-1">
               <div className="flex items-center gap-2">
@@ -3694,9 +3827,9 @@ function BacklogView({
                 <ul className="space-y-1.5">
                   {visibleTasks.map((t) => renderBacklogCard(t))}
                 </ul>
-                {!showAll && backlogTasks.length > PAGE && (
+                {!showAll && backlogQueued.length > PAGE && (
                   <button className={`${btn} mt-1 w-full`} onClick={() => setShowAll(true)}>
-                    Show all {backlogTasks.length}…
+                    Show all {backlogQueued.length}…
                   </button>
                 )}
               </>
