@@ -46,7 +46,9 @@ import {
   type OpenCodeServer,
   type OpenCodeVerifyResult,
   type SessionFileDiff,
+  type SessionStepItem,
   type SessionSummary,
+  type SessionTurn,
   type TaskMeta,
   type TriageResult,
   type TriageState,
@@ -1142,6 +1144,14 @@ export default function App() {
       const currentTask =
         tasksRef.current.find((x) => x.id === resolvedId || x.id === t.id) ?? t;
       if (drivingTaskId === currentTask.id || drivingTaskId === t.id) setDrivingTaskId(null);
+
+      // When triggering from Backlog (or another non-focus section), move directly to Focus
+      if (roles.focus && currentTask.section_id !== roles.focus) {
+        void moveTo(currentTask, roles.focus);
+      }
+      setExpandedId(currentTask.id);
+      setView((curView) => (curView === "backlog" ? "focus" : curView));
+
       const meta = parseTaskDescription(currentTask.description);
       const effectiveNote = noteOverride ?? meta.note;
       const repoLabel = repoOverride ?? meta.repo;
@@ -1153,13 +1163,14 @@ export default function App() {
         ocConfig,
       );
       const serverId = targetSrv.id;
-      const modelKey =
-        modelOverride ??
-        (meta.model || undefined) ??
-        (targetSrv.defaultModel || undefined) ??
-        (ocConfig.defaultModel || undefined) ??
-        existingLive?.modelKey ??
-        "";
+      // For an existing session, preserve its active model (`existingLive.modelKey`) unless an explicit modelOverride was given.
+      const modelKey = latestSid
+        ? (modelOverride || existingLive?.modelKey || meta.model || "")
+        : (modelOverride ||
+            meta.model ||
+            targetSrv.defaultModel ||
+            ocConfig.defaultModel ||
+            "");
 
       let sid = latestSid;
       try {
@@ -1170,11 +1181,38 @@ export default function App() {
             promptText,
             serverId,
             modelKey: modelKey || undefined,
+            onSessionCreated: (createdSid) => {
+              const linked = Array.from(new Set([...meta.sessions, createdSid]));
+              const optimisticDesc = formatTaskDescription({
+                note: effectiveNote,
+                prompt: customPrompt?.trim() ? customPrompt.trim() : meta.prompt,
+                repo: repoLabel,
+                server: serverId,
+                model: modelKey || undefined,
+                sessions: linked,
+                queued: false,
+              });
+              setTasks((ts) =>
+                ts.map((x) =>
+                  x.id === currentTask.id || x.id === t.id
+                    ? { ...x, description: optimisticDesc }
+                    : x,
+                ),
+              );
+              invalidateSessionSummary(createdSid);
+              void syncOpenCode();
+              window.setTimeout(() => void syncOpenCode(), 400);
+              window.setTimeout(() => void syncOpenCode(), 1200);
+            },
           });
         } else {
-          if (modelKey && modelKey !== existingLive?.modelKey) {
-            await switchOpenCodeSessionModel(sid, modelKey, serverId).catch(() => {});
+          if (modelOverride && modelOverride !== existingLive?.modelKey) {
+            await switchOpenCodeSessionModel(sid, modelOverride, serverId).catch(() => {});
           }
+          invalidateSessionSummary(sid);
+          window.setTimeout(() => void syncOpenCode(), 250);
+          window.setTimeout(() => void syncOpenCode(), 900);
+          window.setTimeout(() => void syncOpenCode(), 2000);
           await sendOpenCodePrompt(sid, promptText, serverId);
         }
       } catch {
@@ -1218,7 +1256,7 @@ export default function App() {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [drivingTaskId, syncOpenCode, token, ocSessions, ocConfig],
+    [drivingTaskId, syncOpenCode, token, ocSessions, ocConfig, roles.focus],
   );
 
   // Tasks queued from mobile (`queue=1` in Todoist description) waiting for an OpenCode session
@@ -1519,7 +1557,7 @@ export default function App() {
       <header className="shrink-0 z-10 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur">
         <div
           className={`mx-auto flex w-full items-center justify-between gap-2 px-4 py-2.5 sm:px-6 lg:px-8 ${
-            view === "focus" ? "max-w-none" : "max-w-5xl"
+            view === "focus" || view === "backlog" ? "max-w-none" : "max-w-5xl"
           }`}
         >
           <div className="flex shrink-0 items-center gap-2.5">
@@ -1652,12 +1690,12 @@ export default function App() {
           projects={projects}
           projectId={projectId}
           onProject={switchProject}
-          wide={view === "focus"}
+          wide={view === "focus" || view === "backlog"}
         />
       </header>
       <main
         className={`mx-auto w-full flex-1 min-h-0 flex flex-col px-4 sm:px-6 lg:px-8 ${
-          view === "focus"
+          view === "focus" || view === "backlog"
             ? "pt-3 pb-3 max-w-none overflow-y-auto"
             : "pt-6 pb-12 max-w-5xl overflow-y-auto"
         }`}
@@ -1739,81 +1777,68 @@ export default function App() {
             }
           />
         ) : view === "backlog" ? (
-          <section>
-            <AddRow
-              alwaysOpen
-              disableAgentAction
-              ocConnected={ocConnected}
-              ocServers={ocConfig.servers}
-              ocServerOnlineById={ocServerOnlineById}
-              ocModelsByServer={ocModelsByServer}
-              ocProjectsByServer={ocProjectsByServer}
-              onAddProject={addProjectToServer}
-              onRefreshProjects={refreshProjectsForServer}
-              defaultServerId={ocConfig.defaultServerId}
-              placeholder="＋ Add to Backlog… (~server @repo // prompt or Tab)"
-              sections={sections}
-              onAdd={(raw, extra) =>
-                addTask(
-                  raw,
-                  roles.backlog,
-                  { ...extra, mode: "save" },
-                )
+          <BacklogView
+            backlogTasks={backlogTasks}
+            focusTasks={focusTasks}
+            sessions={sessions}
+            sections={sections}
+            backlogId={roles.backlog}
+            focusId={roles.focus}
+            durations={prefs.durations}
+            defaultMinutes={prefs.defaultMinutes}
+            spentBy={spentBy}
+            expandedId={expandedId}
+            ocConnected={ocConnected}
+            ocServers={ocConfig.servers}
+            ocServerOnlineById={ocServerOnlineById}
+            ocVerifyById={ocVerifyById}
+            ocModelsByServer={ocModelsByServer}
+            ocProjectsByServer={ocProjectsByServer}
+            onAddProject={addProjectToServer}
+            onRefreshProjects={refreshProjectsForServer}
+            defaultServerId={ocConfig.defaultServerId}
+            ocSessions={ocSessions}
+            onOpenOcSettings={() => setView("settings")}
+            humanSecBy={humanSecBy}
+            agentSecBy={agentSecBy}
+            onToggle={toggleRow}
+            onHandToAgent={handToAgent}
+            onApprove={approvePermission}
+            onAnswerForm={answerFormOption}
+            onInterrupt={stopTaskSession}
+            onStart={(t, minutes) => {
+              if (roles.focus && t.section_id !== roles.focus) {
+                void moveTo(t, roles.focus);
               }
-            />
-            {backlogTasks.length === 0 ? (
-              <p className="py-4 text-[13px] text-zinc-500">
-                Your parking lot for ideas. Dump anything here — it waits without interrupting you.
-              </p>
-            ) : (
-              <>
-                <div className="mt-3 mb-1.5 flex items-center justify-between gap-2 px-1 font-mono text-[11px]">
-                  <span className="text-zinc-500">
-                    {backlogTasks.length} task{backlogTasks.length === 1 ? "" : "s"} in parking lot
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setView("focus")}
-                    className="inline-flex items-center gap-1.5 rounded border border-orange-500/40 bg-orange-950/30 px-2.5 py-1 text-orange-400 hover:border-orange-500 hover:bg-orange-950/50"
-                    title="Switch to Focus and open Triage suggestions"
-                  >
-                    ⚡ Triage to Focus →
-                  </button>
-                </div>
-                <BacklogList
-                tasks={backlogTasks}
-                expandedId={expandedId}
-                spentBy={spentBy}
-                ocConnected={ocConnected}
-                ocServers={ocConfig.servers}
-                ocServerOnlineById={ocServerOnlineById}
-                ocModelsByServer={ocModelsByServer}
-                ocProjectsByServer={ocProjectsByServer}
-                onAddProject={addProjectToServer}
-                onRefreshProjects={refreshProjectsForServer}
-                defaultServerId={ocConfig.defaultServerId}
-                ocSessions={ocSessions}
-                humanSecBy={humanSecBy}
-                agentSecBy={agentSecBy}
-                onToggle={toggleRow}
-                onHandToAgent={handToAgent}
-                onApprove={approvePermission}
-                onAnswerForm={answerFormOption}
-                onInterrupt={stopTaskSession}
-                onStart={(t, minutes) => setActive({ task: t, minutes })}
-                onMove={roles.focus ? (x) => moveTo(x, roles.focus!) : undefined}
-                onMoveProject={otherProjects.length ? moveToProject : undefined}
-                projects={otherProjects}
-                onComplete={completeWithLog}
-                onUpdate={updateTask}
-                onDuration={changeDuration}
-                onDelete={deleteTask}
-                durations={prefs.durations}
-                defaultMinutes={prefs.defaultMinutes}
-              />
-              </>
-            )}
-          </section>
+              setExpandedId(t.id);
+              setView("focus");
+              setActive({ task: t, minutes });
+            }}
+            onMove={
+              roles.focus
+                ? (x) => {
+                    void moveTo(x, roles.focus!);
+                    setExpandedId(x.id);
+                    setView("focus");
+                    showToast(`Moved "${x.content}" to Focus`);
+                  }
+                : undefined
+            }
+            onMoveProject={otherProjects.length ? moveToProject : undefined}
+            projects={otherProjects}
+            onAdd={(raw, extra) => {
+              if (extra?.mode === "agent" && roles.focus) {
+                void addTask(raw, roles.focus, extra);
+                setView("focus");
+              } else {
+                void addTask(raw, roles.backlog, { ...extra, mode: "save" });
+              }
+            }}
+            onComplete={completeWithLog}
+            onUpdate={updateTask}
+            onDuration={changeDuration}
+            onDelete={deleteTask}
+          />
         ) : (
           <FocusView
             focusTasks={focusTasks}
@@ -3154,10 +3179,7 @@ function FocusView({
                 expanded={true}
                 onToggle={() => setMobileShowStage(false)}
                 onHandToAgent={(p, srvId, mdl, rp, nt) => {
-                  const wasWaiting =
-                    resolveTaskTriage(selectedTask, ocSessions).triage === "needs_you";
                   onHandToAgent(selectedTask, p, srvId, mdl, rp, nt);
-                  if (wasWaiting) advanceAfterAction(selectedTask.id);
                 }}
                 onApprove={(dec) => {
                   onApprove(selectedTask, dec);
@@ -3224,19 +3246,27 @@ function FocusView({
   );
 }
 
-function BacklogList({
-  tasks,
-  expandedId,
+function BacklogView({
+  backlogTasks,
+  focusTasks,
+  sessions,
+  sections,
+  focusId,
+  durations,
+  defaultMinutes,
   spentBy,
+  expandedId,
   ocConnected,
   ocServers,
   ocServerOnlineById,
+  ocVerifyById,
   ocModelsByServer,
   ocProjectsByServer,
   onAddProject,
   onRefreshProjects,
   defaultServerId,
   ocSessions,
+  onOpenOcSettings,
   humanSecBy,
   agentSecBy,
   onToggle,
@@ -3244,29 +3274,37 @@ function BacklogList({
   onApprove,
   onAnswerForm,
   onInterrupt,
+  onStart,
   onMove,
   onMoveProject,
   projects,
+  onAdd,
   onComplete,
-  onStart,
   onUpdate,
   onDuration,
   onDelete,
-  durations,
-  defaultMinutes,
 }: {
-  tasks: Task[];
-  expandedId: string | null;
+  backlogTasks: Task[];
+  focusTasks: Task[];
+  sessions: Session[];
+  sections: SectionMap;
+  backlogId?: string;
+  focusId?: string;
+  durations: number[];
+  defaultMinutes: number;
   spentBy: Record<string, number>;
+  expandedId: string | null;
   ocConnected: boolean;
   ocServers: OpenCodeServer[];
   ocServerOnlineById: Record<string, boolean>;
+  ocVerifyById?: Record<string, OpenCodeVerifyResult>;
   ocModelsByServer: Record<string, OpenCodeModelOption[]>;
   ocProjectsByServer?: Record<string, OpenCodeRepo[]>;
   onAddProject?: (serverId: string, label: string, dir: string) => void;
   onRefreshProjects?: (serverId: string) => Promise<unknown>;
   defaultServerId: string;
   ocSessions: OpenCodeLiveSession[];
+  onOpenOcSettings: () => void;
   humanSecBy: Record<string, number>;
   agentSecBy: Record<string, number>;
   onToggle: (id: string) => void;
@@ -3285,59 +3323,423 @@ function BacklogList({
   onMove?: (t: Task) => void;
   onMoveProject?: (t: Task, projectId: string) => void;
   projects?: Project[];
+  onAdd: (raw: string, extra?: AddExtra) => void;
   onComplete: (t: Task) => void;
   onUpdate: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
   onDuration: (t: Task, minutes: number) => void;
   onDelete: (t: Task) => void;
-  durations: number[];
-  defaultMinutes: number;
 }) {
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    const saved = Number(load("tb_sidebar_width", 420));
+    return saved >= 280 && saved <= 760 ? saved : 420;
+  });
+  const [isResizing, setIsResizing] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(expandedId);
+  const [mobileShowStage, setMobileShowStage] = useState(false);
   const [showAll, setShowAll] = useState(false);
-  const visible = showAll ? tasks : tasks.slice(0, PAGE);
+
+  const [triageOpen, setTriageOpen] = useState(false);
+  const [triageLoading, setTriageLoading] = useState(false);
+  const [triageData, setTriageData] = useState<TriageResult | null>(null);
+
+  useEffect(() => {
+    if (expandedId && backlogTasks.some((t) => t.id === expandedId)) {
+      setSelectedId(expandedId);
+    }
+  }, [expandedId, backlogTasks]);
+
+  const runTriage = useCallback(async () => {
+    if (backlogTasks.length === 0) return;
+    setTriageLoading(true);
+    try {
+      const recentRepos = sessions
+        .filter((s) => s.repo && Date.now() - s.timestamp < 24 * 3600_000)
+        .map((s) => s.repo!)
+        .filter(Boolean);
+      const res = await suggestBacklogTasks({
+        backlogTasks,
+        focusTasks,
+        recentRepos,
+        serverId: defaultServerId,
+        defaultMinutes,
+      });
+      setTriageData(res);
+    } catch {
+      /* ignore */
+    } finally {
+      setTriageLoading(false);
+    }
+  }, [backlogTasks, focusTasks, sessions, defaultServerId, defaultMinutes]);
+
+  const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sidebarWidth;
+    setIsResizing(true);
+
+    const onMovePtr = (ev: PointerEvent) => {
+      const maxW = Math.min(760, Math.max(360, window.innerWidth - 420));
+      const next = Math.max(280, Math.min(maxW, startW + (ev.clientX - startX)));
+      setSidebarWidth(next);
+      save("tb_sidebar_width", next);
+    };
+    const onUpPtr = () => {
+      setIsResizing(false);
+      window.removeEventListener("pointermove", onMovePtr);
+      window.removeEventListener("pointerup", onUpPtr);
+    };
+    window.addEventListener("pointermove", onMovePtr);
+    window.addEventListener("pointerup", onUpPtr);
+  };
+
+  const resetSidebarWidth = () => {
+    setSidebarWidth(420);
+    save("tb_sidebar_width", 420);
+  };
+
+  const selectedTask =
+    backlogTasks.find((t) => t.id === selectedId) ?? backlogTasks[0] ?? null;
+
+  const selectTask = (id: string, openMobile = false) => {
+    setTriageOpen(false);
+    setSelectedId(id);
+    if (expandedId !== id) onToggle(id);
+    if (openMobile) setMobileShowStage(true);
+  };
+
+  const visibleTasks = showAll ? backlogTasks : backlogTasks.slice(0, PAGE);
+
+  const renderBacklogCard = (t: Task) => {
+    const { triage, liveSession, meta } = resolveTaskTriage(t, ocSessions);
+    const active = !triageOpen && selectedTask?.id === t.id;
+    const isAgentTask = Boolean(
+      liveSession ||
+        meta.server ||
+        meta.repo ||
+        meta.prompt ||
+        meta.queued ||
+        (meta.sessions && meta.sessions.length > 0),
+    );
+    const assignedServerId =
+      liveSession?.serverId || meta.server || (isAgentTask ? defaultServerId : "");
+    const isAssignedOnline = assignedServerId
+      ? (ocServerOnlineById[assignedServerId] ?? ocConnected)
+      : false;
+    const repoShort = shortRepo(meta.repo || liveSession?.repoShort);
+    const targetBadge = isAgentTask
+      ? [
+          ocServers.length > 1 || (meta.server && meta.server !== defaultServerId)
+            ? assignedServerId
+            : null,
+          repoShort,
+        ]
+          .filter(Boolean)
+          .join("/")
+      : null;
+    const hSec = humanSecBy[t.id] ?? 0;
+    const spent = (spentBy[t.id] ?? 0) + Math.floor(hSec / 60);
+    const planned = t.duration?.amount ?? defaultMinutes;
+    const isQueuedForAgent = !liveSession && Boolean(meta.queued);
+    const priLabel =
+      t.priority === 4
+        ? "P1"
+        : t.priority === 3
+          ? "P2"
+          : t.priority === 2
+            ? "P3"
+            : null;
+
+    return (
+      <li key={t.id}>
+        <div
+          onClick={() => selectTask(t.id, true)}
+          className={`group flex cursor-pointer flex-col gap-1.5 rounded-lg border px-3.5 py-3 transition-all duration-150 ${
+            active
+              ? "border-orange-500 bg-zinc-900/95 shadow-sm"
+              : "border-zinc-800/75 bg-zinc-900/30 hover:border-zinc-700 hover:bg-zinc-900/65"
+          } ${isNew(t) ? "row-new" : ""}`}
+        >
+          <div className="flex items-center justify-between gap-2 font-mono text-[11px]">
+            <div className="flex min-w-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onComplete(t);
+                }}
+                title="Mark task Done"
+                aria-label="Mark task Done"
+                className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-zinc-700 text-[10px] text-transparent transition-colors hover:border-orange-500 hover:text-orange-400"
+              >
+                ✓
+              </button>
+              {priLabel && (
+                <span
+                  className={
+                    t.priority === 4
+                      ? "font-medium text-orange-400"
+                      : t.priority === 3
+                        ? "text-zinc-300"
+                        : "text-zinc-400"
+                  }
+                >
+                  {priLabel}
+                </span>
+              )}
+              <span className="text-zinc-500">
+                {isQueuedForAgent
+                  ? `Queued for ${assignedServerId}`
+                  : `${spent > 0 ? `${spent}m/` : ""}${planned}m`}
+              </span>
+            </div>
+
+            <div className="flex shrink-0 items-center gap-1.5">
+              {targetBadge && <span className="text-zinc-500">{targetBadge}</span>}
+              {onMove && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onMove(t);
+                  }}
+                  title="Move to Focus"
+                  className="rounded border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                >
+                  → Focus
+                </button>
+              )}
+              {triage === "queued" && !isAgentTask && onStart && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onStart(t, planned);
+                  }}
+                  title={`Move to Focus & start ${planned}m timer`}
+                  aria-label={`Move to Focus & start ${planned}m timer`}
+                  className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 text-[10px] font-medium text-zinc-200 hover:border-orange-500/60 hover:text-orange-300 transition-colors"
+                >
+                  ⏱ Start
+                </button>
+              )}
+              {triage === "queued" && isAgentTask && (!isQueuedForAgent || isAssignedOnline) && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onHandToAgent(t, undefined, assignedServerId);
+                  }}
+                  title={
+                    isAssignedOnline
+                      ? `Move to Focus & run on ${assignedServerId}`
+                      : `Move to Focus & queue for ${assignedServerId}`
+                  }
+                  className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 text-[10px] font-medium text-orange-400 hover:border-orange-500/60 hover:text-orange-300"
+                >
+                  Run
+                </button>
+              )}
+            </div>
+          </div>
+
+          <p className="line-clamp-2 text-[15px] font-medium leading-snug text-zinc-100">
+            {t.content}
+          </p>
+        </div>
+      </li>
+    );
+  };
+
   return (
-    <>
-      <ul className="space-y-1">
-        {visible.map((t) => (
-          <TaskRow
-            key={t.id}
-            t={t}
-            durations={durations}
-            defaultMinutes={defaultMinutes}
-            spentBy={spentBy}
-            ocConnected={ocConnected}
-            ocServers={ocServers}
-            ocServerOnlineById={ocServerOnlineById}
-            ocModelsByServer={ocModelsByServer}
-            ocProjectsByServer={ocProjectsByServer}
-            onAddProject={onAddProject}
-            onRefreshProjects={onRefreshProjects}
-            defaultServerId={defaultServerId}
-            ocSessions={ocSessions}
-            humanSec={humanSecBy[t.id] ?? 0}
-            agentSec={agentSecBy[t.id] ?? 0}
-            expanded={expandedId === t.id}
-            onToggle={() => onToggle(t.id)}
-            onHandToAgent={(p, srvId, mdl, rp, nt) => onHandToAgent(t, p, srvId, mdl, rp, nt)}
-            onApprove={(dec) => onApprove(t, dec)}
-            onAnswerForm={(k, v, l) => onAnswerForm(t, k, v, l)}
-            onInterrupt={() => onInterrupt(t)}
-            onMove={onMove}
-            onMoveProject={onMoveProject}
-            projects={projects}
-            onComplete={() => onComplete(t)}
-            onStart={onStart}
-            onUpdate={onUpdate}
-            onDuration={onDuration}
-            onDelete={onDelete}
+    <div className="space-y-3 flex-1 min-h-0 flex flex-col md:h-full">
+      <div
+        className={`flex flex-1 min-h-0 flex-col md:flex-row items-stretch ${
+          isResizing ? "select-none cursor-col-resize" : ""
+        }`}
+      >
+        {/* LEFT BACKLOG SIDEBAR */}
+        <aside
+          aria-label="Backlog task queue"
+          style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
+          className={`w-full shrink-0 space-y-4 md:w-[var(--sidebar-w)] md:h-full md:overflow-y-auto md:pr-1.5 [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent] ${
+            mobileShowStage && (selectedTask || triageOpen) ? "hidden md:block" : "block"
+          }`}
+        >
+          <section className="space-y-2.5">
+            <div className="flex items-center justify-between px-1">
+              <div className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-zinc-500" />
+                <h2 className="text-[12px] font-semibold uppercase tracking-wider text-zinc-300">
+                  Backlog Queue
+                </h2>
+              </div>
+              <div className="flex items-center gap-2">
+                {backlogTasks.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTriageOpen(true);
+                      setMobileShowStage(true);
+                      if (!triageData && !triageLoading) void runTriage();
+                    }}
+                    className="inline-flex items-center gap-1 rounded border border-orange-500/40 bg-zinc-900/80 px-2 py-0.5 font-mono text-[10px] font-medium text-orange-400 hover:border-orange-500 hover:text-orange-300"
+                    title="Triage top tasks into Focus"
+                  >
+                    ⚡ Triage
+                  </button>
+                )}
+                <span className="font-mono text-[12px] tabular-nums text-zinc-400">
+                  {backlogTasks.length}
+                </span>
+              </div>
+            </div>
+
+            <AddRow
+              alwaysOpen
+              ocConnected={ocConnected}
+              ocServers={ocServers}
+              ocServerOnlineById={ocServerOnlineById}
+              ocModelsByServer={ocModelsByServer}
+              ocProjectsByServer={ocProjectsByServer}
+              onAddProject={onAddProject}
+              onRefreshProjects={onRefreshProjects}
+              defaultServerId={defaultServerId}
+              placeholder="＋ Add to Backlog… (~server @repo // prompt or Tab)"
+              hotkey="n"
+              sections={sections}
+              onAdd={(raw, extra) => onAdd(raw, extra)}
+            />
+
+            {backlogTasks.length === 0 ? (
+              <p className="rounded-lg border border-zinc-900 bg-zinc-950/50 px-3.5 py-4 text-[13px] text-zinc-500">
+                Your parking lot for ideas. Dump anything here — it waits without interrupting you.
+              </p>
+            ) : (
+              <>
+                <ul className="space-y-1.5">
+                  {visibleTasks.map((t) => renderBacklogCard(t))}
+                </ul>
+                {!showAll && backlogTasks.length > PAGE && (
+                  <button className={`${btn} mt-1 w-full`} onClick={() => setShowAll(true)}>
+                    Show all {backlogTasks.length}…
+                  </button>
+                )}
+              </>
+            )}
+          </section>
+        </aside>
+
+        {/* DRAGGABLE RESIZE HANDLE */}
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Drag to resize sidebar (double-click to reset)"
+          title="Drag to resize sidebar · Double-click to reset"
+          onPointerDown={startResize}
+          onDoubleClick={resetSidebarWidth}
+          className="group hidden md:flex w-6 shrink-0 cursor-col-resize items-stretch justify-center self-stretch py-2 select-none md:h-full"
+        >
+          <div
+            className={`w-px transition-colors duration-150 ${
+              isResizing
+                ? "w-0.5 bg-orange-500"
+                : "bg-zinc-800/80 group-hover:w-0.5 group-hover:bg-orange-500/80"
+            }`}
           />
-        ))}
-      </ul>
-      {!showAll && tasks.length > PAGE && (
-        <button className={`${btn} mt-1 w-full`} onClick={() => setShowAll(true)}>
-          Show all {tasks.length}…
-        </button>
-      )}
-    </>
+        </div>
+
+        {/* RIGHT MAIN STAGE WORKSPACE */}
+        <div
+          className={`min-w-0 flex-1 min-h-0 flex flex-col md:h-full ${
+            mobileShowStage && (selectedTask || triageOpen) ? "block" : "hidden md:flex"
+          }`}
+        >
+          {mobileShowStage && (selectedTask || triageOpen) && (
+            <button
+              type="button"
+              onClick={() => {
+                setMobileShowStage(false);
+                setTriageOpen(false);
+              }}
+              className="mb-3 inline-flex items-center gap-1.5 text-[13px] font-medium text-orange-400 md:hidden"
+            >
+              ← Back to Backlog ({backlogTasks.length})
+            </button>
+          )}
+
+          {triageOpen && backlogTasks.length > 0 ? (
+            <TriageStage
+              suggestions={triageData?.suggestions ?? []}
+              loading={triageLoading}
+              source={triageData?.source}
+              serverName={triageData?.serverName}
+              modelLabel={triageData?.modelLabel}
+              backlogTasks={backlogTasks}
+              defaultServerId={defaultServerId}
+              onPickFocus={(t) => {
+                onMove?.(t);
+              }}
+              onPickStart={(t, minutes) => {
+                onStart?.(t, minutes);
+              }}
+              onPickAgent={(t, serverId) => {
+                onHandToAgent(t, undefined, serverId);
+              }}
+              onRefresh={runTriage}
+              onClose={() => setTriageOpen(false)}
+            />
+          ) : selectedTask ? (
+            <div className="flex-1 min-h-0 flex flex-col md:h-full">
+              <TaskRow
+                key={selectedTask.id}
+                t={selectedTask}
+                large
+                stageMode
+                durations={durations}
+                defaultMinutes={defaultMinutes}
+                spentBy={spentBy}
+                ocConnected={ocConnected}
+                ocServers={ocServers}
+                ocServerOnlineById={ocServerOnlineById}
+                ocVerifyById={ocVerifyById}
+                onOpenOcSettings={onOpenOcSettings}
+                ocModelsByServer={ocModelsByServer}
+                ocProjectsByServer={ocProjectsByServer}
+                onAddProject={onAddProject}
+                onRefreshProjects={onRefreshProjects}
+                defaultServerId={defaultServerId}
+                ocSessions={ocSessions}
+                humanSec={humanSecBy[selectedTask.id] ?? 0}
+                agentSec={agentSecBy[selectedTask.id] ?? 0}
+                expanded={true}
+                onToggle={() => setMobileShowStage(false)}
+                onHandToAgent={(p, srvId, mdl, rp, nt) =>
+                  onHandToAgent(selectedTask, p, srvId, mdl, rp, nt)
+                }
+                onApprove={(dec) => onApprove(selectedTask, dec)}
+                onAnswerForm={(k, v, l) => onAnswerForm(selectedTask, k, v, l)}
+                onInterrupt={() => onInterrupt(selectedTask)}
+                onStart={onStart}
+                onMove={focusId ? onMove : undefined}
+                onComplete={() => onComplete(selectedTask)}
+                onMoveProject={onMoveProject}
+                projects={projects}
+                onUpdate={onUpdate}
+                onDuration={onDuration}
+                onDelete={onDelete}
+              />
+            </div>
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center rounded-xl border border-zinc-800/80 bg-zinc-900/30 p-8 text-center">
+              <p className="text-[15px] font-medium text-zinc-200">Backlog is empty</p>
+              <p className="mt-1 text-[13px] text-zinc-500">
+                Add ideas or upcoming tasks in the left sidebar — trigger any task to move it directly into Focus.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -3419,6 +3821,253 @@ function InlineDiffViewer({
           })
         )}
       </div>
+    </div>
+  );
+}
+
+function TurnReasoningSteps({
+  steps,
+  hasOpaqueReasoning,
+  isRunning,
+}: {
+  steps: SessionStepItem[];
+  hasOpaqueReasoning?: boolean;
+  isRunning?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+
+  const reasoningSteps = steps.filter(
+    (s): s is Extract<SessionStepItem, { kind: "reasoning" }> => s.kind === "reasoning",
+  );
+  const toolSteps = steps.filter(
+    (s): s is Extract<SessionStepItem, { kind: "tool" }> => s.kind === "tool",
+  );
+  const hasReasoning = reasoningSteps.length > 0 || Boolean(hasOpaqueReasoning);
+  const totalCount = steps.length + (hasOpaqueReasoning && reasoningSteps.length === 0 ? 1 : 0);
+
+  if (totalCount === 0 && !isRunning) return null;
+
+  const runningTool = [...toolSteps].reverse().find((s) => s.status === "running");
+  const lastTool = toolSteps[toolSteps.length - 1];
+  const uniqueToolNames = Array.from(new Set(toolSteps.map((s) => s.name))).slice(0, 4);
+
+  let headerText = "";
+  if (isRunning) {
+    if (runningTool) {
+      headerText = `Running ${runningTool.label}`;
+    } else if (lastTool) {
+      headerText = `Working · ${lastTool.label}`;
+    } else {
+      headerText = "Thinking…";
+    }
+  } else if (hasReasoning && toolSteps.length > 0) {
+    headerText = `Reasoning & ${toolSteps.length} ${toolSteps.length === 1 ? "step" : "steps"}${
+      uniqueToolNames.length ? ` (${uniqueToolNames.join(", ")})` : ""
+    }`;
+  } else if (hasReasoning) {
+    headerText =
+      reasoningSteps.length > 1 ? `Reasoning (${reasoningSteps.length} thoughts)` : "Reasoning";
+  } else {
+    headerText = `${toolSteps.length} ${toolSteps.length === 1 ? "step" : "steps"}${
+      uniqueToolNames.length ? ` (${uniqueToolNames.join(", ")})` : ""
+    }`;
+  }
+
+  return (
+    <div className="rounded-lg border border-zinc-800/80 bg-zinc-950/70 text-[12px]">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left font-mono text-[11px] text-zinc-400 transition-colors hover:text-zinc-200"
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="shrink-0 text-zinc-500">{open ? "▾" : "▸"}</span>
+          {isRunning && (
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-orange-500 animate-pulse" />
+          )}
+          <span className={`truncate ${isRunning ? "text-zinc-200 font-medium" : "text-zinc-400"}`}>
+            {headerText}
+          </span>
+        </div>
+        {totalCount > 0 && (
+          <span className="shrink-0 text-[10px] text-zinc-500">
+            {open ? "Hide" : `${totalCount} ${totalCount === 1 ? "item" : "items"}`}
+          </span>
+        )}
+      </button>
+
+      {open && totalCount > 0 && (
+        <div className="space-y-2 border-t border-zinc-800/70 px-3 py-2.5">
+          {hasOpaqueReasoning && reasoningSteps.length === 0 && (
+            <div className="flex items-center gap-2 font-mono text-[11px] text-zinc-500 italic">
+              <span>✦</span>
+              <span>Model reasoning</span>
+            </div>
+          )}
+          {steps.map((step, idx) =>
+            step.kind === "reasoning" ? (
+              <div
+                key={idx}
+                className="border-l-2 border-zinc-700/80 pl-2.5 py-0.5 text-[12px] leading-relaxed text-zinc-400"
+              >
+                <SimpleMarkdown text={step.text} />
+              </div>
+            ) : (
+              <div
+                key={idx}
+                className={`flex items-center gap-2 font-mono text-[11px] ${
+                  step.status === "running"
+                    ? "text-zinc-100 font-medium"
+                    : step.status === "error"
+                      ? "text-red-400"
+                      : "text-zinc-400"
+                }`}
+              >
+                {step.status === "running" ? (
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-orange-500 animate-pulse" />
+                ) : step.status === "error" ? (
+                  <span className="shrink-0 text-red-400">✕</span>
+                ) : (
+                  <span className="shrink-0 text-zinc-500">✓</span>
+                )}
+                <span className="shrink-0 rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-300">
+                  {step.name}
+                </span>
+                {step.detail && <span className="truncate text-zinc-400">{step.detail}</span>}
+              </div>
+            ),
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SessionThread({
+  turns,
+  pendingSteer,
+  isRunning,
+  serverLabel,
+  fallbackText,
+  fallbackTool,
+}: {
+  turns: SessionTurn[];
+  pendingSteer: { text: string; sentAt: number } | null;
+  isRunning: boolean;
+  serverLabel: string;
+  fallbackText?: string;
+  fallbackTool?: string;
+}) {
+  const displayTurns = useMemo(() => {
+    const list: SessionTurn[] = [...turns];
+    if (list.length === 0 && (fallbackText || fallbackTool)) {
+      list.push({
+        id: "fallback-assistant",
+        role: "assistant",
+        text: fallbackText || "",
+        tools: fallbackTool ? [fallbackTool] : [],
+        steps: fallbackTool
+          ? [{ kind: "tool", name: fallbackTool, detail: "", label: fallbackTool, status: "running" }]
+          : [],
+      });
+    }
+    if (pendingSteer) {
+      const cleanPending = pendingSteer.text.trim();
+      const alreadyInTurns = list.some(
+        (t) =>
+          t.role === "user" &&
+          (t.text.trim() === cleanPending ||
+            (t.timestamp != null && t.timestamp >= pendingSteer.sentAt - 2000)),
+      );
+      if (!alreadyInTurns && cleanPending) {
+        list.push({
+          id: `pending-user-${pendingSteer.sentAt}`,
+          role: "user",
+          text: cleanPending,
+          tools: [],
+          steps: [],
+          timestamp: pendingSteer.sentAt,
+        });
+        list.push({
+          id: `pending-asst-${pendingSteer.sentAt}`,
+          role: "assistant",
+          text: "",
+          tools: [],
+          steps: [],
+          isStreaming: true,
+          timestamp: pendingSteer.sentAt,
+        });
+      }
+    }
+    const last = list[list.length - 1];
+    if (last && last.role === "user" && (isRunning || pendingSteer)) {
+      list.push({
+        id: `live-asst-${last.id}`,
+        role: "assistant",
+        text: "",
+        tools: [],
+        steps: [],
+        isStreaming: true,
+      });
+    }
+    return list;
+  }, [turns, pendingSteer, isRunning, fallbackText, fallbackTool]);
+
+  if (displayTurns.length === 0) return null;
+
+  return (
+    <div className="space-y-3">
+      {displayTurns.map((turn, idx) => {
+        const isLast = idx === displayTurns.length - 1;
+        const isTurnRunning =
+          turn.role === "assistant" &&
+          isLast &&
+          (isRunning || Boolean(turn.isStreaming) || Boolean(pendingSteer));
+
+        if (turn.role === "user") {
+          return (
+            <div
+              key={turn.id}
+              className="rounded-lg border border-zinc-800/90 bg-zinc-900/60 px-3.5 py-2.5 space-y-1"
+            >
+              <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-wider text-zinc-400">
+                <span>You</span>
+                {turn.timestamp && (
+                  <span className="text-zinc-500">
+                    {new Date(turn.timestamp).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </span>
+                )}
+              </div>
+              <p className="whitespace-pre-wrap text-[13px] sm:text-[14px] leading-relaxed text-zinc-100">
+                {turn.text}
+              </p>
+            </div>
+          );
+        }
+
+        return (
+          <div key={turn.id} className="space-y-2">
+            <TurnReasoningSteps
+              steps={turn.steps}
+              hasOpaqueReasoning={turn.hasOpaqueReasoning}
+              isRunning={isTurnRunning}
+            />
+            {turn.text ? (
+              <div className="rounded-lg border border-zinc-800/60 bg-zinc-950/60 px-4 py-3 text-[14px] leading-relaxed text-zinc-200">
+                <SimpleMarkdown text={turn.text} />
+              </div>
+            ) : isTurnRunning ? (
+              <div className="flex items-center gap-2 rounded-lg border border-zinc-800/50 bg-zinc-950/40 px-3.5 py-2.5 font-mono text-[12px] text-zinc-400">
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-orange-500 animate-pulse" />
+                <span>{serverLabel} is responding…</span>
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -3562,6 +4211,7 @@ function TaskRow({
 
   const activeSid = meta.sessions[meta.sessions.length - 1] ?? "";
   const [summary, setSummary] = useState<SessionSummary | null>(null);
+  const [lastSteerAt, setLastSteerAt] = useState(0);
 
   useEffect(() => {
     if (!activeSid) {
@@ -3579,10 +4229,13 @@ function TaskRow({
         if (!cancelled && res) setSummary(res);
       });
     };
-    loadSummary();
+    loadSummary(lastSteerAt > 0);
+    const recentlySteered = lastSteerAt > 0 && Date.now() - lastSteerAt < 20_000;
     const shouldPoll =
-      liveSession?.status === "running" || !summary?.lastAssistantText;
-    const iv = shouldPoll ? window.setInterval(() => loadSummary(true), 1500) : undefined;
+      liveSession?.status === "running" ||
+      recentlySteered ||
+      !summary?.lastAssistantText;
+    const iv = shouldPoll ? window.setInterval(() => loadSummary(true), 1000) : undefined;
     return () => {
       cancelled = true;
       if (iv) window.clearInterval(iv);
@@ -3594,6 +4247,7 @@ function TaskRow({
     expanded,
     assignedServerId,
     summary?.lastAssistantText,
+    lastSteerAt,
   ]);
 
   const spent = (spentBy[t.id] ?? 0) + Math.floor(humanSec / 60);
@@ -3832,7 +4486,10 @@ function TaskRow({
           onClose={onToggle}
           onUpdate={onUpdate}
           onDuration={onDuration}
-          onHandToAgent={onHandToAgent}
+          onHandToAgent={(p, srvId, mdl, rp, nt) => {
+            setLastSteerAt(Date.now());
+            onHandToAgent(p, srvId, mdl, rp, nt);
+          }}
           onApprove={onApprove}
           onAnswerForm={onAnswerForm}
           onStartCountdown={
@@ -4112,25 +4769,33 @@ function RowEditor({
   const [server, setServer] = useState(
     liveSession?.serverId || initialMeta.server || "",
   );
-  const [model, setModel] = useState(initialMeta.model || liveSession?.modelKey || "");
+  const [model, setModel] = useState(liveSession?.modelKey || initialMeta.model || "");
   const [sessions, setSessions] = useState<string[]>(initialMeta.sessions);
   const [queued, setQueued] = useState<boolean>(Boolean(initialMeta.queued));
   const [saveState, setSaveState] = useState<"" | "saving" | "saved">("");
   const [confirming, setConfirming] = useState(false);
   const [showMeta, setShowMeta] = useState(false);
-  const [showCheckpoints, setShowCheckpoints] = useState(false);
   const [replyText, setReplyText] = useState("");
+  const [pendingSteer, setPendingSteer] = useState<{ text: string; sentAt: number } | null>(null);
   const hasSessionOutput = Boolean(
-    liveSession || summary?.lastAssistantText || summary?.lastToolCall,
+    liveSession ||
+      summary?.lastAssistantText ||
+      summary?.lastToolCall ||
+      (summary?.turns && summary.turns.length > 0) ||
+      pendingSteer,
   );
 
   const unlinkedExplicitlyRef = useRef(false);
+  const userChangedModelRef = useRef(false);
+  const threadScrollRef = useRef<HTMLDivElement>(null);
+  const zenThreadScrollRef = useRef<HTMLDivElement>(null);
+  const followLiveRef = useRef(true);
 
   useEffect(() => {
-    if (liveSession?.modelKey && !model) {
+    if (liveSession?.modelKey && !userChangedModelRef.current) {
       setModel(liveSession.modelKey);
     }
-  }, [liveSession?.modelKey, model]);
+  }, [liveSession?.modelKey]);
 
   useEffect(() => {
     if (initialMeta.sessions.length > 0 && !unlinkedExplicitlyRef.current) {
@@ -4145,7 +4810,7 @@ function RowEditor({
     if (initialMeta.server && initialMeta.server !== server) {
       setServer(initialMeta.server);
     }
-    if (initialMeta.model && !model) {
+    if (initialMeta.model && !model && !liveSession?.modelKey && !userChangedModelRef.current) {
       setModel(initialMeta.model);
     }
     if (initialMeta.repo && !repo) {
@@ -4259,7 +4924,63 @@ function RowEditor({
     "";
   const turns = summary?.turns ?? [];
 
+  const scrollThreadToBottom = useCallback((smooth = true) => {
+    for (const ref of [threadScrollRef, zenThreadScrollRef]) {
+      const el = ref.current;
+      if (el) {
+        el.scrollTo({
+          top: el.scrollHeight,
+          behavior: smooth ? "smooth" : "auto",
+        });
+      }
+    }
+  }, []);
+
+  // Clear optimistic pendingSteer once the server turn list includes it (or after timeout)
+  useEffect(() => {
+    if (!pendingSteer) return;
+    const clean = pendingSteer.text.trim();
+    const matched = turns.some(
+      (turn) =>
+        turn.role === "user" &&
+        (turn.text.trim() === clean ||
+          (turn.timestamp != null && turn.timestamp >= pendingSteer.sentAt - 2000)),
+    );
+    if (matched && liveSession?.status !== "running") {
+      setPendingSteer(null);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setPendingSteer(null);
+    }, 15_000);
+    return () => window.clearTimeout(timer);
+  }, [pendingSteer, turns, liveSession?.status]);
+
+  // Follow live response as new steps, reasoning, and text stream in
+  useEffect(() => {
+    if (!followLiveRef.current) return;
+    if (pendingSteer || liveSession?.status === "running" || turns.length > 0) {
+      const id = window.requestAnimationFrame(() => scrollThreadToBottom(Boolean(pendingSteer)));
+      return () => window.cancelAnimationFrame(id);
+    }
+  }, [
+    turns.length,
+    summary?.lastAssistantText,
+    summary?.lastToolCall,
+    summary?.recentTools?.length,
+    liveSession?.status,
+    pendingSteer,
+    scrollThreadToBottom,
+  ]);
+
+  const handleThreadScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    followLiveRef.current = distFromBottom < 140;
+  };
+
   const handleModelChange = (nextModel: string) => {
+    userChangedModelRef.current = true;
     setModel(nextModel);
     metaLive.current = { ...metaLive.current, model: nextModel };
     scheduleFlush();
@@ -4271,14 +4992,27 @@ function RowEditor({
   const submitToAgent = () => {
     clearTimeout(debRef.current);
     unlinkedExplicitlyRef.current = false;
+    followLiveRef.current = true;
     const v = titleLive.current.trim();
     if (v && v !== tLive.current.content) persist({ content: v });
+    const explicitModelOverride = userChangedModelRef.current
+      ? (model || undefined)
+      : undefined;
     if (hasSessionOutput) {
-      const msg = replyText.trim() || prompt.trim();
-      onHandToAgent(msg || undefined, server, model || undefined, repo, note);
+      const msg = replyText.trim() || prompt.trim() || titleLive.current.trim();
+      if (msg) {
+        setPendingSteer({ text: msg, sentAt: Date.now() });
+      }
+      onHandToAgent(msg || undefined, server, explicitModelOverride, repo, note);
       setReplyText("");
+      window.setTimeout(() => scrollThreadToBottom(true), 40);
     } else {
+      const initialMsg = prompt.trim() || titleLive.current.trim();
+      if (initialMsg) {
+        setPendingSteer({ text: initialMsg, sentAt: Date.now() });
+      }
       onHandToAgent(prompt, server, model || undefined, repo, note);
+      window.setTimeout(() => scrollThreadToBottom(true), 40);
     }
   };
 
@@ -4792,29 +5526,24 @@ function RowEditor({
                 </div>
 
                 {/* Scrollable Workstream Body */}
-                <div className="flex-1 min-h-0 overflow-y-auto space-y-4 pt-4 pr-1">
-                  {/* Live Tool Pipeline */}
-                  {liveSession?.status === "running" && summary?.recentTools && summary.recentTools.length > 0 && (
-                    <div className="space-y-1.5 rounded-xl border border-zinc-800/80 bg-zinc-950/90 p-3.5 font-mono text-[12px]">
-                      {summary.recentTools.map((step, idx) => {
-                        const isLast = idx === summary.recentTools.length - 1;
-                        return (
-                          <div
-                            key={idx}
-                            className={`flex items-center gap-2 truncate ${
-                              isLast ? "font-medium text-zinc-100" : "text-zinc-500"
-                            }`}
-                          >
-                            <span
-                              className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                                isLast ? "bg-orange-500 animate-pulse" : "bg-zinc-600"
-                              }`}
-                            />
-                            <span className="truncate">{step.label}</span>
-                          </div>
-                        );
-                      })}
-                    </div>
+                <div
+                  ref={zenThreadScrollRef}
+                  onScroll={handleThreadScroll}
+                  className="flex-1 min-h-0 overflow-y-auto space-y-4 pt-4 pr-1"
+                >
+                  {/* Live Session Thread (User prompts/steers + default-collapsed Reasoning & Steps + Assistant responses) */}
+                  {(turns.length > 0 ||
+                    pendingSteer ||
+                    summary?.lastAssistantText ||
+                    summary?.lastToolCall) && (
+                    <SessionThread
+                      turns={turns}
+                      pendingSteer={pendingSteer}
+                      isRunning={liveSession?.status === "running"}
+                      serverLabel={targetLabel}
+                      fallbackText={summary?.lastAssistantText}
+                      fallbackTool={summary?.lastToolCall}
+                    />
                   )}
 
                   {/* Question / Option Picker Form */}
@@ -4894,54 +5623,6 @@ function RowEditor({
                       onAcceptAndComplete={onComplete}
                     />
                   )}
-
-                  {/* Latest Assistant Outcome (Markdown) */}
-                  {(summary?.lastAssistantText || summary?.lastToolCall) && (
-                    <div className="space-y-3 pt-2">
-                      <div className="rounded-xl border border-zinc-800/60 bg-zinc-950/60 p-4 sm:p-5">
-                        {summary.lastAssistantText ? (
-                          <SimpleMarkdown text={summary.lastAssistantText} />
-                        ) : (
-                          <p className="font-mono text-[13px] text-zinc-500">
-                            Running {summary.lastToolCall}…
-                          </p>
-                        )}
-                      </div>
-
-                      {turns.length > 1 && (
-                        <div className="pt-2">
-                          <button
-                            type="button"
-                            onClick={() => setShowCheckpoints((s) => !s)}
-                            className="font-mono text-[11px] text-zinc-500 hover:text-zinc-300"
-                          >
-                            {showCheckpoints ? "▾ Hide checkpoints" : `▸ ${turns.length} checkpoints`}
-                          </button>
-
-                          {showCheckpoints && (
-                            <ol className="mt-2 space-y-2.5 border-l border-zinc-800 pl-3.5 text-[12px]">
-                              {turns.map((turn) => (
-                                <li key={turn.id} className="space-y-1 text-zinc-400">
-                                  <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-zinc-500">
-                                    <span>{turn.role === "user" ? "you" : server}</span>
-                                    {turn.tools.slice(0, 3).map((tb, idx) => (
-                                      <span
-                                        key={idx}
-                                        className="max-w-60 truncate rounded border border-zinc-800/80 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-400"
-                                      >
-                                        {tb}
-                                      </span>
-                                    ))}
-                                  </div>
-                                  {turn.text && <SimpleMarkdown text={turn.text} />}
-                                </li>
-                              ))}
-                            </ol>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
                 </div>
               </div>
 
@@ -5020,11 +5701,12 @@ function RowEditor({
                     <button
                       type="button"
                       onClick={submitToAgent}
-                      className="inline-flex items-center gap-2 rounded-xl bg-orange-600 px-5 py-2.5 text-[13px] font-semibold text-white shadow-lg shadow-orange-950/40 hover:bg-orange-500 transition-colors cursor-pointer"
+                      title="Send (⌘↵)"
+                      aria-label="Send"
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-orange-600 px-4 py-2 text-[13px] font-semibold text-white shadow-lg shadow-orange-950/40 hover:bg-orange-500 transition-colors cursor-pointer"
                     >
                       <span>↑</span>
-                      <span>Send Steer</span>
-                      <span className="font-mono text-[11px] text-orange-200/80">⌘↵</span>
+                      <span>Send</span>
                     </button>
                   </div>
                 </div>
@@ -5367,34 +6049,31 @@ function RowEditor({
             ))}
 
             {/* Scrollable workspace region */}
-            <div className={stageMode ? "flex-1 min-h-0 overflow-y-auto space-y-4 pr-1.5 py-1 [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent]" : "space-y-3"}>
-              {/* Live Tool Pipeline when Agent is Working */}
-              {liveSession?.status === "running" &&
-                summary?.recentTools &&
-                summary.recentTools.length > 0 && (
-                  <div className="space-y-1.5 rounded-lg border border-zinc-800/80 bg-zinc-950/90 p-3 font-mono text-[12px]">
-                    {summary.recentTools.map((step, idx) => {
-                      const isLast = idx === summary.recentTools.length - 1;
-                      return (
-                        <div
-                          key={idx}
-                          className={`flex items-center gap-2 truncate ${
-                            isLast ? "font-medium text-zinc-100" : "text-zinc-500"
-                          }`}
-                        >
-                          <span
-                            className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                              isLast ? "bg-orange-500 animate-pulse" : "bg-zinc-600"
-                            }`}
-                          />
-                          <span className="truncate">{step.label}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
+            <div
+              ref={threadScrollRef}
+              onScroll={handleThreadScroll}
+              className={
+                stageMode
+                  ? "flex-1 min-h-0 overflow-y-auto space-y-4 pr-1.5 py-1 [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent]"
+                  : "max-h-96 overflow-y-auto space-y-3 pr-1"
+              }
+            >
+              {/* 2. Live OpenCode Thread (User prompts/steers + default-collapsed Reasoning & Steps + Assistant responses) */}
+              {(turns.length > 0 ||
+                pendingSteer ||
+                summary?.lastAssistantText ||
+                summary?.lastToolCall) && (
+                <SessionThread
+                  turns={turns}
+                  pendingSteer={pendingSteer}
+                  isRunning={liveSession?.status === "running"}
+                  serverLabel={targetLabel}
+                  fallbackText={summary?.lastAssistantText}
+                  fallbackTool={summary?.lastToolCall}
+                />
+              )}
 
-              {/* 2. OpenCode Question / Option Picker */}
+              {/* 3. OpenCode Question / Option Picker */}
               {liveSession?.form && (
                 <div className="space-y-2 border-l-2 border-l-orange-500 pl-3.5 py-1 text-[13px]">
                   {liveSession.form.fields.map((field) => (
@@ -5476,66 +6155,6 @@ function RowEditor({
                   files={summary.filesChanged}
                   onAcceptAndComplete={onComplete}
                 />
-              )}
-
-              {/* 3. Latest OpenCode Outcome (Markdown) + Checkpoints */}
-              {(summary?.lastAssistantText || summary?.lastToolCall) && (
-                <div className="space-y-2 border-t border-zinc-800/60 pt-2.5">
-                  <div
-                    className={
-                      stageMode
-                        ? "min-h-[120px]"
-                        : "max-h-56 overflow-y-auto"
-                    }
-                  >
-                    {summary.lastAssistantText ? (
-                      <SimpleMarkdown text={summary.lastAssistantText} />
-                    ) : (
-                      <p className="font-mono text-[12px] text-zinc-500">
-                        Running {summary.lastToolCall}…
-                      </p>
-                    )}
-                  </div>
-
-                  {turns.length > 1 && (
-                    <div>
-                      <button
-                        type="button"
-                        onClick={() => setShowCheckpoints((s) => !s)}
-                        className="font-mono text-[11px] text-zinc-500 hover:text-zinc-300"
-                      >
-                        {showCheckpoints ? "▾" : "▸"} {turns.length} checkpoints
-                      </button>
-
-                      {showCheckpoints && (
-                        <ol
-                          className={`mt-1.5 space-y-2.5 border-l border-zinc-800 pl-3 text-[12px] ${
-                            stageMode
-                              ? ""
-                              : "max-h-48 overflow-y-auto"
-                          }`}
-                        >
-                          {turns.map((turn) => (
-                            <li key={turn.id} className="space-y-1 text-zinc-400">
-                              <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-zinc-500">
-                                <span>{turn.role === "user" ? "you" : server}</span>
-                                {turn.tools.slice(0, 3).map((tb, idx) => (
-                                  <span
-                                    key={idx}
-                                    className="max-w-60 truncate rounded border border-zinc-800/80 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-400"
-                                  >
-                                    {tb}
-                                  </span>
-                                ))}
-                              </div>
-                              {turn.text && <SimpleMarkdown text={turn.text} />}
-                            </li>
-                          ))}
-                        </ol>
-                      )}
-                    </div>
-                  )}
-                </div>
               )}
 
               {/* 4. Queued Banner (when waiting for an offline server) */}
@@ -5695,21 +6314,21 @@ function RowEditor({
                     onClick={submitToAgent}
                     title={
                       hasSessionOutput
-                        ? "Send Steer (⌘↵)"
+                        ? "Send (⌘↵)"
                         : isTargetServerOnline
                           ? `Run on ${targetLabel} (⌘↵)`
                           : `Queue for ${targetLabel} (⌘↵)`
                     }
                     aria-label={
                       hasSessionOutput
-                        ? "Send Steer"
+                        ? "Send"
                         : isTargetServerOnline
                           ? `Run on ${targetLabel}`
                           : `Queue for ${targetLabel}`
                     }
-                    className="inline-flex h-7 items-center justify-center rounded bg-orange-600 px-3 text-[13px] font-medium text-white transition-colors hover:bg-orange-500"
+                    className="inline-flex h-7 items-center justify-center gap-1 rounded bg-orange-600 px-3 text-[13px] font-medium text-white transition-colors hover:bg-orange-500"
                   >
-                    {hasSessionOutput ? "↑ Send Steer" : "▶ Run Agent"}
+                    {hasSessionOutput ? "↑ Send" : "▶ Run Agent"}
                   </button>
                 </div>
               </div>

@@ -1181,6 +1181,7 @@ export async function createAndPromptOpenCodeSession(opts: {
   promptText: string;
   serverId?: string;
   modelKey?: string;
+  onSessionCreated?: (sessionID: string) => void;
 }): Promise<string> {
   const srv = resolveServer(opts.serverId);
   const base = resolveOpenCodeBase(srv.endpoint);
@@ -1197,6 +1198,7 @@ export async function createAndPromptOpenCodeSession(opts: {
   if (!createRes.ok) throw new Error(`Create session on ${srv.name} failed: ${createRes.status}`);
   const created = (await createRes.json()) as { data: { id: string } };
   const sessionID = created.data.id;
+  opts.onSessionCreated?.(sessionID);
 
   if (opts.promptText.trim()) {
     await sendOpenCodePrompt(sessionID, opts.promptText.trim(), srv.id);
@@ -1319,11 +1321,27 @@ export type SessionToolStep = {
   status: "running" | "completed" | "error";
 };
 
+export type SessionStepItem =
+  | {
+      kind: "reasoning";
+      text: string;
+    }
+  | {
+      kind: "tool";
+      name: string;
+      detail: string;
+      label: string;
+      status: "running" | "completed" | "error";
+    };
+
 export type SessionTurn = {
   id: string;
   role: "user" | "assistant";
   text: string;
   tools: string[];
+  steps: SessionStepItem[];
+  hasOpaqueReasoning?: boolean;
+  isStreaming?: boolean;
   timestamp?: number;
 };
 
@@ -1338,12 +1356,19 @@ export type SessionSummary = {
   updatedAt?: number;
 };
 
-const summaryCache = new Map<string, { updatedAt: number; summary: SessionSummary }>();
+const summaryCache = new Map<
+  string,
+  { updatedAt: number; fetchedAt: number; summary: SessionSummary }
+>();
 
 export function invalidateSessionSummary(sessionID: string) {
   const existing = summaryCache.get(sessionID);
   if (existing) {
-    summaryCache.set(sessionID, { updatedAt: 0, summary: existing.summary });
+    summaryCache.set(sessionID, {
+      updatedAt: 0,
+      fetchedAt: 0,
+      summary: existing.summary,
+    });
   }
 }
 
@@ -1388,6 +1413,7 @@ export async function fetchOpenCodeSessionSummary(
     !forceRefresh &&
     cached &&
     cached.summary.lastAssistantText &&
+    Date.now() - cached.fetchedAt < 2500 &&
     knownUpdatedAt > 0 &&
     cached.updatedAt >= knownUpdatedAt
   ) {
@@ -1396,7 +1422,7 @@ export async function fetchOpenCodeSessionSummary(
   const srv = resolveServer(serverId);
   const base = resolveOpenCodeBase(srv.endpoint);
   try {
-    const res = await fetch(`${base}/session/${sessionID}/message?limit=30`, {
+    const res = await fetch(`${base}/session/${sessionID}/message?limit=50`, {
       headers: buildServerHeaders(srv),
     });
     if (!res.ok) return cached?.summary ?? null;
@@ -1417,6 +1443,11 @@ export async function fetchOpenCodeSessionSummary(
             input?: {
               command?: string;
               path?: string;
+              pattern?: string;
+              query?: string;
+              url?: string;
+              id?: string;
+              description?: string;
               oldString?: string;
               newString?: string;
               content?: string;
@@ -1438,116 +1469,165 @@ export async function fetchOpenCodeSessionSummary(
     let lastErrorText = "";
     let lastToolCall: string | undefined;
     let updatedAt = knownUpdatedAt;
-    const rawTurns: SessionTurn[] = [];
+    const groupedTurns: SessionTurn[] = [];
     const allToolSteps: SessionToolStep[] = [];
     const fileDiffMap = new Map<string, SessionFileDiff>();
 
-    // Walk chronologically from oldest to newest so file diffs & tool steps accumulate in order
+    // Walk chronologically from oldest to newest so turns, reasoning, tool steps & file diffs accumulate in order
     const chronological = [...msgs].reverse();
     for (const m of chronological) {
-      if (m.type !== "assistant") continue;
-      for (const part of m.content ?? []) {
-        if (part.type !== "tool" || !part.name) continue;
-        const rawDetail =
-          part.state?.input?.command ||
-          (part.state?.input?.path ? shortFilePath(part.state.input.path) : "");
-        const shortDetail =
-          rawDetail && rawDetail.length > 48 ? `${rawDetail.slice(0, 45)}…` : rawDetail;
-        const label = shortDetail ? `${part.name} ${shortDetail}` : part.name;
-        const st = part.state?.status;
-        const status: SessionToolStep["status"] =
-          st === "running" || st === "pending"
-            ? "running"
-            : st === "error"
-              ? "error"
-              : "completed";
-        allToolSteps.push({
-          name: part.name,
-          detail: shortDetail || "",
-          label,
-          status,
-        });
-
-        const metaFiles = part.state?.metadata?.files;
-        if (Array.isArray(metaFiles) && metaFiles.length > 0) {
-          for (const mf of metaFiles) {
-            const file = mf.file?.trim();
-            if (!file) continue;
-            const prev = fileDiffMap.get(file);
-            const cleanPatch = mf.patch ? stripPatchHeader(mf.patch) : "";
-            const add = typeof mf.additions === "number" ? mf.additions : 0;
-            const del = typeof mf.deletions === "number" ? mf.deletions : 0;
-            fileDiffMap.set(file, {
-              file,
-              shortFile: shortFilePath(file),
-              additions: (prev?.additions ?? 0) + add,
-              deletions: (prev?.deletions ?? 0) + del,
-              patch: cleanPatch || prev?.patch || "",
-            });
-          }
-        } else if (
-          (part.name === "edit" || part.name === "write") &&
-          part.state?.input?.path
-        ) {
-          const file = part.state.input.path.trim();
-          const prev = fileDiffMap.get(file);
-          const fb =
-            part.name === "edit"
-              ? buildFallbackPatch(part.state.input.oldString, part.state.input.newString)
-              : buildFallbackPatch(undefined, part.state.input.content);
-          fileDiffMap.set(file, {
-            file,
-            shortFile: shortFilePath(file),
-            additions: (prev?.additions ?? 0) + fb.additions,
-            deletions: (prev?.deletions ?? 0) + fb.deletions,
-            patch: fb.patch || prev?.patch || "",
-          });
-        }
-      }
-    }
-
-    for (const m of msgs) {
       const msgTime = m.time?.completed ?? m.time?.created ?? 0;
       if (msgTime > updatedAt) updatedAt = msgTime;
 
-      if (!lastErrorText && m.error?.message?.trim()) {
+      if (m.error?.message?.trim()) {
         lastErrorText = `⚠️ ${m.error.message.trim()}`;
       }
 
-      if (m.type !== "assistant" && m.type !== "user") continue;
-
-      const textParts: string[] = [];
-      const tools: string[] = [];
-
       if (m.type === "user") {
+        const userParts: string[] = [];
         const directUserText = (m.text || m.metadata?.displayText || "").trim();
-        if (directUserText) textParts.push(directUserText);
+        if (directUserText) userParts.push(directUserText);
+        for (const part of m.content ?? []) {
+          if (part.type === "text" && part.text?.trim()) {
+            const pt = part.text.trim();
+            if (!userParts.includes(pt)) userParts.push(pt);
+          }
+        }
+        const joinedUser = userParts.join("\n\n").trim();
+        if (joinedUser) {
+          groupedTurns.push({
+            id: m.id ?? `user_${groupedTurns.length}`,
+            role: "user",
+            text: joinedUser,
+            tools: [],
+            steps: [],
+            timestamp: m.time?.created,
+          });
+        }
+        continue;
+      }
+
+      if (m.type !== "assistant") continue;
+
+      let curTurn = groupedTurns[groupedTurns.length - 1];
+      if (!curTurn || curTurn.role !== "assistant") {
+        curTurn = {
+          id: m.id ?? `asst_${groupedTurns.length}`,
+          role: "assistant",
+          text: "",
+          tools: [],
+          steps: [],
+          timestamp: m.time?.created,
+        };
+        groupedTurns.push(curTurn);
       }
 
       for (const part of m.content ?? []) {
+        if (part.type === "reasoning") {
+          const rText = part.text?.trim() ?? "";
+          if (rText) {
+            curTurn.steps.push({ kind: "reasoning", text: rText });
+          } else {
+            curTurn.hasOpaqueReasoning = true;
+          }
+          continue;
+        }
+
+        if (part.type === "tool" && part.name) {
+          // If the assistant emitted narration text before this tool call, move that narration into intermediate steps
+          if (curTurn.text.trim()) {
+            curTurn.steps.push({ kind: "reasoning", text: curTurn.text.trim() });
+            curTurn.text = "";
+          }
+
+          const inp = part.state?.input;
+          const rawDetail =
+            inp?.command?.replace(/\s+/g, " ").trim() ||
+            (inp?.path && inp?.pattern
+              ? `${inp.pattern} in ${shortFilePath(inp.path)}`
+              : inp?.path
+                ? shortFilePath(inp.path)
+                : inp?.pattern ||
+                  inp?.query ||
+                  inp?.url ||
+                  inp?.id ||
+                  inp?.description ||
+                  "");
+          const shortDetail =
+            rawDetail && rawDetail.length > 56 ? `${rawDetail.slice(0, 53)}…` : rawDetail;
+          const label = shortDetail ? `${part.name} ${shortDetail}` : part.name;
+          const st = part.state?.status;
+          const status: SessionToolStep["status"] =
+            st === "running" || st === "pending" || st === "streaming"
+              ? "running"
+              : st === "error"
+                ? "error"
+                : "completed";
+          const stepObj: SessionToolStep = {
+            name: part.name,
+            detail: shortDetail || "",
+            label,
+            status,
+          };
+          allToolSteps.push(stepObj);
+          curTurn.tools.push(label);
+          curTurn.steps.push({ kind: "tool", ...stepObj });
+          lastToolCall = label;
+
+          const metaFiles = part.state?.metadata?.files;
+          if (Array.isArray(metaFiles) && metaFiles.length > 0) {
+            for (const mf of metaFiles) {
+              const file = mf.file?.trim();
+              if (!file) continue;
+              const prev = fileDiffMap.get(file);
+              const cleanPatch = mf.patch ? stripPatchHeader(mf.patch) : "";
+              const add = typeof mf.additions === "number" ? mf.additions : 0;
+              const del = typeof mf.deletions === "number" ? mf.deletions : 0;
+              fileDiffMap.set(file, {
+                file,
+                shortFile: shortFilePath(file),
+                additions: (prev?.additions ?? 0) + add,
+                deletions: (prev?.deletions ?? 0) + del,
+                patch: cleanPatch || prev?.patch || "",
+              });
+            }
+          } else if (
+            (part.name === "edit" || part.name === "write") &&
+            part.state?.input?.path
+          ) {
+            const file = part.state.input.path.trim();
+            const prev = fileDiffMap.get(file);
+            const fb =
+              part.name === "edit"
+                ? buildFallbackPatch(part.state.input.oldString, part.state.input.newString)
+                : buildFallbackPatch(undefined, part.state.input.content);
+            fileDiffMap.set(file, {
+              file,
+              shortFile: shortFilePath(file),
+              additions: (prev?.additions ?? 0) + fb.additions,
+              deletions: (prev?.deletions ?? 0) + fb.deletions,
+              patch: fb.patch || prev?.patch || "",
+            });
+          }
+          continue;
+        }
+
         if (part.type === "text" && part.text?.trim()) {
-          textParts.push(part.text.trim());
-        } else if (part.type === "tool" && part.name) {
-          const detail = part.state?.input?.command || part.state?.input?.path || "";
-          const label = detail ? `${part.name}: ${detail}` : part.name;
-          tools.push(label);
-          if (!lastToolCall && m.type === "assistant") lastToolCall = label;
+          const cleanText = part.text.trim();
+          curTurn.text = curTurn.text ? `${curTurn.text}\n\n${cleanText}` : cleanText;
         }
       }
 
-      const joinedText = textParts.join("\n\n").trim();
-      if (!lastAssistantText && m.type === "assistant" && joinedText) {
-        lastAssistantText = joinedText;
+      if (m.error?.message?.trim() && !curTurn.text) {
+        curTurn.text = `⚠️ ${m.error.message.trim()}`;
       }
+    }
 
-      if (joinedText || tools.length > 0) {
-        rawTurns.push({
-          id: m.id ?? String(rawTurns.length),
-          role: m.type,
-          text: joinedText,
-          tools,
-          timestamp: m.time?.created,
-        });
+    for (let i = groupedTurns.length - 1; i >= 0; i--) {
+      const t = groupedTurns[i];
+      if (t.role === "assistant" && t.text.trim()) {
+        lastAssistantText = t.text.trim();
+        break;
       }
     }
 
@@ -1555,7 +1635,7 @@ export async function fetchOpenCodeSessionSummary(
       lastAssistantText = lastErrorText || cached?.summary.lastAssistantText || "";
     }
 
-    const turns = rawTurns.slice(0, 20).reverse();
+    const turns = groupedTurns.slice(-24);
     const filesChanged = Array.from(fileDiffMap.values());
     let totalAdditions = 0;
     let totalDeletions = 0;
@@ -1567,7 +1647,7 @@ export async function fetchOpenCodeSessionSummary(
     const summary: SessionSummary = {
       lastAssistantText,
       lastToolCall,
-      recentTools: allToolSteps.slice(-3),
+      recentTools: allToolSteps.slice(-4),
       filesChanged,
       totalAdditions,
       totalDeletions,
@@ -1576,6 +1656,7 @@ export async function fetchOpenCodeSessionSummary(
     };
     summaryCache.set(sessionID, {
       updatedAt: lastAssistantText ? updatedAt : 0,
+      fetchedAt: Date.now(),
       summary,
     });
     return summary;

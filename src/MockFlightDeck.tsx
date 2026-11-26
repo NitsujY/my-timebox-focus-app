@@ -603,7 +603,6 @@ export default function MockFlightDeck({ onExitMock }: { onExitMock?: () => void
         : t,
     );
     setTasks(nextTasks);
-    advanceToNextWaiting(taskId, nextTasks);
     notify(`Sent to ${srv.id}/${shortRepoName(target.repo)}`);
   };
 
@@ -1668,7 +1667,7 @@ function MainStageWorkspace({
             </button>
           </div>
           <button type="button" onClick={handleSend} className={btnPrimary}>
-            {session ? "Send steer" : "Run agent"}
+            {session ? "↑ Send" : "▶ Run agent"}
           </button>
         </div>
       </div>
