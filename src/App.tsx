@@ -4997,6 +4997,8 @@ function RowEditor({
 
   const unlinkedExplicitlyRef = useRef(false);
   const userChangedModelRef = useRef(false);
+  const userChangedServerRef = useRef(false);
+  const userChangedRepoRef = useRef(false);
   const threadScrollRef = useRef<HTMLDivElement>(null);
   const zenThreadScrollRef = useRef<HTMLDivElement>(null);
   const followLiveRef = useRef(true);
@@ -5022,13 +5024,13 @@ function RowEditor({
       });
     }
     setQueued(Boolean(initialMeta.queued));
-    if (initialMeta.server && initialMeta.server !== server) {
+    if (!userChangedServerRef.current && initialMeta.server && initialMeta.server !== server) {
       setServer(initialMeta.server);
     }
-    if (initialMeta.model && !model && !liveSession?.modelKey && !userChangedModelRef.current) {
+    if (!userChangedModelRef.current && initialMeta.model && !model && !liveSession?.modelKey) {
       setModel(initialMeta.model);
     }
-    if (initialMeta.repo && !repo) {
+    if (!userChangedRepoRef.current && initialMeta.repo && !repo) {
       setRepo(initialMeta.repo);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -5204,8 +5206,51 @@ function RowEditor({
     }
   };
 
+  const handleSelectNoneHuman = () => {
+    userChangedServerRef.current = true;
+    userChangedRepoRef.current = true;
+    userChangedModelRef.current = true;
+    unlinkedExplicitlyRef.current = true;
+    setServer("");
+    setRepo("");
+    setModel("");
+    setSessions([]);
+    setQueued(false);
+    metaLive.current = {
+      ...metaLive.current,
+      server: "",
+      repo: "",
+      model: "",
+      sessions: [],
+      queued: false,
+    };
+    scheduleFlush();
+  };
+
+  const handleSelectServer = (sId: string) => {
+    userChangedServerRef.current = true;
+    userChangedRepoRef.current = true;
+    const s = ocServers.find((x) => x.id === sId);
+    const nextRepos = s?.repos?.length ? s.repos : KNOWN_REPOS;
+    const nextRepo = nextRepos.some((r) => r.label === repo)
+      ? repo
+      : (nextRepos[0]?.label ?? "");
+    setServer(sId);
+    setRepo(nextRepo);
+    metaLive.current = {
+      ...metaLive.current,
+      server: sId,
+      repo: nextRepo,
+    };
+    scheduleFlush();
+  };
+
   const submitToAgent = () => {
     clearTimeout(debRef.current);
+    if (!server) {
+      if (onStartCountdown) onStartCountdown();
+      return;
+    }
     unlinkedExplicitlyRef.current = false;
     followLiveRef.current = true;
     const v = titleLive.current.trim();
@@ -5236,6 +5281,101 @@ function RowEditor({
       window.setTimeout(() => scrollThreadToBottom(true), 40);
     }
   };
+
+  const targetPickerEl = (
+    <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
+      <span className="text-zinc-500">Target:</span>
+      <button
+        type="button"
+        onClick={handleSelectNoneHuman}
+        title="Switch to Human (clear server, detach agent)"
+        className={`inline-flex items-center gap-1.5 rounded px-2 py-0.5 transition-colors ${
+          !server
+            ? "bg-zinc-200 font-medium text-zinc-950"
+            : "bg-zinc-800/70 text-zinc-400 hover:text-zinc-200"
+        }`}
+      >
+        <span>None (Human)</span>
+      </button>
+      {ocServers.map((s) => {
+        const active = server === s.id;
+        const online = ocServerOnlineById[s.id];
+        return (
+          <button
+            key={s.id}
+            type="button"
+            onClick={() => handleSelectServer(s.id)}
+            title={`Run on ${s.id} (${online ? "online" : "offline"})`}
+            className={`inline-flex items-center gap-1.5 rounded px-2 py-0.5 transition-colors ${
+              active
+                ? "bg-zinc-200 font-medium text-zinc-950"
+                : "bg-zinc-800/70 text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${
+                online
+                  ? active
+                    ? "bg-orange-600"
+                    : "bg-orange-500"
+                  : "bg-zinc-600"
+              }`}
+            />
+            <span>{s.id}</span>
+          </button>
+        );
+      })}
+
+      {server && (
+        <>
+          <span className="text-zinc-600">/</span>
+          <div className="flex items-center gap-1">
+            <select
+              value={repo}
+              onChange={(e) => {
+                if (e.target.value === "__add_custom__") {
+                  setShowCustomFolder(true);
+                  return;
+                }
+                userChangedRepoRef.current = true;
+                setShowCustomFolder(false);
+                setRepo(e.target.value);
+                metaLive.current = { ...metaLive.current, repo: e.target.value };
+                scheduleFlush();
+              }}
+              className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 text-zinc-200 outline-none"
+            >
+              <option value="">~ ({activeSrvObj?.defaultDir || "/Users/justinyu"})</option>
+              {serverRepos.map((r) => (
+                <option key={r.label} value={r.label}>
+                  {shortRepo(r.label)} ({r.dir})
+                </option>
+              ))}
+              <option value="__add_custom__">+ Open other folder…</option>
+            </select>
+            <button
+              type="button"
+              disabled={refreshingProjects}
+              onClick={async () => {
+                if (onRefreshProjects) {
+                  setRefreshingProjects(true);
+                  try {
+                    await onRefreshProjects(server);
+                  } finally {
+                    setRefreshingProjects(false);
+                  }
+                }
+              }}
+              title="Refresh project folders from OpenCode"
+              className="rounded border border-zinc-800 bg-zinc-900/80 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200 disabled:opacity-50"
+            >
+              {refreshingProjects ? "…" : "⟳"}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
 
   const modelSelectEl = (
     <select
@@ -5695,11 +5835,12 @@ function RowEditor({
                 <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-zinc-800/60">
                   <div className="flex items-center gap-2.5 font-mono text-[12px]">
                     <span className={`h-2 w-2 rounded-full ${isTargetServerOnline ? "bg-orange-500" : "bg-zinc-600"}`} />
-                    <span className="font-semibold text-zinc-100">{targetLabel}</span>
-                    <span className="text-zinc-600">/</span>
-                    <span className="truncate text-zinc-400">
-                      {liveSession?.directory || serverRepos.find((r) => r.label === repo)?.dir || activeSrvObj?.defaultDir}
-                    </span>
+                    {targetPickerEl}
+                    {server && (
+                      <span className="truncate text-zinc-400 max-w-xs">
+                        {liveSession?.directory || serverRepos.find((r) => r.label === repo)?.dir || activeSrvObj?.defaultDir}
+                      </span>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-2.5">
@@ -5955,13 +6096,15 @@ function RowEditor({
                         : "bg-zinc-600"
                   }`}
                 />
-                <span className="font-medium text-zinc-200">{targetLabel}</span>
-                <span className="truncate text-zinc-500 max-w-sm">
-                  {liveSession?.directory ||
-                    serverRepos.find((r) => r.label === repo)?.dir ||
-                    activeSrvObj?.defaultDir ||
-                    "/Users/justinyu"}
-                </span>
+                {targetPickerEl}
+                {server && (
+                  <span className="truncate text-zinc-500 max-w-xs">
+                    {liveSession?.directory ||
+                      serverRepos.find((r) => r.label === repo)?.dir ||
+                      activeSrvObj?.defaultDir ||
+                      "/Users/justinyu"}
+                  </span>
+                )}
                 {activeSid && getOpenCodeWebUrl(activeSid, activeSrvObj) && (
                   <a
                     href={getOpenCodeWebUrl(activeSid, activeSrvObj)!}
@@ -5986,7 +6129,7 @@ function RowEditor({
               </div>
 
               <div className="flex shrink-0 items-center gap-2">
-                {modelSelectEl}
+                {server && modelSelectEl}
                 {dur}
                 {actions}
                 {onToggleZen && (
@@ -6076,198 +6219,64 @@ function RowEditor({
           >
             {/* 1. Target & Model Bar (inline mode only; stageMode has it in top bar) */}
             {!stageMode && (
-              activeSid ? (
-              <div className="flex flex-wrap items-center justify-between gap-2 text-[12px]">
-                <div className="flex min-w-0 flex-wrap items-center gap-2 font-mono text-[11px] text-zinc-400">
-                  <span
-                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                      isTargetServerOnline ? "bg-orange-500" : "bg-zinc-600"
-                    }`}
-                  />
-                  <span className="font-medium text-zinc-200">{targetLabel}</span>
-                  <span className="truncate text-zinc-600">
-                    {liveSession?.directory ||
-                      serverRepos.find((r) => r.label === repo)?.dir ||
-                      activeSrvObj?.defaultDir ||
-                      "/Users/justinyu"}
-                  </span>
-                </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  {modelSelectEl}
-                  {getOpenCodeWebUrl(activeSid, activeSrvObj) && (
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/60 pb-2 text-[12px]">
+                {targetPickerEl}
+                <div className="flex shrink-0 items-center gap-2 font-mono text-[11px]">
+                  {server && modelSelectEl}
+                  {activeSid && getOpenCodeWebUrl(activeSid, activeSrvObj) && (
                     <a
                       href={getOpenCodeWebUrl(activeSid, activeSrvObj)!}
                       target="_blank"
                       rel="noopener noreferrer"
                       title="Open session in OpenCode Web UI"
-                      className="shrink-0 font-mono text-[11px] text-orange-400 hover:text-orange-300"
+                      className="shrink-0 text-orange-400 hover:text-orange-300"
                     >
                       Web ↗
                     </a>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => navigator.clipboard?.writeText(`opencode -s ${activeSid}`)}
-                    title={`Copy "opencode -s ${activeSid}"`}
-                    className="shrink-0 font-mono text-[11px] text-zinc-500 hover:text-zinc-300"
-                  >
-                    {activeSid.slice(0, 10)} ↗
-                  </button>
+                  {activeSid && (
+                    <button
+                      type="button"
+                      onClick={() => navigator.clipboard?.writeText(`opencode -s ${activeSid}`)}
+                      title={`Copy "opencode -s ${activeSid}"`}
+                      className="shrink-0 text-zinc-500 hover:text-zinc-300"
+                    >
+                      {activeSid.slice(0, 10)} ↗
+                    </button>
+                  )}
                 </div>
               </div>
-            ) : (
-              <div className="space-y-2 text-[12px]">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-zinc-500">Target:</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setServer("");
-                        setRepo("");
-                        setModel("");
-                        metaLive.current = {
-                          ...metaLive.current,
-                          server: "",
-                          repo: "",
-                          model: "",
-                        };
-                        scheduleFlush();
-                      }}
-                      className={`inline-flex items-center gap-1.5 rounded px-2 py-0.5 font-mono text-[11px] ${
-                        !server
-                          ? "bg-zinc-200 font-medium text-zinc-950"
-                          : "bg-zinc-800/70 text-zinc-400 hover:text-zinc-200"
-                      }`}
-                    >
-                      <span>None (Human)</span>
-                    </button>
-                    {ocServers.map((s) => {
-                      const active = server === s.id;
-                      const online = ocServerOnlineById[s.id];
-                      return (
-                        <button
-                          key={s.id}
-                          type="button"
-                          onClick={() => {
-                            const nextRepos = s.repos?.length ? s.repos : KNOWN_REPOS;
-                            const nextRepo = nextRepos.some((r) => r.label === repo)
-                              ? repo
-                              : (nextRepos[0]?.label ?? "");
-                            setServer(s.id);
-                            setRepo(nextRepo);
-                            metaLive.current = {
-                              ...metaLive.current,
-                              server: s.id,
-                              repo: nextRepo,
-                            };
-                            scheduleFlush();
-                          }}
-                          className={`inline-flex items-center gap-1.5 rounded px-2 py-0.5 font-mono text-[11px] ${
-                            active
-                              ? "bg-zinc-200 font-medium text-zinc-950"
-                              : "bg-zinc-800/70 text-zinc-400 hover:text-zinc-200"
-                          }`}
-                        >
-                          <span
-                            className={`h-1.5 w-1.5 rounded-full ${
-                              online
-                                ? active
-                                  ? "bg-orange-600"
-                                  : "bg-orange-500"
-                                : "bg-zinc-600"
-                            }`}
-                          />
-                          <span>{s.id}</span>
-                        </button>
-                      );
-                    })}
-
-                    <span className="text-zinc-600">/</span>
-
-                    <div className="flex items-center gap-1">
-                      <select
-                        value={repo}
-                        onChange={(e) => {
-                          if (e.target.value === "__add_custom__") {
-                            setShowCustomFolder(true);
-                            return;
-                          }
-                          setShowCustomFolder(false);
-                          setRepo(e.target.value);
-                          metaLive.current = { ...metaLive.current, repo: e.target.value };
-                          scheduleFlush();
-                        }}
-                        className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[11px] text-zinc-200 outline-none"
-                      >
-                        <option value="">~ ({activeSrvObj?.defaultDir || "/Users/justinyu"})</option>
-                        {serverRepos.map((r) => (
-                          <option key={r.label} value={r.label}>
-                            {shortRepo(r.label)} ({r.dir})
-                          </option>
-                        ))}
-                        <option value="__add_custom__">+ Open other folder…</option>
-                      </select>
-
-                      <button
-                        type="button"
-                        disabled={refreshingProjects}
-                        onClick={async () => {
-                          if (onRefreshProjects) {
-                            setRefreshingProjects(true);
-                            try {
-                              await onRefreshProjects(server);
-                            } finally {
-                              setRefreshingProjects(false);
-                            }
-                          }
-                        }}
-                        title="Refresh projects from OpenCode"
-                        className="rounded border border-zinc-800 bg-zinc-900/80 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200 disabled:opacity-50"
-                      >
-                        {refreshingProjects ? "…" : "⟳"}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-zinc-500">Model:</span>
-                    {modelSelectEl}
-                  </div>
-                </div>
-
-                {showCustomFolder && (
-                  <div className="flex w-full items-center gap-1.5 rounded border border-zinc-800 bg-zinc-950/70 p-1.5">
-                    <input
-                      type="text"
-                      placeholder={`Path (e.g. ~/Develop/my-project or ${activeSrvObj?.defaultDir || "/Users/justinyu"}/...)`}
-                      value={customFolderDir}
-                      onChange={(e) => setCustomFolderDir(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") handleAddCustomFolder();
-                        if (e.key === "Escape") setShowCustomFolder(false);
-                      }}
-                      className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-[11px] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-orange-500"
-                      autoFocus
-                    />
-                    <button
-                      type="button"
-                      onClick={handleAddCustomFolder}
-                      className="shrink-0 rounded bg-orange-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-orange-500"
-                    >
-                      Add & Select
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowCustomFolder(false)}
-                      className="shrink-0 text-[11px] text-zinc-500 hover:text-zinc-300"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                )}
+            )}
+            {showCustomFolder && (
+              <div className="flex w-full items-center gap-1.5 rounded border border-zinc-800 bg-zinc-950/70 p-1.5">
+                <input
+                  type="text"
+                  placeholder={`Path (e.g. ~/Develop/my-project or ${activeSrvObj?.defaultDir || "/Users/justinyu"}/...)`}
+                  value={customFolderDir}
+                  onChange={(e) => setCustomFolderDir(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleAddCustomFolder();
+                    if (e.key === "Escape") setShowCustomFolder(false);
+                  }}
+                  className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-[11px] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-orange-500"
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  onClick={handleAddCustomFolder}
+                  className="shrink-0 rounded bg-orange-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-orange-500"
+                >
+                  Add & Select
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowCustomFolder(false)}
+                  className="shrink-0 text-[11px] text-zinc-500 hover:text-zinc-300"
+                >
+                  Cancel
+                </button>
               </div>
-            ))}
+            )}
 
             {/* Scrollable workspace region */}
             <div
@@ -6456,23 +6465,29 @@ function RowEditor({
               {stageMode && (
                 <div className="flex items-center justify-between font-mono text-[11px] text-zinc-400">
                   <span className="font-medium text-zinc-300">
-                    {hasSessionOutput ? `Steer OpenCode on ${targetLabel}` : `Prompt for ${targetLabel}`}
+                    {!server
+                      ? "Human Focus (Self-directed)"
+                      : hasSessionOutput
+                        ? `Steer OpenCode on ${targetLabel}`
+                        : `Prompt for ${targetLabel}`}
                   </span>
-                  <span className="text-zinc-500">⌘↵ to send</span>
+                  <span className="text-zinc-500">{!server ? "Personal timer" : "⌘↵ to send"}</span>
                 </div>
               )}
               <textarea
                 ref={promptRef}
                 className="w-full resize-none overflow-y-auto max-h-36 bg-transparent text-[13px] sm:text-[14px] leading-relaxed text-zinc-100 outline-none placeholder:text-zinc-600"
                 placeholder={
-                  hasSessionOutput
-                    ? `Steer OpenCode on ${targetLabel}…`
-                    : `Prompt for ${targetLabel}…`
+                  !server
+                    ? "Add notes, steps, or scratchpad for this focus session…"
+                    : hasSessionOutput
+                      ? `Steer OpenCode on ${targetLabel}…`
+                      : `Prompt for ${targetLabel}…`
                 }
                 rows={2}
                 value={inputVal}
                 onChange={(e) => {
-                  if (hasSessionOutput) {
+                  if (hasSessionOutput && server) {
                     setReplyText(e.target.value);
                   } else {
                     setPrompt(e.target.value);
@@ -6534,22 +6549,26 @@ function RowEditor({
                     type="button"
                     onClick={submitToAgent}
                     title={
-                      hasSessionOutput
-                        ? "Send (⌘↵)"
-                        : isTargetServerOnline
-                          ? `Run on ${targetLabel} (⌘↵)`
-                          : `Queue for ${targetLabel} (⌘↵)`
+                      !server
+                        ? "Start Pomodoro countdown timer (⌘↵)"
+                        : hasSessionOutput
+                          ? "Send (⌘↵)"
+                          : isTargetServerOnline
+                            ? `Run on ${targetLabel} (⌘↵)`
+                            : `Queue for ${targetLabel} (⌘↵)`
                     }
                     aria-label={
-                      hasSessionOutput
-                        ? "Send"
-                        : isTargetServerOnline
-                          ? `Run on ${targetLabel}`
-                          : `Queue for ${targetLabel}`
+                      !server
+                        ? "Start Timer"
+                        : hasSessionOutput
+                          ? "Send"
+                          : isTargetServerOnline
+                            ? `Run on ${targetLabel}`
+                            : `Queue for ${targetLabel}`
                     }
                     className="inline-flex h-7 items-center justify-center gap-1 rounded bg-orange-600 px-3 text-[13px] font-medium text-white transition-colors hover:bg-orange-500"
                   >
-                    {hasSessionOutput ? "↑ Send" : "▶ Run Agent"}
+                    {!server ? "⏱ Start Timer" : hasSessionOutput ? "↑ Send" : "▶ Run Agent"}
                   </button>
                 </div>
               </div>
