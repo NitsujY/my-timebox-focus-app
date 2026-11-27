@@ -212,15 +212,19 @@ function fmt(sec: number) {
 }
 
 function alarm() {
-  const ctx = new AudioContext();
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  osc.connect(gain);
-  gain.connect(ctx.destination);
-  osc.frequency.value = 880;
-  gain.gain.setValueAtTime(0.25, ctx.currentTime);
-  osc.start();
-  osc.stop(ctx.currentTime + 1.5);
+  try {
+    const ctx = new AudioContext();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.25, ctx.currentTime);
+    osc.start();
+    osc.stop(ctx.currentTime + 1.5);
+  } catch {
+    /* audio context not supported or requires interaction */
+  }
 }
 
 const sortTasks = (ts: Task[]) =>
@@ -1335,6 +1339,28 @@ export default function App() {
     [tasks, roles.done],
   );
 
+  // Unlinked OpenCode sessions active in the last 24h (and not already linked to any task or ignored)
+  const linkedSessionIds = useMemo(() => {
+    const s = new Set<string>(ignoredOcIds);
+    for (const t of tasks) {
+      for (const sid of parseTaskDescription(t.description).sessions) s.add(sid);
+    }
+    for (const sess of sessions) {
+      for (const sid of sess.opencode_sessions ?? []) s.add(sid);
+    }
+    return s;
+  }, [tasks, sessions, ignoredOcIds]);
+
+  const unlinkedOcSessions = useMemo(
+    () =>
+      ocSessions.filter(
+        (s) =>
+          !linkedSessionIds.has(s.id) &&
+          Date.now() - s.updatedAt < 24 * 3600_000,
+      ),
+    [ocSessions, linkedSessionIds],
+  );
+
   const launchingQueueRef = useRef<Set<string>>(new Set());
 
   // ponytail: single sequential auto-loop reuses handToAgent + native OpenCode question tool
@@ -1701,28 +1727,6 @@ export default function App() {
   );
   const doneTasks = tasks.filter((t) => t.section_id === roles.done);
   const otherProjects = projects.filter((p) => p.id !== projectId);
-
-  // Unlinked OpenCode sessions active in the last 24h (and not already linked to any task or ignored)
-  const linkedSessionIds = useMemo(() => {
-    const s = new Set<string>(ignoredOcIds);
-    for (const t of tasks) {
-      for (const sid of parseTaskDescription(t.description).sessions) s.add(sid);
-    }
-    for (const sess of sessions) {
-      for (const sid of sess.opencode_sessions ?? []) s.add(sid);
-    }
-    return s;
-  }, [tasks, sessions, ignoredOcIds]);
-
-  const unlinkedOcSessions = useMemo(
-    () =>
-      ocSessions.filter(
-        (s) =>
-          !linkedSessionIds.has(s.id) &&
-          Date.now() - s.updatedAt < 24 * 3600_000,
-      ),
-    [ocSessions, linkedSessionIds],
-  );
 
   // a mapped section deleted/renamed upstream leaves a stale id after refresh re-detect
   const remapNeeded =
@@ -8602,16 +8606,19 @@ function Timer({
   onTick?: (sec: number) => void;
   onUpdate?: (id: string, fields: { content?: string; description?: string }) => Promise<void>;
 }) {
-  const [left, setLeft] = useState(minutes * 60);
+  const safeMinutes = minutes && Number.isFinite(minutes) && minutes > 0 ? minutes : 5;
+  const [left, setLeft] = useState(safeMinutes * 60);
   const [paused, setPaused] = useState(false);
   const [timesUp, setTimesUp] = useState(false);
   const [waited, setWaited] = useState(0); // minutes sat in the time-up dialog
   const [over, setOver] = useState(0); // seconds past the planned end
-  const endRef = useRef(Date.now() + minutes * 60_000);
+  const endRef = useRef(Date.now() + safeMinutes * 60_000);
   const elapsedRef = useRef(0); // seconds actually run
-  const totalRef = useRef(minutes * 60);
+  const totalRef = useRef(safeMinutes * 60);
   const alarmedRef = useRef(false);
   const autoStoppedRef = useRef(false);
+  const pausedRef = useRef(false);
+  const pauseStarted = useRef(0);
   const onTickRef = useRef(onTick);
   onTickRef.current = onTick;
   // assigned below logAndExit so the interval can trigger the walk-away auto-stop
@@ -8621,14 +8628,24 @@ function Timer({
   const canNotify = typeof Notification !== "undefined";
 
   useEffect(() => {
-    if (canNotify && Notification.permission === "default") Notification.requestPermission();
-    deviceStart(task, minutes, endRef.current);
+    try {
+      if (canNotify && Notification.permission === "default") {
+        void Notification.requestPermission().catch?.(() => {});
+      }
+    } catch {
+      /* ignore notification permission errors */
+    }
+    deviceStart(task, safeMinutes, endRef.current);
     const hb = setInterval(() => deviceUpdate(endRef.current), 10_000); // device heartbeat-timeout is 25s
     const ev = setInterval(async () => {
-      for (const e of await deviceEvents()) {
-        if (e.type === "extend") extend(e.minutes ?? 5); // device right-half tap
-        else if (e.type === "complete") completeRef.current(); // device right-half hold
-        else stopRef.current(); // device left-half hold → log & stop
+      try {
+        for (const e of await deviceEvents()) {
+          if (e.type === "extend") extend(e.minutes ?? 5); // device right-half tap
+          else if (e.type === "complete") completeRef.current(); // device right-half hold
+          else stopRef.current(); // device left-half hold → log & stop
+        }
+      } catch {
+        /* device events error ignored */
       }
     }, 5000);
     const iv = setInterval(() => {
@@ -8641,15 +8658,24 @@ function Timer({
       onTickRef.current?.(0.25);
       setLeft(rem);
       setOver(ov);
-      document.title = ov > 0 ? `+${fmt(ov)} - ${task.content}` : `${fmt(rem)} - ${task.content}`;
+      const taskTitle = task?.content ?? "Focus";
+      document.title = ov > 0 ? `+${fmt(ov)} - ${taskTitle}` : `${fmt(rem)} - ${taskTitle}`;
       if (rem <= 0 && !alarmedRef.current) {
         alarmedRef.current = true;
-        if (canNotify && Notification.permission === "granted") {
-          const n = new Notification("Time's up!", { body: task.content });
-          n.onclick = () => window.focus();
+        try {
+          if (canNotify && Notification.permission === "granted") {
+            const n = new Notification("Time's up!", { body: taskTitle });
+            n.onclick = () => window.focus();
+          }
+        } catch {
+          /* notification failure ignored */
         }
         if (!gentle) {
-          alarm();
+          try {
+            alarm();
+          } catch {
+            /* audio context failure ignored */
+          }
           document.body.classList.add("flash");
           setTimeout(() => document.body.classList.remove("flash"), 4000);
           setTimesUp(true);
@@ -8658,7 +8684,13 @@ function Timer({
       // unanswered time-up = user probably walked away: ring once more, then log & stop
       if (ov >= AUTO_STOP_SEC && !autoStoppedRef.current) {
         autoStoppedRef.current = true;
-        if (!gentle) alarm();
+        if (!gentle) {
+          try {
+            alarm();
+          } catch {
+            /* ignore */
+          }
+        }
         stopRef.current();
       }
     }, 250);
@@ -8669,7 +8701,7 @@ function Timer({
       deviceStop();
       document.title = "Timebox Focus";
     };
-  }, [task.content, gentle]);
+  }, [task?.content, gentle, safeMinutes]);
 
   const extend = (m: number) => {
     endRef.current = Math.max(endRef.current, Date.now()) + m * 60_000;
@@ -8697,12 +8729,10 @@ function Timer({
   }, [paused, onComplete, onExit]);
 
   // keep endTime honest across pause: shift it forward by paused duration
-  const pauseStarted = useRef(0);
-  const pausedRef = useRef(false);
   useEffect(() => {
     pausedRef.current = paused;
     if (paused) {
-      document.title = `⏸ paused - ${task.content}`;
+      document.title = `⏸ paused - ${task?.content ?? "Focus"}`;
       pauseStarted.current = Date.now();
       deviceSetPaused(true, endRef.current); // device freezes its digits at end − now
     } else if (pauseStarted.current) {
@@ -8710,7 +8740,7 @@ function Timer({
       pauseStarted.current = 0;
       deviceSetPaused(false, endRef.current); // device thaws at the shifted end
     }
-  }, [paused, task.content]);
+  }, [paused, task?.content]);
 
   const frac = Math.max(0, left / totalRef.current);
 
@@ -8719,7 +8749,7 @@ function Timer({
     onLog({
       task_id: task.id,
       task_name: task.content,
-      planned_minutes: minutes,
+      planned_minutes: safeMinutes,
       // any real run counts at least 1m — Math.round(29s) -> 0 would erase the effort
       actual_minutes: secs > 0 ? Math.max(1, Math.round(secs / 60)) : 0,
       completed,
