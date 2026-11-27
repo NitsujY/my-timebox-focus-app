@@ -4785,6 +4785,14 @@ function SessionThread({
   fallbackText?: string;
   fallbackTool?: string;
 }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const turnRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const highlightTimerRef = useRef<number | null>(null);
+
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
   const displayTurns = useMemo(() => {
     const list: SessionTurn[] = [...turns];
     if (list.length === 0 && (fallbackText || fallbackTool)) {
@@ -4840,35 +4848,355 @@ function SessionThread({
     return list;
   }, [turns, pendingSteer, isRunning, fallbackText, fallbackTool]);
 
+  // Compute 1-based prompt/response indexes and jump targets between paired turns
+  const turnMeta = useMemo(() => {
+    let promptCount = 0;
+    let responseCount = 0;
+
+    const metaList = displayTurns.map((turn) => {
+      if (turn.role === "user") {
+        promptCount++;
+        return {
+          role: "user" as const,
+          number: promptCount,
+          nextResponseIdx: -1,
+          prevPromptIdx: -1,
+        };
+      }
+      responseCount++;
+      return {
+        role: "assistant" as const,
+        number: responseCount,
+        nextResponseIdx: -1,
+        prevPromptIdx: -1,
+      };
+    });
+
+    for (let i = 0; i < displayTurns.length; i++) {
+      if (displayTurns[i].role === "user") {
+        for (let j = i + 1; j < displayTurns.length; j++) {
+          if (displayTurns[j].role === "assistant") {
+            metaList[i].nextResponseIdx = j;
+            break;
+          }
+        }
+      } else {
+        for (let j = i - 1; j >= 0; j--) {
+          if (displayTurns[j].role === "user") {
+            metaList[i].prevPromptIdx = j;
+            break;
+          }
+        }
+      }
+    }
+
+    return {
+      metaList,
+      totalPrompts: promptCount,
+      totalResponses: responseCount,
+    };
+  }, [displayTurns]);
+
+  // Smooth-scroll to target turn and briefly highlight it
+  const scrollToTurn = useCallback(
+    (targetIdx: number) => {
+      if (targetIdx < 0 || targetIdx >= displayTurns.length) return;
+      setActiveIndex(targetIdx);
+      const targetTurn = displayTurns[targetIdx];
+      if (targetTurn) {
+        setHighlightedId(targetTurn.id);
+        if (highlightTimerRef.current) {
+          window.clearTimeout(highlightTimerRef.current);
+        }
+        highlightTimerRef.current = window.setTimeout(() => {
+          setHighlightedId(null);
+        }, 1600);
+      }
+
+      const el = turnRefs.current[targetIdx];
+      if (!el) return;
+
+      const scrollContainer = el.closest(".overflow-y-auto") as HTMLElement | null;
+      if (scrollContainer) {
+        const containerRect = scrollContainer.getBoundingClientRect();
+        const targetRect = el.getBoundingClientRect();
+        const currentScrollTop = scrollContainer.scrollTop;
+        // Leave room for sticky navigation bar
+        const offsetTop = targetRect.top - containerRect.top + currentScrollTop - 48;
+        scrollContainer.scrollTo({
+          top: Math.max(0, offsetTop),
+          behavior: "smooth",
+        });
+      } else {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    },
+    [displayTurns],
+  );
+
+  // Sync activeIndex with manual scroll position
+  const handleContainerScroll = useCallback(() => {
+    const scrollContainer = containerRef.current?.closest(".overflow-y-auto") as HTMLElement | null;
+    if (!scrollContainer) return;
+    const containerRect = scrollContainer.getBoundingClientRect();
+    const threshold = containerRect.top + 70;
+
+    let bestIdx = 0;
+    let minDiff = Infinity;
+    for (let i = 0; i < displayTurns.length; i++) {
+      const el = turnRefs.current[i];
+      if (!el) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.top <= threshold && rect.bottom >= threshold) {
+        bestIdx = i;
+        break;
+      }
+      const diff = Math.abs(rect.top - threshold);
+      if (diff < minDiff) {
+        minDiff = diff;
+        bestIdx = i;
+      }
+    }
+    setActiveIndex(bestIdx);
+  }, [displayTurns.length]);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const scrollContainer = el.closest(".overflow-y-auto") as HTMLElement | null;
+    if (!scrollContainer) return;
+
+    let ticking = false;
+    const onScroll = () => {
+      if (!ticking) {
+        window.requestAnimationFrame(() => {
+          handleContainerScroll();
+          ticking = false;
+        });
+        ticking = true;
+      }
+    };
+
+    scrollContainer.addEventListener("scroll", onScroll, { passive: true });
+    return () => scrollContainer.removeEventListener("scroll", onScroll);
+  }, [handleContainerScroll]);
+
+  // Keyboard navigation: Alt+ArrowUp for prev turn, Alt+ArrowDown for next turn
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (displayTurns.length <= 1) return;
+      if (e.altKey && e.key === "ArrowUp") {
+        e.preventDefault();
+        scrollToTurn(Math.max(0, activeIndex - 1));
+      } else if (e.altKey && e.key === "ArrowDown") {
+        e.preventDefault();
+        scrollToTurn(Math.min(displayTurns.length - 1, activeIndex + 1));
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeIndex, displayTurns.length, scrollToTurn]);
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current) {
+        window.clearTimeout(highlightTimerRef.current);
+      }
+    };
+  }, []);
+
+  const copyText = (id: string, text: string) => {
+    if (!text) return;
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        setCopiedId(id);
+        window.setTimeout(() => {
+          setCopiedId((curr) => (curr === id ? null : curr));
+        }, 1500);
+      })
+      .catch(() => {});
+  };
+
   if (displayTurns.length === 0) return null;
 
+  const currentTurn = displayTurns[activeIndex] ?? displayTurns[0];
+  const currentTurnMeta = turnMeta.metaList[activeIndex] ?? turnMeta.metaList[0];
+
   return (
-    <div className="space-y-3">
+    <div ref={containerRef} className="space-y-3 relative">
+      {/* Sticky Thread Navigation Bar (Visible when there are 2+ turns) */}
+      {displayTurns.length > 1 && (
+        <div className="sticky top-0 z-20 -mx-1 px-1 py-1 bg-zinc-950/85 backdrop-blur-md">
+          <div className="flex items-center justify-between gap-2 rounded-lg border border-zinc-800/80 bg-zinc-900/90 px-2.5 py-1.5 shadow-sm">
+            {/* Left: Indicator & Active Turn Tag */}
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="font-mono text-[10.5px] uppercase tracking-wider text-zinc-400 shrink-0">
+                {currentTurn.role === "user" ? (
+                  <span className="inline-flex items-center gap-1 font-semibold text-amber-300">
+                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                    Prompt #{currentTurnMeta.number}
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 font-semibold text-sky-300">
+                    <span className="h-1.5 w-1.5 rounded-full bg-sky-400" />
+                    Response #{currentTurnMeta.number}
+                  </span>
+                )}
+              </span>
+              <span className="font-mono text-[10px] text-zinc-500 shrink-0">
+                ({activeIndex + 1}/{displayTurns.length})
+              </span>
+              <span className="hidden sm:inline-flex items-center gap-1 border-l border-zinc-800 pl-2 font-mono text-[10px] text-zinc-400">
+                <span>
+                  {turnMeta.totalPrompts} {turnMeta.totalPrompts === 1 ? "prompt" : "prompts"}
+                </span>
+                <span>·</span>
+                <span>
+                  {turnMeta.totalResponses}{" "}
+                  {turnMeta.totalResponses === 1 ? "response" : "responses"}
+                </span>
+              </span>
+            </div>
+
+            {/* Right: Up / Down Navigation Buttons */}
+            <div className="flex items-center gap-1 shrink-0">
+              {/* Up Button */}
+              <button
+                type="button"
+                onClick={() => scrollToTurn(activeIndex - 1)}
+                disabled={activeIndex <= 0}
+                className="inline-flex items-center gap-1 rounded border border-zinc-700/60 bg-zinc-800/80 px-2 py-0.5 font-mono text-[11px] font-medium text-zinc-200 transition-colors hover:border-zinc-500 hover:bg-zinc-750 hover:text-white disabled:pointer-events-none disabled:opacity-30"
+                title="Navigate to previous prompt/response [Alt+↑]"
+                aria-label="Previous prompt or response"
+              >
+                <svg className="w-3.5 h-3.5 text-zinc-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M5 15l7-7 7 7" />
+                </svg>
+                <span className="text-[10.5px]">Up</span>
+              </button>
+
+              {/* Down Button */}
+              <button
+                type="button"
+                onClick={() => scrollToTurn(activeIndex + 1)}
+                disabled={activeIndex >= displayTurns.length - 1}
+                className="inline-flex items-center gap-1 rounded border border-zinc-700/60 bg-zinc-800/80 px-2 py-0.5 font-mono text-[11px] font-medium text-zinc-200 transition-colors hover:border-zinc-500 hover:bg-zinc-750 hover:text-white disabled:pointer-events-none disabled:opacity-30"
+                title="Navigate to next prompt/response [Alt+↓]"
+                aria-label="Next prompt or response"
+              >
+                <span className="text-[10.5px]">Down</span>
+                <svg className="w-3.5 h-3.5 text-zinc-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+
+              {/* Jump to bottom / latest */}
+              {activeIndex < displayTurns.length - 1 && (
+                <button
+                  type="button"
+                  onClick={() => scrollToTurn(displayTurns.length - 1)}
+                  className="inline-flex items-center gap-0.5 rounded border border-zinc-700/60 bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200"
+                  title="Jump to latest response"
+                  aria-label="Jump to latest response"
+                >
+                  <svg className="w-3 h-3 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M19 13l-7 7-7-7m14-8l-7 7-7-7" />
+                  </svg>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Message List */}
       {displayTurns.map((turn, idx) => {
         const isLast = idx === displayTurns.length - 1;
         const isTurnRunning =
           turn.role === "assistant" &&
           isLast &&
           (isRunning || Boolean(turn.isStreaming) || Boolean(pendingSteer));
+        const meta = turnMeta.metaList[idx];
 
         if (turn.role === "user") {
           return (
             <div
               key={turn.id}
-              className="rounded-lg border border-zinc-800/90 bg-zinc-900/60 px-3.5 py-2.5 space-y-1"
+              ref={(el) => {
+                turnRefs.current[idx] = el;
+              }}
+              data-turn-id={turn.id}
+              data-turn-role="user"
+              className={`rounded-lg border border-zinc-800/90 border-l-[3.5px] border-l-amber-500 bg-gradient-to-r from-amber-500/[0.06] via-zinc-900/85 to-zinc-900/70 px-4 py-3 space-y-2 shadow-sm transition-all duration-300 ${
+                highlightedId === turn.id
+                  ? "ring-2 ring-amber-400/80 shadow-lg shadow-amber-500/10"
+                  : ""
+              }`}
             >
-              <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-wider text-zinc-400">
-                <span>You</span>
-                {turn.timestamp && (
-                  <span className="text-zinc-500">
-                    {new Date(turn.timestamp).toLocaleTimeString([], {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}
+              <div className="flex items-center justify-between gap-2 border-b border-zinc-800/60 pb-1.5 font-mono text-[10px] tracking-wider text-zinc-400">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/15 px-2 py-0.5 font-mono text-[10px] font-semibold tracking-wider text-amber-300">
+                    <svg className="w-3 h-3 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                    </svg>
+                    PROMPT #{meta.number}
                   </span>
-                )}
+                  <span className="text-zinc-400 font-medium uppercase text-[10px]">You</span>
+                </div>
+
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {turn.timestamp && (
+                    <span className="font-mono text-[10px] text-zinc-500 mr-1">
+                      {new Date(turn.timestamp).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </span>
+                  )}
+
+                  {/* Copy Prompt Text */}
+                  {turn.text && (
+                    <button
+                      type="button"
+                      onClick={() => copyText(turn.id, turn.text)}
+                      className="inline-flex items-center gap-1 rounded border border-zinc-700/60 bg-zinc-800/70 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 hover:border-zinc-500 hover:text-zinc-200 transition-colors"
+                      title="Copy prompt text"
+                    >
+                      {copiedId === turn.id ? (
+                        <>
+                          <svg className="w-3 h-3 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                          </svg>
+                          <span className="text-emerald-400 font-medium">Copied</span>
+                        </>
+                      ) : (
+                        <>
+                          <svg className="w-3 h-3 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                          </svg>
+                          <span>Copy</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+
+                  {/* Jump to Corresponding Response */}
+                  {meta.nextResponseIdx >= 0 && (
+                    <button
+                      type="button"
+                      onClick={() => scrollToTurn(meta.nextResponseIdx)}
+                      className="inline-flex items-center gap-1 rounded border border-zinc-700/60 bg-zinc-800/80 px-2 py-0.5 font-mono text-[10.5px] text-zinc-300 hover:border-zinc-500 hover:bg-zinc-750 hover:text-white transition-colors"
+                      title="Jump to corresponding response"
+                    >
+                      <span>Response</span>
+                      <span className="text-[12px] leading-none">↓</span>
+                    </button>
+                  )}
+                </div>
               </div>
-              <p className="whitespace-pre-wrap text-[13px] sm:text-[14px] leading-relaxed text-zinc-100">
+
+              <p className="whitespace-pre-wrap text-[13.5px] sm:text-[14px] leading-relaxed text-zinc-100 font-normal">
                 {turn.text}
               </p>
             </div>
@@ -4876,18 +5204,104 @@ function SessionThread({
         }
 
         return (
-          <div key={turn.id} className="space-y-2">
+          <div
+            key={turn.id}
+            ref={(el) => {
+              turnRefs.current[idx] = el;
+            }}
+            data-turn-id={turn.id}
+            data-turn-role="assistant"
+            className={`rounded-lg border border-zinc-800/80 border-l-[3.5px] border-l-sky-500/70 bg-zinc-950/75 p-3.5 sm:p-4 space-y-2.5 transition-all duration-300 ${
+              highlightedId === turn.id
+                ? "ring-2 ring-sky-400/80 shadow-lg shadow-sky-500/10"
+                : ""
+            }`}
+          >
+            {/* Assistant Header */}
+            <div className="flex items-center justify-between gap-2 border-b border-zinc-800/60 pb-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="inline-flex items-center gap-1.5 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold tracking-wider text-sky-300">
+                  <svg className="w-3 h-3 text-sky-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                  </svg>
+                  RESPONSE #{meta.number}
+                </span>
+                <span className="truncate font-mono text-[11px] text-zinc-400">
+                  {serverLabel}
+                </span>
+                {isTurnRunning && (
+                  <span className="inline-flex items-center gap-1 rounded bg-orange-500/15 border border-orange-500/30 px-1.5 py-0.5 font-mono text-[10px] text-orange-300">
+                    <span className="h-1.5 w-1.5 rounded-full bg-orange-500 animate-pulse" />
+                    Responding…
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-1.5 shrink-0">
+                {turn.timestamp && (
+                  <span className="font-mono text-[10px] text-zinc-500 mr-1">
+                    {new Date(turn.timestamp).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </span>
+                )}
+
+                {/* Copy Response Markdown */}
+                {turn.text && (
+                  <button
+                    type="button"
+                    onClick={() => copyText(turn.id, turn.text)}
+                    className="inline-flex items-center gap-1 rounded border border-zinc-700/60 bg-zinc-800/70 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 hover:border-zinc-500 hover:text-zinc-200 transition-colors"
+                    title="Copy response markdown"
+                  >
+                    {copiedId === turn.id ? (
+                      <>
+                        <svg className="w-3 h-3 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                        </svg>
+                        <span className="text-emerald-400 font-medium">Copied</span>
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-3 h-3 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                        </svg>
+                        <span>Copy</span>
+                      </>
+                    )}
+                  </button>
+                )}
+
+                {/* Jump to Preceding Prompt */}
+                {meta.prevPromptIdx >= 0 && (
+                  <button
+                    type="button"
+                    onClick={() => scrollToTurn(meta.prevPromptIdx)}
+                    className="inline-flex items-center gap-1 rounded border border-zinc-700/60 bg-zinc-800/80 px-2 py-0.5 font-mono text-[10.5px] text-zinc-300 hover:border-zinc-500 hover:bg-zinc-750 hover:text-white transition-colors"
+                    title="Jump to user prompt"
+                  >
+                    <span className="text-[12px] leading-none">↑</span>
+                    <span>Prompt</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Reasoning & Tool Steps */}
             <TurnReasoningSteps
               steps={turn.steps}
               hasOpaqueReasoning={turn.hasOpaqueReasoning}
               isRunning={isTurnRunning}
             />
+
+            {/* Response Body */}
             {turn.text ? (
-              <div className="rounded-lg border border-zinc-800/60 bg-zinc-950/60 px-4 py-3 text-[14px] leading-relaxed text-zinc-200">
+              <div className="pt-0.5">
                 <SimpleMarkdown text={turn.text} />
               </div>
             ) : isTurnRunning ? (
-              <div className="flex items-center gap-2 rounded-lg border border-zinc-800/50 bg-zinc-950/40 px-3.5 py-2.5 font-mono text-[12px] text-zinc-400">
+              <div className="flex items-center gap-2 rounded-lg border border-zinc-800/50 bg-zinc-900/40 px-3.5 py-2.5 font-mono text-[12px] text-zinc-400">
                 <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-orange-500 animate-pulse" />
                 <span>{serverLabel} is responding…</span>
               </div>
