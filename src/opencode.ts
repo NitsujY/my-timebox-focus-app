@@ -784,14 +784,37 @@ export type TaskMeta = {
   model?: string;
   sessions: string[];
   queued?: boolean;
+  jira?: string;
 };
 
 const META_RE = /\[opencode:([^\]]+)\]\s*$/;
+const JIRA_KEY_RE = /\b([A-Z][A-Z0-9_]{1,15}-\d+)\b/;
+
+export function extractJiraKey(text?: string | null): string {
+  if (!text) return "";
+  const m = text.match(JIRA_KEY_RE);
+  if (!m) return "";
+  // Avoid matching common non-Jira tokens like UTF-8, SHA-256, etc.
+  const prefix = m[1].split("-")[0];
+  if (["UTF", "SHA", "ISO", "AES", "RSA", "TLS", "HTTP", "RFC", "CVE", "ESP"].includes(prefix)) {
+    return "";
+  }
+  return m[1];
+}
 
 export function parseTaskDescription(desc?: string | null): TaskMeta {
   const raw = (desc ?? "").trim();
   if (!raw)
-    return { note: "", prompt: "", repo: "", server: "", model: "", sessions: [], queued: false };
+    return {
+      note: "",
+      prompt: "",
+      repo: "",
+      server: "",
+      model: "",
+      sessions: [],
+      queued: false,
+      jira: "",
+    };
 
   let body = raw;
   let repo = "";
@@ -799,6 +822,7 @@ export function parseTaskDescription(desc?: string | null): TaskMeta {
   let model = "";
   let sessions: string[] = [];
   let queued = false;
+  let jira = "";
 
   const match = body.match(META_RE);
   if (match) {
@@ -817,14 +841,20 @@ export function parseTaskDescription(desc?: string | null): TaskMeta {
         server = p.slice(4).trim();
       } else if (p.startsWith("model=")) {
         model = p.slice(6).trim();
+      } else if (p.startsWith("jira=")) {
+        jira = p.slice(5).trim().toUpperCase();
       } else if (p === "queue=1" || p === "queued=1") {
         queued = true;
       }
     }
   }
 
+  if (!jira) {
+    jira = extractJiraKey(body);
+  }
+
   if (body === "---") {
-    return { note: "", prompt: "", repo, server, model, sessions, queued };
+    return { note: "", prompt: "", repo, server, model, sessions, queued, jira };
   }
 
   if (body.startsWith("---\n")) {
@@ -837,6 +867,7 @@ export function parseTaskDescription(desc?: string | null): TaskMeta {
       model,
       sessions,
       queued,
+      jira,
     };
   }
 
@@ -854,12 +885,13 @@ export function parseTaskDescription(desc?: string | null): TaskMeta {
       model,
       sessions,
       queued,
+      jira,
     };
   }
 
   const lines = body.split("\n");
   if (lines.length === 1) {
-    return { note: lines[0].trim(), prompt: "", repo, server, model, sessions, queued };
+    return { note: lines[0].trim(), prompt: "", repo, server, model, sessions, queued, jira };
   }
   return {
     note: lines[0].trim(),
@@ -869,6 +901,7 @@ export function parseTaskDescription(desc?: string | null): TaskMeta {
     model,
     sessions,
     queued,
+    jira,
   };
 }
 
@@ -886,6 +919,9 @@ export function formatTaskDescription(meta: TaskMeta): string {
   }
 
   const tags: string[] = [];
+  if (meta.jira?.trim()) {
+    tags.push(`jira=${meta.jira.trim().toUpperCase()}`);
+  }
   if (meta.server?.trim()) {
     tags.push(`srv=${meta.server.trim()}`);
   }
@@ -1914,4 +1950,331 @@ ${JSON.stringify(candidates, null, 2)}`;
     suggestions: heuristicTop,
     source: "heuristic",
   };
+}
+
+export type JiraAssignedIssue = {
+  key: string;
+  summary: string;
+  status: string;
+  priority?: string;
+  url?: string;
+  description?: string;
+  suggestedRepo?: string;
+  matchedSessionIds?: string[];
+};
+
+export type JiraPullResult = {
+  issues: JiraAssignedIssue[];
+  serverName?: string;
+  fetchedAt: number;
+  error?: string;
+};
+
+const JIRA_CACHE_KEY = "tb_jira_assigned_cache";
+
+export function loadCachedJiraIssues(): JiraPullResult | null {
+  try {
+    const raw = localStorage.getItem(JIRA_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as JiraPullResult;
+    if (!parsed || !Array.isArray(parsed.issues)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function saveCachedJiraIssues(res: JiraPullResult): void {
+  try {
+    localStorage.setItem(JIRA_CACHE_KEY, JSON.stringify(res));
+  } catch {
+    /* ignore quota errors */
+  }
+}
+
+export function inferRepoFromJiraText(
+  key: string,
+  summary: string,
+  description = "",
+  availableRepos: OpenCodeRepo[] = KNOWN_REPOS,
+): string {
+  const combined = `${key} ${summary} ${description}`.toLowerCase();
+  const repos = availableRepos.length > 0 ? availableRepos : KNOWN_REPOS;
+
+  // Match explicit repo slug mentions first
+  for (const r of repos) {
+    const slug = r.label.replace(/^vyond\//, "").replace(/^homelab\//, "").toLowerCase();
+    if (slug.length >= 4 && combined.includes(slug)) {
+      return r.label;
+    }
+  }
+
+  if (/\b(eks|k8s|kubernetes|helm|ingress|argocd|manifest)\b/.test(combined)) {
+    return "vyond/eks-manifest";
+  }
+  if (/\b(qa|autotest|account-pool)\b/.test(combined)) {
+    return "vyond/qa-autotest-account-pool";
+  }
+  if (/\b(review-hub|software-review)\b/.test(combined)) {
+    return "vyond/devops-software-review-hub";
+  }
+  if (/\b(ai-helper)\b/.test(combined)) {
+    return "vyond/devops-ai-helper";
+  }
+  if (/\b(turbo)\b/.test(combined)) {
+    return "vyond/turbo";
+  }
+  if (/\b(next)\b/.test(combined)) {
+    return "vyond/next";
+  }
+  if (key.toUpperCase().startsWith("DEVOPS-")) {
+    return "vyond/devops";
+  }
+  return "";
+}
+
+export function findMatchingSessionsForJira(
+  jiraKey?: string | null,
+  sessions: OpenCodeLiveSession[] = [],
+): OpenCodeLiveSession[] {
+  const clean = (jiraKey ?? "").trim().toUpperCase();
+  if (!clean) return [];
+  return sessions.filter((s) => {
+    const titleUpper = (s.title ?? "").toUpperCase();
+    const dirUpper = (s.directory ?? "").toUpperCase();
+    return titleUpper.includes(clean) || dirUpper.includes(clean);
+  });
+}
+
+async function pollAssistantReply(
+  base: string,
+  srv: OpenCodeServer,
+  sessionId: string,
+  timeoutMs = 22_000,
+): Promise<string> {
+  const pollStart = Date.now();
+  let latestText = "";
+  while (Date.now() - pollStart < timeoutMs) {
+    await new Promise((r) => setTimeout(r, 700));
+    const [msgRes, actRes] = await Promise.all([
+      fetch(`${base}/session/${sessionId}/message?limit=8`, {
+        headers: buildServerHeaders(srv),
+      }),
+      fetch(`${base}/session/active`, {
+        headers: buildServerHeaders(srv),
+      }).catch(() => null),
+    ]);
+    if (!msgRes.ok) break;
+    const json = await msgRes.json();
+    const actJson =
+      actRes && actRes.ok
+        ? ((await actRes.json()) as { data?: Record<string, unknown> })
+        : { data: {} };
+    const isStillRunning = Boolean(actJson.data?.[sessionId]);
+
+    const msgs = (json.data ?? []) as Array<{
+      type?: string;
+      text?: string;
+      content?: Array<{ type?: string; text?: string }>;
+    }>;
+    const assistant = msgs.find((m) => m.type === "assistant");
+    if (assistant) {
+      const text =
+        assistant.text ||
+        assistant.content
+          ?.filter((c) => !c.type || c.type === "text")
+          .map((c) => c.text)
+          .filter(Boolean)
+          .join("\n") ||
+        "";
+      if (text.trim()) {
+        latestText = text.trim();
+        if (!isStillRunning && /\[[\s\S]*\]/.test(latestText)) {
+          return latestText;
+        }
+      }
+    }
+    if (!isStillRunning && latestText) {
+      return latestText;
+    }
+  }
+  return latestText;
+}
+
+export async function fetchAssignedJiraIssues(opts?: {
+  serverId?: string;
+  jql?: string;
+  liveSessions?: OpenCodeLiveSession[];
+  availableRepos?: OpenCodeRepo[];
+}): Promise<JiraPullResult> {
+  const srv = resolveServer(opts?.serverId);
+  const cfg = loadOpenCodeConfig();
+  const base = resolveOpenCodeBase(srv.endpoint);
+
+  try {
+    const testRes = await fetch(`${base}/session?limit=1`, {
+      headers: buildServerHeaders(srv),
+      signal: AbortSignal.timeout(2500),
+    });
+    if (!testRes.ok) {
+      return {
+        issues: loadCachedJiraIssues()?.issues ?? [],
+        serverName: srv.name,
+        fetchedAt: Date.now(),
+        error: `OpenCode server "${srv.name}" returned HTTP ${testRes.status}`,
+      };
+    }
+  } catch {
+    return {
+      issues: loadCachedJiraIssues()?.issues ?? [],
+      serverName: srv.name,
+      fetchedAt: Date.now(),
+      error: `OpenCode server "${srv.name}" is unreachable. Start or connect OpenCode to query Jira MCP.`,
+    };
+  }
+
+  const jql =
+    opts?.jql?.trim() ||
+    "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC";
+
+  const promptText = `Use the Atlassian Jira MCP tools (in execute: search for atlassian JQL / getAccessibleAtlassianResources / searchJiraIssuesUsingJql) to fetch Jira issues matching this JQL:
+${jql}
+(Limit to 15 issues).
+Return ONLY a raw JSON array (no markdown prose outside JSON) where each item has:
+[
+  {
+    "key": "DEVOPS-123",
+    "summary": "Issue title",
+    "status": "In Progress",
+    "priority": "Medium",
+    "url": "https://<site>.atlassian.net/browse/DEVOPS-123",
+    "description": "Short 1-2 sentence summary or linked OpenCode session ID if mentioned"
+  }
+]`;
+
+  let sessionId = "";
+  try {
+    sessionId = await createAndPromptOpenCodeSession({
+      title: `[MCP] Pull Assigned Jira Issues`,
+      directory: srv.defaultDir || DEFAULT_WORKSPACE_DIR,
+      promptText,
+      serverId: srv.id,
+      modelKey: srv.defaultModel || cfg.defaultModel,
+    });
+
+    const reply = await pollAssistantReply(base, srv, sessionId, 24_000);
+    void deleteOpenCodeSession(sessionId, srv.id);
+
+    const match = reply.match(/\[[\s\S]*\]/);
+    if (!match) {
+      return {
+        issues: loadCachedJiraIssues()?.issues ?? [],
+        serverName: srv.name,
+        fetchedAt: Date.now(),
+        error: reply
+          ? `Could not parse Jira response: ${reply.slice(0, 140)}`
+          : "Timed out waiting for Atlassian MCP response from OpenCode.",
+      };
+    }
+
+    const parsed = JSON.parse(match[0]) as Array<{
+      key?: string;
+      summary?: string;
+      status?: string;
+      priority?: string;
+      url?: string;
+      description?: string;
+    }>;
+
+    const liveSessions = opts?.liveSessions ?? [];
+    const repos = opts?.availableRepos ?? getServerRepos(srv.id, cfg);
+
+    const issues: JiraAssignedIssue[] = (Array.isArray(parsed) ? parsed : [])
+      .filter((item) => item && typeof item.key === "string" && item.key.trim())
+      .map((item) => {
+        const key = item.key!.trim().toUpperCase();
+        const summary = (item.summary ?? "").trim() || key;
+        const desc = (item.description ?? "").trim();
+        const matched = findMatchingSessionsForJira(key, liveSessions).map((s) => s.id);
+        // Also extract any `ses_...` IDs mentioned inside the Jira ticket description/comments
+        const sesInDesc = Array.from(desc.matchAll(/\b(ses_[A-Za-z0-9]+)\b/g)).map((m) => m[1]);
+        const matchedSessionIds = Array.from(new Set([...matched, ...sesInDesc]));
+        return {
+          key,
+          summary,
+          status: (item.status ?? "To Do").trim(),
+          priority: item.priority?.trim(),
+          url: item.url?.trim(),
+          description: desc || undefined,
+          suggestedRepo: inferRepoFromJiraText(key, summary, desc, repos) || undefined,
+          matchedSessionIds,
+        };
+      });
+
+    const result: JiraPullResult = {
+      issues,
+      serverName: srv.name,
+      fetchedAt: Date.now(),
+    };
+    saveCachedJiraIssues(result);
+    return result;
+  } catch (e) {
+    if (sessionId) void deleteOpenCodeSession(sessionId, srv.id);
+    return {
+      issues: loadCachedJiraIssues()?.issues ?? [],
+      serverName: srv.name,
+      fetchedAt: Date.now(),
+      error: e instanceof Error ? e.message : "Failed to query Jira MCP via OpenCode",
+    };
+  }
+}
+
+export async function syncSessionToJiraIssue(opts: {
+  jiraKey: string;
+  sessionID: string;
+  sessionTitle?: string;
+  serverId?: string;
+  repo?: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const cleanKey = opts.jiraKey.trim().toUpperCase();
+  if (!cleanKey || !opts.sessionID) {
+    return { ok: false, error: "Missing Jira key or OpenCode session ID" };
+  }
+  const srv = resolveServer(opts.serverId);
+  const cfg = loadOpenCodeConfig();
+  const base = resolveOpenCodeBase(srv.endpoint);
+  const webUrl =
+    getOpenCodeWebUrl(opts.sessionID, srv) || `http://127.0.0.1:49374/session/${opts.sessionID}`;
+  const label = `OpenCode Session [${srv.id}] ${opts.sessionID}${opts.sessionTitle ? ` — ${opts.sessionTitle}` : ""}`;
+
+  const promptText = `Link OpenCode session "${opts.sessionID}" to Jira issue ${cleanKey} using the Atlassian MCP:
+1. Call getAccessibleAtlassianResources to get cloudId.
+2. Call tools.atlassian.addGraphContext({
+  cloudId,
+  relationshipType: "jira-work-item-links-jira-work-item-remote-link",
+  objectIdentifier: "${cleanKey}",
+  targetObjectIdentifier: "${webUrl}",
+  title: ${JSON.stringify(label)}
+}).
+3. Reply with ONLY: {"ok": true}`;
+
+  let helperSid = "";
+  try {
+    helperSid = await createAndPromptOpenCodeSession({
+      title: `[MCP] Link ${opts.sessionID.slice(0, 10)} → ${cleanKey}`,
+      directory: srv.defaultDir || DEFAULT_WORKSPACE_DIR,
+      promptText,
+      serverId: srv.id,
+      modelKey: srv.defaultModel || cfg.defaultModel,
+    });
+    await pollAssistantReply(base, srv, helperSid, 18_000);
+    void deleteOpenCodeSession(helperSid, srv.id);
+    return { ok: true };
+  } catch (e) {
+    if (helperSid) void deleteOpenCodeSession(helperSid, srv.id);
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : "Failed to link session in Jira",
+    };
+  }
 }

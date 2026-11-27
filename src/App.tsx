@@ -12,15 +12,19 @@ import {
 import {
   createAndPromptOpenCodeSession,
   dirToShortRepo,
+  extractJiraKey,
+  fetchAssignedJiraIssues,
   fetchOpenCodeSessionSummary,
   fetchOpenCodeSnapshot,
   fetchServerProjects,
+  findMatchingSessionsForJira,
   formatTaskDescription,
   getOpenCodeEventUrl,
   getOpenCodeWebUrl,
   interruptOpenCodeSession,
   invalidateSessionSummary,
   KNOWN_REPOS,
+  loadCachedJiraIssues,
   loadOpenCodeConfig,
   mergeRepos,
   parseTaskDescription,
@@ -36,9 +40,12 @@ import {
   shortModelLabel,
   suggestBacklogTasks,
   switchOpenCodeSessionModel,
+  syncSessionToJiraIssue,
   verifyAllOpenCodeServers,
   type BacklogSignal,
   type BacklogSuggestion,
+  type JiraAssignedIssue,
+  type JiraPullResult,
   type OpenCodeConfig,
   type OpenCodeLiveSession,
   type OpenCodeModelOption,
@@ -619,6 +626,7 @@ export default function App() {
                 ...remoteTask,
                 description: formatTaskDescription({
                   ...remoteMeta,
+                  jira: remoteMeta.jira || localMeta.jira,
                   server: remoteMeta.server || localMeta.server,
                   model: remoteMeta.model || localMeta.model,
                   repo: remoteMeta.repo || localMeta.repo,
@@ -844,6 +852,7 @@ export default function App() {
       prompt?: string;
       note?: string;
       sessions?: string[];
+      jira?: string;
       mode?: "save" | "drive" | "agent";
     },
   ) => {
@@ -851,10 +860,12 @@ export default function App() {
     if (!p.content) return;
     const sectionId = (p.sectionName && sections[p.sectionName.toLowerCase()]) || fallbackSection;
     const repo = extra?.repo || p.repo || "";
+    const jiraKey = (extra?.jira || extractJiraKey(p.content) || "").toUpperCase();
     const explicitServer = extra?.server || p.server;
     const hasAgentContext = Boolean(
       explicitServer ||
       repo ||
+      jiraKey ||
       extra?.prompt ||
       p.prompt ||
       extra?.mode === "agent" ||
@@ -877,14 +888,31 @@ export default function App() {
     if (extra?.mode === "agent" && serverId) {
       if (isTargetOnline) {
         try {
+          const sessionTitle =
+            jiraKey && !p.content.toUpperCase().includes(jiraKey)
+              ? `[${jiraKey}] ${p.content}`
+              : p.content;
+          const initialPrompt =
+            jiraKey && !(prompt || p.content).toUpperCase().includes(jiraKey)
+              ? `[Jira: ${jiraKey}] ${prompt || p.content}`
+              : prompt || p.content;
           const sid = await createAndPromptOpenCodeSession({
-            title: p.content,
+            title: sessionTitle,
             directory: resolveRepoDir(repo, serverId),
-            promptText: prompt || p.content,
+            promptText: initialPrompt,
             serverId,
             modelKey: model || undefined,
           });
           linkedSessions.push(sid);
+          if (jiraKey) {
+            void syncSessionToJiraIssue({
+              jiraKey,
+              sessionID: sid,
+              sessionTitle,
+              serverId,
+              repo,
+            });
+          }
           void syncOpenCode();
           window.setTimeout(() => void syncOpenCode(), 900);
           window.setTimeout(() => void syncOpenCode(), 2200);
@@ -906,6 +934,7 @@ export default function App() {
       model: model || undefined,
       sessions: linkedSessions,
       queued: queuedForAgent,
+      jira: jiraKey || undefined,
     });
 
     const body = (withDur: boolean) => ({
@@ -1154,9 +1183,10 @@ export default function App() {
       setExpandedId(currentTask.id);
 
       const meta = parseTaskDescription(currentTask.description);
+      const jiraKey = (meta.jira || extractJiraKey(currentTask.content) || "").toUpperCase();
       const effectiveNote = noteOverride ?? meta.note;
       const repoLabel = repoOverride ?? meta.repo;
-      const promptText = customPrompt?.trim() || meta.prompt || currentTask.content;
+      const rawPromptText = customPrompt?.trim() || meta.prompt || currentTask.content;
       const latestSid = meta.sessions[meta.sessions.length - 1];
       const existingLive = latestSid ? ocSessions.find((s) => s.id === latestSid) : undefined;
       const targetSrv = resolveServer(
@@ -1176,10 +1206,18 @@ export default function App() {
       let sid = latestSid;
       try {
         if (!sid) {
+          const sessionTitle =
+            jiraKey && !currentTask.content.toUpperCase().includes(jiraKey)
+              ? `[${jiraKey}] ${currentTask.content}`
+              : currentTask.content;
+          const initialPromptText =
+            jiraKey && !rawPromptText.toUpperCase().includes(jiraKey)
+              ? `[Jira: ${jiraKey}] ${rawPromptText}`
+              : rawPromptText;
           sid = await createAndPromptOpenCodeSession({
-            title: currentTask.content,
+            title: sessionTitle,
             directory: resolveRepoDir(repoLabel, serverId),
-            promptText,
+            promptText: initialPromptText,
             serverId,
             modelKey: modelKey || undefined,
             onSessionCreated: (createdSid) => {
@@ -1192,6 +1230,7 @@ export default function App() {
                 model: modelKey || undefined,
                 sessions: linked,
                 queued: false,
+                jira: jiraKey || undefined,
               });
               setTasks((ts) =>
                 ts.map((x) =>
@@ -1200,6 +1239,15 @@ export default function App() {
                     : x,
                 ),
               );
+              if (jiraKey) {
+                void syncSessionToJiraIssue({
+                  jiraKey,
+                  sessionID: createdSid,
+                  sessionTitle,
+                  serverId,
+                  repo: repoLabel,
+                });
+              }
               invalidateSessionSummary(createdSid);
               void syncOpenCode();
               window.setTimeout(() => void syncOpenCode(), 400);
@@ -1214,7 +1262,7 @@ export default function App() {
           window.setTimeout(() => void syncOpenCode(), 250);
           window.setTimeout(() => void syncOpenCode(), 900);
           window.setTimeout(() => void syncOpenCode(), 2000);
-          await sendOpenCodePrompt(sid, promptText, serverId);
+          await sendOpenCodePrompt(sid, rawPromptText, serverId);
         }
       } catch {
         const nextDesc = formatTaskDescription({
@@ -1225,6 +1273,7 @@ export default function App() {
           model: modelKey || undefined,
           sessions: meta.sessions,
           queued: true,
+          jira: jiraKey || undefined,
         });
         if (nextDesc !== (currentTask.description ?? "")) {
           await updateTask(currentTask.id, { description: nextDesc }).catch(() => {});
@@ -1247,6 +1296,7 @@ export default function App() {
         model: modelKey || undefined,
         sessions: nextSessions,
         queued: false,
+        jira: freshMeta.jira || jiraKey || undefined,
       });
       void syncOpenCode();
       window.setTimeout(() => void syncOpenCode(), 900);
@@ -2132,7 +2182,11 @@ function resolveTaskTriage(
   t: Task,
   ocSessions: OpenCodeLiveSession[],
 ): { triage: TriageState; liveSession?: OpenCodeLiveSession; meta: TaskMeta } {
-  const meta = parseTaskDescription(t.description);
+  const rawMeta = parseTaskDescription(t.description);
+  const meta: TaskMeta = {
+    ...rawMeta,
+    jira: rawMeta.jira || extractJiraKey(t.content) || undefined,
+  };
   const linked = meta.sessions
     .map((sid) => ocSessions.find((s) => s.id === sid))
     .filter((s): s is OpenCodeLiveSession => Boolean(s));
@@ -2156,8 +2210,263 @@ type AddExtra = {
   prompt?: string;
   note?: string;
   sessions?: string[];
+  jira?: string;
   mode?: "save" | "drive" | "agent";
 };
+
+function JiraPullStage({
+  data,
+  loading,
+  allTasks,
+  ocSessions,
+  defaultServerId,
+  onRefresh,
+  onPullIssue,
+  onSelectExistingTask,
+  onLinkSessionToExisting,
+  onClose,
+}: {
+  data: JiraPullResult | null;
+  loading: boolean;
+  allTasks: Task[];
+  ocSessions: OpenCodeLiveSession[];
+  defaultServerId: string;
+  onRefresh: () => void;
+  onPullIssue: (
+    issue: JiraAssignedIssue,
+    target: "focus" | "backlog" | "agent",
+    matchedSessionIds: string[],
+  ) => void;
+  onSelectExistingTask: (taskId: string) => void;
+  onLinkSessionToExisting: (task: Task, sessionId: string, jiraKey: string) => void;
+  onClose?: () => void;
+}) {
+  const issues = data?.issues ?? [];
+
+  const findExistingTask = (jiraKey: string): Task | undefined => {
+    const clean = jiraKey.toUpperCase();
+    return allTasks.find((t) => {
+      const m = parseTaskDescription(t.description);
+      const k = (m.jira || extractJiraKey(t.content) || "").toUpperCase();
+      return k === clean;
+    });
+  };
+
+  return (
+    <div className="rounded-xl border border-zinc-800/90 bg-zinc-950 p-5 space-y-4 shadow-sm flex-1 flex flex-col justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/80 pb-3 font-mono text-[11px]">
+        <div className="flex items-center gap-2">
+          <span className="h-2 w-2 rounded-full bg-blue-400 animate-pulse" />
+          <span className="font-semibold uppercase tracking-wider text-blue-400">
+            🎫 Assigned Jira Issues ({issues.length})
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-zinc-500">
+            {loading
+              ? `● querying Atlassian MCP on ${data?.serverName || defaultServerId}…`
+              : data?.serverName
+                ? `via ${data.serverName} MCP`
+                : "assignee = currentUser()"}
+          </span>
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={loading}
+            title="Refresh assigned Jira tickets via OpenCode Atlassian MCP"
+            className="rounded border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-[10px] text-zinc-300 hover:border-zinc-700 hover:text-zinc-100 disabled:opacity-50"
+          >
+            {loading ? "Syncing…" : "⟲ Refresh"}
+          </button>
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              title="Close Jira panel (Esc)"
+              className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+            >
+              ✕ Esc
+            </button>
+          )}
+        </div>
+      </div>
+
+      {data?.error && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-950/30 px-3.5 py-2.5 text-[12px] text-amber-300">
+          {data.error}
+        </div>
+      )}
+
+      {loading && issues.length === 0 ? (
+        <div className="py-12 text-center font-mono text-[12px] text-zinc-500 space-y-1.5">
+          <p className="text-zinc-300">
+            ● Fetching Jira issues where <code className="text-blue-300">assignee = currentUser()</code>…
+          </p>
+          <p className="text-[11px] text-zinc-600">
+            OpenCode is calling Atlassian MCP and matching active sessions by ticket key.
+          </p>
+        </div>
+      ) : issues.length === 0 ? (
+        <div className="py-10 text-center text-[13px] text-zinc-500 space-y-3">
+          <p>No open Jira issues loaded yet.</p>
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={loading}
+            className="rounded-md bg-orange-600 px-3.5 py-1.5 text-[12px] font-medium text-white hover:bg-orange-500 disabled:opacity-50"
+          >
+            🎫 Fetch My Assigned Jira Issues
+          </button>
+        </div>
+      ) : (
+        <div className="flex-1 min-h-0 overflow-y-auto pr-1 [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent]">
+          <ul className="space-y-2.5">
+            {issues.map((issue) => {
+              const existingTask = findExistingTask(issue.key);
+              const existingMeta = existingTask
+                ? parseTaskDescription(existingTask.description)
+                : null;
+              const liveMatches = findMatchingSessionsForJira(issue.key, ocSessions);
+              const matchedIds = Array.from(
+                new Set([
+                  ...(issue.matchedSessionIds ?? []),
+                  ...liveMatches.map((s) => s.id),
+                ]),
+              );
+              const unlinkedMatch = existingTask
+                ? matchedIds.find((sid) => !existingMeta?.sessions.includes(sid))
+                : undefined;
+
+              return (
+                <li
+                  key={issue.key}
+                  className="group flex flex-col gap-2 rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-3.5 transition-colors hover:border-zinc-700 hover:bg-zinc-900/70"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 space-y-1.5">
+                      <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
+                        {issue.url ? (
+                          <a
+                            href={issue.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="rounded border border-blue-500/40 bg-blue-950/50 px-1.5 py-0.5 font-semibold text-blue-300 hover:border-blue-400"
+                            title="Open issue in Jira"
+                          >
+                            {issue.key} ↗
+                          </a>
+                        ) : (
+                          <span className="rounded border border-blue-500/40 bg-blue-950/50 px-1.5 py-0.5 font-semibold text-blue-300">
+                            {issue.key}
+                          </span>
+                        )}
+                        <span className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-zinc-300">
+                          {issue.status}
+                        </span>
+                        {issue.priority && (
+                          <span className="rounded border border-zinc-800 bg-zinc-900/80 px-1.5 py-0.5 text-zinc-400">
+                            {issue.priority}
+                          </span>
+                        )}
+                        {issue.suggestedRepo && (
+                          <span className="rounded border border-zinc-800 bg-zinc-900/80 px-1.5 py-0.5 text-zinc-400">
+                            @{shortRepo(issue.suggestedRepo)}
+                          </span>
+                        )}
+                        {matchedIds.map((sid) => {
+                          const live = ocSessions.find((s) => s.id === sid);
+                          return (
+                            <span
+                              key={sid}
+                              className="inline-flex items-center gap-1 rounded border border-orange-500/40 bg-orange-950/40 px-1.5 py-0.5 text-orange-300"
+                              title={
+                                live
+                                  ? `Matched OpenCode session: ${live.title} (${live.serverId})`
+                                  : `Matched OpenCode session ${sid}`
+                              }
+                            >
+                              🔗 {sid.slice(0, 10)}
+                              {live ? ` · ${live.serverId}` : ""}
+                            </span>
+                          );
+                        })}
+                      </div>
+                      <p className="text-[14px] font-medium leading-snug text-zinc-100">
+                        {issue.summary}
+                      </p>
+                      {issue.description && (
+                        <p className="line-clamp-2 text-[12px] text-zinc-400">
+                          {issue.description}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="flex shrink-0 flex-wrap items-center gap-1.5 pt-0.5 font-mono text-[11px]">
+                      {existingTask ? (
+                        <>
+                          {unlinkedMatch && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onLinkSessionToExisting(existingTask, unlinkedMatch, issue.key)
+                              }
+                              title={`Link session ${unlinkedMatch} to this task and Jira ticket`}
+                              className="rounded border border-orange-500/50 bg-orange-950/60 px-2.5 py-1 font-medium text-orange-300 hover:border-orange-500"
+                            >
+                              🔗 Link {unlinkedMatch.slice(0, 8)}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => onSelectExistingTask(existingTask.id)}
+                            className="rounded border border-emerald-500/40 bg-emerald-950/40 px-2.5 py-1 text-emerald-300 hover:border-emerald-400"
+                          >
+                            ✓ Open Task
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => onPullIssue(issue, "agent", matchedIds)}
+                            title={
+                              matchedIds.length > 0
+                                ? `Pull into Focus and link session ${matchedIds[0].slice(0, 10)}`
+                                : `Pull into Focus and start OpenCode agent on ${defaultServerId}`
+                            }
+                            className="rounded border border-orange-500/50 bg-orange-950/60 px-2.5 py-1 font-medium text-orange-300 hover:border-orange-500 hover:bg-orange-900/80"
+                          >
+                            {matchedIds.length > 0 ? "🔗 Pull & Link" : "◈ Run Agent"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onPullIssue(issue, "focus", matchedIds)}
+                            title="Pull into Focus queue"
+                            className="rounded border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-zinc-300 hover:border-zinc-700 hover:text-zinc-100"
+                          >
+                            🎯 Focus
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onPullIssue(issue, "backlog", matchedIds)}
+                            title="Add to Backlog queue"
+                            className="rounded border border-zinc-800 bg-zinc-900 px-2 py-1 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                          >
+                            ＋ Backlog
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function TriageStage({
   suggestions,
@@ -2522,6 +2831,10 @@ function FocusView({
   const [triageLoading, setTriageLoading] = useState(false);
   const [triageData, setTriageData] = useState<TriageResult | null>(null);
 
+  const [jiraOpen, setJiraOpen] = useState(false);
+  const [jiraLoading, setJiraLoading] = useState(false);
+  const [jiraData, setJiraData] = useState<JiraPullResult | null>(() => loadCachedJiraIssues());
+
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
     const saved = Number(load("tb_sidebar_width", 420));
     return saved >= 280 && saved <= 760 ? saved : 420;
@@ -2533,6 +2846,71 @@ function FocusView({
   useEffect(() => {
     if (expandedId) setSelectedId(expandedId);
   }, [expandedId]);
+
+  const runJiraPull = useCallback(async () => {
+    setJiraLoading(true);
+    try {
+      const res = await fetchAssignedJiraIssues({
+        serverId: defaultServerId,
+        liveSessions: ocSessions,
+        availableRepos: ocProjectsByServer?.[defaultServerId],
+      });
+      setJiraData(res);
+    } catch {
+      /* ignore */
+    } finally {
+      setJiraLoading(false);
+    }
+  }, [defaultServerId, ocSessions, ocProjectsByServer]);
+
+  const handlePullJiraIssue = (
+    issue: JiraAssignedIssue,
+    target: "focus" | "backlog" | "agent",
+    matchedSessionIds: string[],
+  ) => {
+    const title = `[${issue.key}] ${issue.summary}`;
+    const noteParts = [issue.url, issue.description].filter(Boolean);
+    const hasMatchedSession = matchedSessionIds.length > 0;
+    onAdd(title, target === "backlog" ? undefined : focusId, {
+      jira: issue.key,
+      repo: issue.suggestedRepo || undefined,
+      server: defaultServerId,
+      note: noteParts.join("\n"),
+      prompt: `Work on Jira issue ${issue.key}: ${issue.summary}`,
+      sessions: matchedSessionIds,
+      mode: target === "agent" && !hasMatchedSession ? "agent" : "save",
+    });
+    if (hasMatchedSession) {
+      void syncSessionToJiraIssue({
+        jiraKey: issue.key,
+        sessionID: matchedSessionIds[0],
+        sessionTitle: title,
+        serverId: defaultServerId,
+        repo: issue.suggestedRepo,
+      });
+    }
+  };
+
+  const handleLinkJiraSessionToExisting = (task: Task, sessionId: string, jiraKey: string) => {
+    const meta = parseTaskDescription(task.description);
+    const nextSessions = Array.from(new Set([...meta.sessions, sessionId]));
+    const picked = ocSessions.find((s) => s.id === sessionId);
+    const nextDesc = formatTaskDescription({
+      ...meta,
+      jira: meta.jira || jiraKey,
+      server: picked?.serverId || meta.server || defaultServerId,
+      repo: meta.repo || picked?.repoShort || "",
+      sessions: nextSessions,
+    });
+    void onUpdate(task.id, { description: nextDesc });
+    void syncSessionToJiraIssue({
+      jiraKey,
+      sessionID: sessionId,
+      sessionTitle: task.content,
+      serverId: picked?.serverId || meta.server || defaultServerId,
+      repo: meta.repo || picked?.repoShort,
+    });
+  };
 
   const runTriage = useCallback(async () => {
     if (backlogTasks.length === 0) return;
@@ -2715,6 +3093,8 @@ function FocusView({
     null;
 
   const selectTask = (id: string, openMobile = false) => {
+    setTriageOpen(false);
+    setJiraOpen(false);
     setSelectedId(id);
     if (expandedId !== id) onToggle(id);
     if (openMobile) setMobileShowStage(true);
@@ -2812,6 +3192,11 @@ function FocusView({
             </div>
 
             <div className="flex shrink-0 items-center gap-1.5">
+              {meta.jira && (
+                <span className="rounded border border-blue-500/30 bg-blue-950/40 px-1.5 py-0.2 font-mono text-[10px] text-blue-300">
+                  {meta.jira}
+                </span>
+              )}
               {targetBadge && <span className="text-zinc-500">{targetBadge}</span>}
               {triage === "working" && (
                 <button
@@ -3064,11 +3449,25 @@ function FocusView({
                   Ready in Focus
                 </h2>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTriageOpen(false);
+                    setJiraOpen(true);
+                    setMobileShowStage(true);
+                    if (!jiraData?.issues?.length && !jiraLoading) void runJiraPull();
+                  }}
+                  className="inline-flex items-center gap-1 rounded border border-blue-500/40 bg-zinc-900/80 px-2 py-0.5 font-mono text-[10px] font-medium text-blue-400 hover:border-blue-500 hover:text-blue-300"
+                  title="Pull assigned Jira issues via Atlassian MCP"
+                >
+                  🎫 Jira
+                </button>
                 {backlogTasks.length > 0 && (
                   <button
                     type="button"
                     onClick={() => {
+                      setJiraOpen(false);
                       setTriageOpen(true);
                       setMobileShowStage(true);
                       if (!triageData && !triageLoading) void runTriage();
@@ -3230,15 +3629,16 @@ function FocusView({
         {/* RIGHT MAIN STAGE WORKSPACE */}
         <div
           className={`min-w-0 flex-1 min-h-0 flex flex-col md:h-full ${
-            mobileShowStage && (selectedTask || triageOpen) ? "block" : "hidden md:flex"
+            mobileShowStage && (selectedTask || triageOpen || jiraOpen) ? "block" : "hidden md:flex"
           }`}
         >
-          {mobileShowStage && (selectedTask || triageOpen) && (
+          {mobileShowStage && (selectedTask || triageOpen || jiraOpen) && (
             <button
               type="button"
               onClick={() => {
                 setMobileShowStage(false);
                 setTriageOpen(false);
+                setJiraOpen(false);
               }}
               className="mb-3 inline-flex items-center gap-1.5 text-[13px] font-medium text-orange-400 md:hidden"
             >
@@ -3247,7 +3647,23 @@ function FocusView({
             </button>
           )}
 
-          {triageOpen && backlogTasks.length > 0 ? (
+          {jiraOpen ? (
+            <JiraPullStage
+              data={jiraData}
+              loading={jiraLoading}
+              allTasks={[...focusTasks, ...bufferTasks, ...backlogTasks]}
+              ocSessions={ocSessions}
+              defaultServerId={defaultServerId}
+              onRefresh={runJiraPull}
+              onPullIssue={handlePullJiraIssue}
+              onSelectExistingTask={(taskId) => {
+                setJiraOpen(false);
+                selectTask(taskId, true);
+              }}
+              onLinkSessionToExisting={handleLinkJiraSessionToExisting}
+              onClose={() => setJiraOpen(false)}
+            />
+          ) : triageOpen && backlogTasks.length > 0 ? (
             <TriageStage
               suggestions={triageData?.suggestions ?? []}
               loading={triageLoading}
@@ -3451,11 +3867,83 @@ function BacklogView({
   const [triageLoading, setTriageLoading] = useState(false);
   const [triageData, setTriageData] = useState<TriageResult | null>(null);
 
+  const [jiraOpen, setJiraOpen] = useState(false);
+  const [jiraLoading, setJiraLoading] = useState(false);
+  const [jiraData, setJiraData] = useState<JiraPullResult | null>(() => loadCachedJiraIssues());
+
   useEffect(() => {
     if (expandedId && backlogTasks.some((t) => t.id === expandedId)) {
       setSelectedId(expandedId);
     }
   }, [expandedId, backlogTasks]);
+
+  const runJiraPull = useCallback(async () => {
+    setJiraLoading(true);
+    try {
+      const res = await fetchAssignedJiraIssues({
+        serverId: defaultServerId,
+        liveSessions: ocSessions,
+        availableRepos: ocProjectsByServer?.[defaultServerId],
+      });
+      setJiraData(res);
+    } catch {
+      /* ignore */
+    } finally {
+      setJiraLoading(false);
+    }
+  }, [defaultServerId, ocSessions, ocProjectsByServer]);
+
+  const handlePullJiraIssue = (
+    issue: JiraAssignedIssue,
+    target: "focus" | "backlog" | "agent",
+    matchedSessionIds: string[],
+  ) => {
+    const title = `[${issue.key}] ${issue.summary}`;
+    const noteParts = [issue.url, issue.description].filter(Boolean);
+    const hasMatchedSession = matchedSessionIds.length > 0;
+    onAdd(
+      `${title}${target === "focus" ? " #Focus" : ""}`,
+      {
+        jira: issue.key,
+        repo: issue.suggestedRepo || undefined,
+        server: defaultServerId,
+        note: noteParts.join("\n"),
+        prompt: `Work on Jira issue ${issue.key}: ${issue.summary}`,
+        sessions: matchedSessionIds,
+        mode: target === "agent" && !hasMatchedSession ? "agent" : "save",
+      },
+    );
+    if (hasMatchedSession) {
+      void syncSessionToJiraIssue({
+        jiraKey: issue.key,
+        sessionID: matchedSessionIds[0],
+        sessionTitle: title,
+        serverId: defaultServerId,
+        repo: issue.suggestedRepo,
+      });
+    }
+  };
+
+  const handleLinkJiraSessionToExisting = (task: Task, sessionId: string, jiraKey: string) => {
+    const meta = parseTaskDescription(task.description);
+    const nextSessions = Array.from(new Set([...meta.sessions, sessionId]));
+    const picked = ocSessions.find((s) => s.id === sessionId);
+    const nextDesc = formatTaskDescription({
+      ...meta,
+      jira: meta.jira || jiraKey,
+      server: picked?.serverId || meta.server || defaultServerId,
+      repo: meta.repo || picked?.repoShort || "",
+      sessions: nextSessions,
+    });
+    void onUpdate(task.id, { description: nextDesc });
+    void syncSessionToJiraIssue({
+      jiraKey,
+      sessionID: sessionId,
+      sessionTitle: task.content,
+      serverId: picked?.serverId || meta.server || defaultServerId,
+      repo: meta.repo || picked?.repoShort,
+    });
+  };
 
   const runTriage = useCallback(async () => {
     if (backlogTasks.length === 0) return;
@@ -3511,6 +3999,7 @@ function BacklogView({
 
   const selectTask = (id: string, openMobile = false) => {
     setTriageOpen(false);
+    setJiraOpen(false);
     setSelectedId(id);
     if (expandedId !== id) onToggle(id);
     if (openMobile) setMobileShowStage(true);
@@ -3645,6 +4134,11 @@ function BacklogView({
             </div>
 
             <div className="flex shrink-0 items-center gap-1.5">
+              {meta.jira && (
+                <span className="rounded border border-blue-500/30 bg-blue-950/40 px-1.5 py-0.2 font-mono text-[10px] text-blue-300">
+                  {meta.jira}
+                </span>
+              )}
               {targetBadge && <span className="text-zinc-500">{targetBadge}</span>}
               {onMove && (
                 <button
@@ -3781,11 +4275,25 @@ function BacklogView({
                   Backlog Queue
                 </h2>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTriageOpen(false);
+                    setJiraOpen(true);
+                    setMobileShowStage(true);
+                    if (!jiraData?.issues?.length && !jiraLoading) void runJiraPull();
+                  }}
+                  className="inline-flex items-center gap-1 rounded border border-blue-500/40 bg-zinc-900/80 px-2 py-0.5 font-mono text-[10px] font-medium text-blue-400 hover:border-blue-500 hover:text-blue-300"
+                  title="Pull assigned Jira issues via Atlassian MCP"
+                >
+                  🎫 Jira
+                </button>
                 {backlogTasks.length > 0 && (
                   <button
                     type="button"
                     onClick={() => {
+                      setJiraOpen(false);
                       setTriageOpen(true);
                       setMobileShowStage(true);
                       if (!triageData && !triageLoading) void runTriage();
@@ -3859,15 +4367,16 @@ function BacklogView({
         {/* RIGHT MAIN STAGE WORKSPACE */}
         <div
           className={`min-w-0 flex-1 min-h-0 flex flex-col md:h-full ${
-            mobileShowStage && (selectedTask || triageOpen) ? "block" : "hidden md:flex"
+            mobileShowStage && (selectedTask || triageOpen || jiraOpen) ? "block" : "hidden md:flex"
           }`}
         >
-          {mobileShowStage && (selectedTask || triageOpen) && (
+          {mobileShowStage && (selectedTask || triageOpen || jiraOpen) && (
             <button
               type="button"
               onClick={() => {
                 setMobileShowStage(false);
                 setTriageOpen(false);
+                setJiraOpen(false);
               }}
               className="mb-3 inline-flex items-center gap-1.5 text-[13px] font-medium text-orange-400 md:hidden"
             >
@@ -3875,7 +4384,23 @@ function BacklogView({
             </button>
           )}
 
-          {triageOpen && backlogTasks.length > 0 ? (
+          {jiraOpen ? (
+            <JiraPullStage
+              data={jiraData}
+              loading={jiraLoading}
+              allTasks={[...focusTasks, ...backlogTasks]}
+              ocSessions={ocSessions}
+              defaultServerId={defaultServerId}
+              onRefresh={runJiraPull}
+              onPullIssue={handlePullJiraIssue}
+              onSelectExistingTask={(taskId) => {
+                setJiraOpen(false);
+                selectTask(taskId, true);
+              }}
+              onLinkSessionToExisting={handleLinkJiraSessionToExisting}
+              onClose={() => setJiraOpen(false)}
+            />
+          ) : triageOpen && backlogTasks.length > 0 ? (
             <TriageStage
               suggestions={triageData?.suggestions ?? []}
               loading={triageLoading}
@@ -4980,6 +5505,10 @@ function RowEditor({
   const [model, setModel] = useState(liveSession?.modelKey || initialMeta.model || "");
   const [sessions, setSessions] = useState<string[]>(initialMeta.sessions);
   const [queued, setQueued] = useState<boolean>(Boolean(initialMeta.queued));
+  const [jira, setJira] = useState<string>(
+    initialMeta.jira || extractJiraKey(t.content) || "",
+  );
+  const [jiraSyncState, setJiraSyncState] = useState<"" | "syncing" | "synced" | "error">("");
   const [saveState, setSaveState] = useState<"" | "saving" | "saved">("");
   const [confirming, setConfirming] = useState(false);
   const [showMeta, setShowMeta] = useState(false);
@@ -5033,13 +5562,44 @@ function RowEditor({
     if (!userChangedRepoRef.current && initialMeta.repo && !repo) {
       setRepo(initialMeta.repo);
     }
+    if (initialMeta.jira && !jira) {
+      setJira(initialMeta.jira);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialMeta]);
 
+  const effectiveJira = (jira || extractJiraKey(title) || "").toUpperCase();
+  const matchingJiraSessions = useMemo(
+    () => findMatchingSessionsForJira(effectiveJira, ocSessions),
+    [effectiveJira, ocSessions],
+  );
+  const unlinkedJiraSession = useMemo(
+    () => matchingJiraSessions.find((s) => !sessions.includes(s.id)),
+    [matchingJiraSessions, sessions],
+  );
+
   const titleLive = useRef(title);
   titleLive.current = title;
-  const metaLive = useRef<TaskMeta>({ note, prompt, repo, server, model, sessions, queued });
-  metaLive.current = { note, prompt, repo, server, model, sessions, queued };
+  const metaLive = useRef<TaskMeta>({
+    note,
+    prompt,
+    repo,
+    server,
+    model,
+    sessions,
+    queued,
+    jira: effectiveJira || undefined,
+  });
+  metaLive.current = {
+    note,
+    prompt,
+    repo,
+    server,
+    model,
+    sessions,
+    queued,
+    jira: effectiveJira || undefined,
+  };
   const tLive = useRef(t);
   tLive.current = t;
   const savedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -6126,6 +6686,64 @@ function RowEditor({
                     {activeSid.slice(0, 10)} ↗
                   </button>
                 )}
+                {effectiveJira && (
+                  <span className="inline-flex items-center gap-1 rounded border border-blue-500/40 bg-blue-950/40 px-1.5 py-0.5 text-[11px] font-medium text-blue-300">
+                    🎫 {effectiveJira}
+                  </span>
+                )}
+                {effectiveJira && unlinkedJiraSession && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      unlinkedExplicitlyRef.current = false;
+                      const next = Array.from(new Set([...sessions, unlinkedJiraSession.id]));
+                      setSessions(next);
+                      if (unlinkedJiraSession.serverId) setServer(unlinkedJiraSession.serverId);
+                      if (unlinkedJiraSession.repoShort && !repo) {
+                        setRepo(unlinkedJiraSession.repoShort);
+                      }
+                      metaLive.current = {
+                        ...metaLive.current,
+                        sessions: next,
+                        server: unlinkedJiraSession.serverId || server,
+                        repo: repo || unlinkedJiraSession.repoShort || "",
+                      };
+                      flush();
+                    }}
+                    title={`Auto-matched OpenCode session "${unlinkedJiraSession.title}" (${unlinkedJiraSession.serverId})`}
+                    className="inline-flex items-center gap-1 rounded border border-orange-500/50 bg-orange-950/50 px-2 py-0.5 text-[11px] font-medium text-orange-300 hover:border-orange-400"
+                  >
+                    🔗 Link {unlinkedJiraSession.id.slice(0, 10)}
+                  </button>
+                )}
+                {effectiveJira && activeSid && (
+                  <button
+                    type="button"
+                    disabled={jiraSyncState === "syncing"}
+                    onClick={async () => {
+                      setJiraSyncState("syncing");
+                      const res = await syncSessionToJiraIssue({
+                        jiraKey: effectiveJira,
+                        sessionID: activeSid,
+                        sessionTitle: title,
+                        serverId: server || defaultServerId,
+                        repo,
+                      });
+                      setJiraSyncState(res.ok ? "synced" : "error");
+                      window.setTimeout(() => setJiraSyncState(""), 3000);
+                    }}
+                    title={`Link OpenCode session ${activeSid} onto Jira ticket ${effectiveJira} via Atlassian MCP`}
+                    className="rounded border border-blue-500/30 bg-blue-950/30 px-2 py-0.5 text-[11px] text-blue-300 hover:border-blue-400 disabled:opacity-50"
+                  >
+                    {jiraSyncState === "syncing"
+                      ? "Linking to Jira…"
+                      : jiraSyncState === "synced"
+                        ? `✓ Linked in ${effectiveJira}`
+                        : jiraSyncState === "error"
+                          ? "⚠ Retry Jira Link"
+                          : "🔗 Sync to Jira"}
+                  </button>
+                )}
               </div>
 
               <div className="flex shrink-0 items-center gap-2">
@@ -6579,6 +7197,24 @@ function RowEditor({
               <div className="space-y-2 border-t border-zinc-800/60 pt-2.5 text-[12px]">
                 <div className="flex flex-wrap items-center gap-3">
                   <label className="flex items-center gap-1.5 text-zinc-400">
+                    <span className="text-zinc-500">Jira</span>
+                    <input
+                      type="text"
+                      value={jira}
+                      placeholder={extractJiraKey(title) || "DEVOPS-123"}
+                      onChange={(e) => {
+                        const val = e.target.value.toUpperCase().trim();
+                        setJira(val);
+                        metaLive.current = {
+                          ...metaLive.current,
+                          jira: val || extractJiraKey(titleLive.current) || undefined,
+                        };
+                        scheduleFlush();
+                      }}
+                      className="w-28 rounded border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-[11px] text-blue-300 outline-none placeholder:text-zinc-600 focus:border-blue-500/60"
+                    />
+                  </label>
+                  <label className="flex items-center gap-1.5 text-zinc-400">
                     <span className="text-zinc-500">Session</span>
                     <select
                       value={activeSid}
@@ -6593,6 +7229,15 @@ function RowEditor({
                         if (picked?.serverId) setServer(picked.serverId);
                         if (picked?.modelKey) setModel(picked.modelKey);
                         scheduleFlush();
+                        if (val && effectiveJira) {
+                          void syncSessionToJiraIssue({
+                            jiraKey: effectiveJira,
+                            sessionID: val,
+                            sessionTitle: titleLive.current,
+                            serverId: picked?.serverId || server || defaultServerId,
+                            repo: repo || picked?.repoShort,
+                          });
+                        }
                       }}
                       className="max-w-52 truncate rounded border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-[11px] text-zinc-300 outline-none"
                     >
@@ -6602,11 +7247,14 @@ function RowEditor({
                           [{server}] {activeSid.slice(0, 10)}
                         </option>
                       )}
-                      {ocSessions.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          [{s.serverId}] {s.id.slice(0, 10)} · {s.title.slice(0, 22)}
-                        </option>
-                      ))}
+                      {ocSessions.map((s) => {
+                        const isMatch = matchingJiraSessions.some((m) => m.id === s.id);
+                        return (
+                          <option key={s.id} value={s.id}>
+                            {isMatch ? `★ [${effectiveJira}] ` : ""}[{s.serverId}] {s.id.slice(0, 10)} · {s.title.slice(0, 22)}
+                          </option>
+                        );
+                      })}
                     </select>
                   </label>
 
