@@ -647,6 +647,8 @@ export type OpenCodeFormField = {
   title?: string;
   description?: string;
   type: string;
+  custom?: boolean;
+  required?: boolean;
   options?: OpenCodeFormOption[];
 };
 
@@ -1276,36 +1278,109 @@ export async function switchOpenCodeSessionModel(
   if (!res.ok) throw new Error(`Switch model on ${srv.name} failed: ${res.status}`);
 }
 
+export async function cancelOpenCodeForm(
+  sessionID: string,
+  formID: string,
+  serverId?: string,
+  message?: string,
+): Promise<void> {
+  const srv = resolveServer(serverId);
+  const base = resolveOpenCodeBase(srv.endpoint);
+  const query = message ? `?message=${encodeURIComponent(message)}` : "";
+  await fetch(`${base}/session/${sessionID}/form/${formID}${query}`, {
+    method: "DELETE",
+    headers: buildServerHeaders(srv),
+  }).catch(() => {});
+}
+
 export async function sendOpenCodePrompt(
   sessionID: string,
   text: string,
   serverId?: string,
+  opts?: {
+    pendingFormId?: string;
+    pendingPermissionId?: string;
+  },
 ): Promise<void> {
   const srv = resolveServer(serverId);
   const base = resolveOpenCodeBase(srv.endpoint);
+  const headers = buildServerHeaders(srv);
+
+  // Discover any pending forms on this session so steering while a question is open never deadlocks
+  const formIds = new Set<string>();
+  if (opts?.pendingFormId) formIds.add(opts.pendingFormId);
+  try {
+    const formRes = await fetch(`${base}/session/${sessionID}/form`, { headers });
+    if (formRes.ok) {
+      const formJson = (await formRes.json()) as { data?: Array<{ id?: string }> };
+      for (const f of formJson.data ?? []) {
+        if (f?.id) formIds.add(f.id);
+      }
+    }
+  } catch {
+    /* ignore form discovery errors */
+  }
+
+  // 1. Admit the steer prompt to the session inbox first so the runner drains it immediately when the tool unblocks
   const res = await fetch(`${base}/session/${sessionID}/prompt`, {
     method: "POST",
     headers: buildServerHeaders(srv, true),
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, delivery: "steer" }),
   });
   if (!res.ok) throw new Error(`Prompt on ${srv.name} failed: ${res.status}`);
+
+  // 2. If the session was blocked on a pending question form, cancel the form so the agent unblocks and processes the steer
+  if (formIds.size > 0) {
+    await Promise.all(
+      Array.from(formIds).map((fid) =>
+        fetch(`${base}/session/${sessionID}/form/${fid}`, {
+          method: "DELETE",
+          headers,
+        }).catch(() => {}),
+      ),
+    );
+  }
+
+  // 3. If the session was blocked on a pending permission request, reject it so the steer can proceed
+  if (opts?.pendingPermissionId) {
+    await replyOpenCodePermission(
+      sessionID,
+      opts.pendingPermissionId,
+      "reject",
+      serverId,
+    ).catch(() => {});
+  }
 }
 
-// Reply to an OpenCode question form (when the agent asks you to pick an option)
+// Reply to an OpenCode question form (when the agent asks you to pick one or more options, optionally with extra steer instructions)
 export async function replyOpenCodeForm(
   sessionID: string,
   formID: string,
-  fieldKey: string,
-  value: string | string[],
+  fieldKeyOrAnswers: string | Record<string, string | string[]>,
+  value?: string | string[],
   serverId?: string,
+  steerPrompt?: string,
 ): Promise<void> {
   const srv = resolveServer(serverId);
   const base = resolveOpenCodeBase(srv.endpoint);
+  const answer: Record<string, string | string[]> =
+    typeof fieldKeyOrAnswers === "string"
+      ? { [fieldKeyOrAnswers]: value ?? "" }
+      : fieldKeyOrAnswers;
+
+  if (steerPrompt?.trim()) {
+    await fetch(`${base}/session/${sessionID}/prompt`, {
+      method: "POST",
+      headers: buildServerHeaders(srv, true),
+      body: JSON.stringify({ text: steerPrompt.trim(), delivery: "steer" }),
+    }).catch(() => {});
+  }
+
   const res = await fetch(`${base}/session/${sessionID}/form/${formID}/reply`, {
     method: "POST",
     headers: buildServerHeaders(srv, true),
     body: JSON.stringify({
-      answer: { [fieldKey]: value },
+      answer,
     }),
   });
   if (!res.ok) throw new Error(`Form reply on ${srv.name} failed: ${res.status}`);
@@ -1336,9 +1411,28 @@ export async function interruptOpenCodeSession(
 ): Promise<void> {
   const srv = resolveServer(serverId);
   const base = resolveOpenCodeBase(srv.endpoint);
+  const headers = buildServerHeaders(srv);
+  try {
+    const formRes = await fetch(`${base}/session/${sessionID}/form`, { headers });
+    if (formRes.ok) {
+      const formJson = (await formRes.json()) as { data?: Array<{ id?: string }> };
+      await Promise.all(
+        (formJson.data ?? []).map((f) =>
+          f?.id
+            ? fetch(`${base}/session/${sessionID}/form/${f.id}`, {
+                method: "DELETE",
+                headers,
+              }).catch(() => {})
+            : Promise.resolve(),
+        ),
+      );
+    }
+  } catch {
+    /* ignore */
+  }
   await fetch(`${base}/session/${sessionID}/interrupt`, {
     method: "POST",
-    headers: buildServerHeaders(srv),
+    headers,
   }).catch(() => {});
 }
 
@@ -1487,8 +1581,13 @@ export async function fetchOpenCodeSessionSummary(
               oldString?: string;
               newString?: string;
               content?: string;
+              questions?: Array<{
+                header?: string;
+                question?: string;
+              }>;
             };
             metadata?: {
+              answers?: string[][];
               files?: Array<{
                 file?: string;
                 patch?: string;
@@ -1582,7 +1681,25 @@ export async function fetchOpenCodeSessionSummary(
           }
 
           const inp = part.state?.input;
+          const questionDetail =
+            part.name === "question" && Array.isArray(inp?.questions)
+              ? (() => {
+                  const ans = part.state?.metadata?.answers;
+                  const picked = Array.isArray(ans)
+                    ? ans.flatMap((a) => (Array.isArray(a) ? a : [])).filter(Boolean)
+                    : [];
+                  const headers = inp.questions
+                    .map((q) => q.header || q.question || "")
+                    .filter(Boolean)
+                    .join(", ");
+                  if (picked.length > 0) {
+                    return `${headers ? `${headers} → ` : ""}${picked.join(", ")}`;
+                  }
+                  return headers;
+                })()
+              : "";
           const rawDetail =
+            questionDetail ||
             inp?.command?.replace(/\s+/g, " ").trim() ||
             (inp?.path && inp?.pattern
               ? `${inp.pattern} in ${shortFilePath(inp.path)}`

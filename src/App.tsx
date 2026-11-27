@@ -47,6 +47,7 @@ import {
   type JiraAssignedIssue,
   type JiraPullResult,
   type OpenCodeConfig,
+  type OpenCodeFormRequest,
   type OpenCodeLiveSession,
   type OpenCodeModelOption,
   type OpenCodeRepo,
@@ -104,6 +105,7 @@ type Task = {
   id: string;
   content: string;
   priority: number; // 4 = highest
+  project_id?: string | null;
   section_id?: string | null;
   description?: string | null;
   due?: { datetime?: string; date: string } | null;
@@ -1258,11 +1260,22 @@ export default function App() {
           if (modelOverride && modelOverride !== existingLive?.modelKey) {
             await switchOpenCodeSessionModel(sid, modelOverride, serverId).catch(() => {});
           }
+          // Optimistically mark session as running and clear any pending question/permission
+          setOcSessions((prev) =>
+            prev.map((s) =>
+              s.id === sid
+                ? { ...s, status: "running", form: undefined, permission: undefined }
+                : s,
+            ),
+          );
           invalidateSessionSummary(sid);
           window.setTimeout(() => void syncOpenCode(), 250);
           window.setTimeout(() => void syncOpenCode(), 900);
           window.setTimeout(() => void syncOpenCode(), 2000);
-          await sendOpenCodePrompt(sid, rawPromptText, serverId);
+          await sendOpenCodePrompt(sid, rawPromptText, serverId, {
+            pendingFormId: existingLive?.form?.id,
+            pendingPermissionId: existingLive?.permission?.id,
+          });
         }
       } catch {
         const nextDesc = formatTaskDescription({
@@ -1443,9 +1456,18 @@ export default function App() {
   const stopTaskSession = async (t: Task) => {
     const meta = parseTaskDescription(t.description);
     const running = ocSessions.filter(
-      (s) => meta.sessions.includes(s.id) && s.status === "running",
+      (s) =>
+        meta.sessions.includes(s.id) &&
+        (s.status === "running" || s.status === "question"),
     );
     if (running.length === 0) return;
+    setOcSessions((prev) =>
+      prev.map((s) =>
+        running.some((r) => r.id === s.id)
+          ? { ...s, status: "idle", form: undefined, permission: undefined }
+          : s,
+      ),
+    );
     for (const s of running) {
       await interruptOpenCodeSession(s.id, s.serverId);
       invalidateSessionSummary(s.id);
@@ -1454,17 +1476,70 @@ export default function App() {
     showToast(`Stopped agent on ${running[0].serverId}`);
   };
 
-  // Answer pending OpenCode question / option picker inline
-  const answerFormOption = async (t: Task, fieldKey: string, value: string, label: string) => {
+  // Answer pending OpenCode question / option picker inline (supports single option, multi-question map, multiselect, and optional steer text)
+  const answerFormOption = async (
+    t: Task,
+    fieldKeyOrAnswers: string | Record<string, string | string[]>,
+    value?: string | string[],
+    label?: string,
+    steerPrompt?: string,
+  ) => {
     const meta = parseTaskDescription(t.description);
     const live = ocSessions.find((s) => meta.sessions.includes(s.id) && s.form);
-    if (!live?.form) return;
+    if (!live?.form) {
+      if (steerPrompt?.trim()) {
+        await handToAgent(t, steerPrompt.trim(), live?.serverId || meta.server);
+      }
+      return;
+    }
+    const formId = live.form.id;
+    const normalizedAnswers: Record<string, string | string[]> =
+      typeof fieldKeyOrAnswers === "string"
+        ? (() => {
+            const field = live.form?.fields.find((f) => f.key === fieldKeyOrAnswers);
+            const rawVal = value ?? "";
+            const finalVal =
+              field?.type === "multiselect" && !Array.isArray(rawVal)
+                ? [String(rawVal)]
+                : rawVal;
+            return { [fieldKeyOrAnswers]: finalVal };
+          })()
+        : Object.fromEntries(
+            Object.entries(fieldKeyOrAnswers).map(([k, v]) => {
+              const field = live.form?.fields.find((f) => f.key === k);
+              if (field?.type === "multiselect" && !Array.isArray(v)) {
+                return [k, [String(v)]];
+              }
+              return [k, v];
+            }),
+          );
+
+    // Optimistically clear pending form and mark session running immediately
+    setOcSessions((prev) =>
+      prev.map((s) =>
+        s.id === live.id ? { ...s, status: "running", form: undefined } : s,
+      ),
+    );
     try {
-      await replyOpenCodeForm(live.id, live.form.id, fieldKey, value, live.serverId);
+      await replyOpenCodeForm(
+        live.id,
+        formId,
+        normalizedAnswers,
+        undefined,
+        live.serverId,
+        steerPrompt,
+      );
       invalidateSessionSummary(live.id);
-      syncOpenCode();
-      showToast(`Selected "${label}" on ${live.serverId}`);
+      void syncOpenCode();
+      window.setTimeout(() => void syncOpenCode(), 400);
+      window.setTimeout(() => void syncOpenCode(), 1200);
+      showToast(
+        steerPrompt?.trim()
+          ? `Answered & steered on ${live.serverId}`
+          : `Selected "${label || "answer"}" on ${live.serverId}`,
+      );
     } catch {
+      void syncOpenCode();
       showToast("Couldn't submit option to OpenCode");
     }
   };
@@ -1475,10 +1550,10 @@ export default function App() {
     if (drivingTaskId === t.id) setDrivingTaskId(null);
     const meta = parseTaskDescription(t.description);
 
-    // If any linked OpenCode session is still running, interrupt it so it stops burning tokens
+    // If any linked OpenCode session is still running or blocked on a question, interrupt it so it stops burning tokens
     for (const sid of meta.sessions) {
       const live = ocSessions.find((s) => s.id === sid);
-      if (live?.status === "running") {
+      if (live?.status === "running" || live?.status === "question") {
         interruptOpenCodeSession(sid, live.serverId);
       }
     }
@@ -2805,7 +2880,13 @@ function FocusView({
     note?: string,
   ) => void;
   onApprove: (t: Task, decision?: "once" | "always" | "reject") => void;
-  onAnswerForm: (t: Task, fieldKey: string, value: string, label: string) => void;
+  onAnswerForm: (
+    t: Task,
+    fieldKeyOrAnswers: string | Record<string, string | string[]>,
+    value?: string | string[],
+    label?: string,
+    steerPrompt?: string,
+  ) => void;
   onInterrupt: (t: Task) => void;
   onTrackOcSession: (s: OpenCodeLiveSession) => void;
   onIgnoreOcSession: (sid: string) => void;
@@ -3105,6 +3186,8 @@ function FocusView({
     if (nextWaiting) {
       setSelectedId(nextWaiting.id);
       if (expandedId !== nextWaiting.id) onToggle(nextWaiting.id);
+    } else {
+      setSelectedId(actedId);
     }
   };
 
@@ -3704,14 +3787,15 @@ function FocusView({
                 expanded={true}
                 onToggle={() => setMobileShowStage(false)}
                 onHandToAgent={(p, srvId, mdl, rp, nt) => {
+                  setSelectedId(selectedTask.id);
                   onHandToAgent(selectedTask, p, srvId, mdl, rp, nt);
                 }}
                 onApprove={(dec) => {
                   onApprove(selectedTask, dec);
                   if (dec !== "reject") advanceAfterAction(selectedTask.id);
                 }}
-                onAnswerForm={(k, v, l) => {
-                  onAnswerForm(selectedTask, k, v, l);
+                onAnswerForm={(k, v, l, st) => {
+                  onAnswerForm(selectedTask, k, v, l, st);
                   advanceAfterAction(selectedTask.id);
                 }}
                 onInterrupt={() => onInterrupt(selectedTask)}
@@ -3842,7 +3926,13 @@ function BacklogView({
     note?: string,
   ) => void;
   onApprove: (t: Task, decision?: "once" | "always" | "reject") => void;
-  onAnswerForm: (t: Task, fieldKey: string, value: string, label: string) => void;
+  onAnswerForm: (
+    t: Task,
+    fieldKeyOrAnswers: string | Record<string, string | string[]>,
+    value?: string | string[],
+    label?: string,
+    steerPrompt?: string,
+  ) => void;
   onInterrupt: (t: Task) => void;
   onStart?: (t: Task, minutes: number) => void;
   onMove?: (t: Task) => void;
@@ -4450,7 +4540,7 @@ function BacklogView({
                   onHandToAgent(selectedTask, p, srvId, mdl, rp, nt)
                 }
                 onApprove={(dec) => onApprove(selectedTask, dec)}
-                onAnswerForm={(k, v, l) => onAnswerForm(selectedTask, k, v, l)}
+                onAnswerForm={(k, v, l, st) => onAnswerForm(selectedTask, k, v, l, st)}
                 onInterrupt={() => onInterrupt(selectedTask)}
                 onStart={onStart}
                 onMove={focusId ? onMove : undefined}
@@ -4854,7 +4944,12 @@ function TaskRow({
     note?: string,
   ) => void;
   onApprove: (decision?: "once" | "always" | "reject") => void;
-  onAnswerForm: (fieldKey: string, value: string, label: string) => void;
+  onAnswerForm: (
+    fieldKeyOrAnswers: string | Record<string, string | string[]>,
+    value?: string | string[],
+    label?: string,
+    steerPrompt?: string,
+  ) => void;
   onInterrupt?: () => void;
   onStart?: (t: Task, minutes: number) => void;
   onComplete?: () => void;
@@ -5228,6 +5323,7 @@ function TaskRow({
           onStartCountdown={
             onStart ? () => onStart(t, t.duration?.amount ?? defaultMinutes) : undefined
           }
+          onMove={onMove}
           onDemote={onDemote}
           onMoveProject={onMoveProject}
           projects={projects}
@@ -5322,49 +5418,18 @@ function TaskRow({
             </div>
           </div>
 
-          {/* Inline Question Shelf directly on collapsed card (1-click answer, no need to open drawer) */}
+          {/* Inline Question Shelf directly on collapsed card (1-click answer or inline steer) */}
           {liveSession?.form && (
-            <div className="mt-2.5 rounded-lg border border-zinc-800/90 bg-zinc-950/90 p-3">
-              {liveSession.form.fields.map((field) => (
-                <div key={field.key} className="space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[13px] font-medium text-zinc-100">
-                      {field.title || formQuestionTitle}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={onToggle}
-                      className="shrink-0 font-mono text-[11px] text-zinc-500 hover:text-zinc-300"
-                    >
-                      Custom reply →
-                    </button>
-                  </div>
-                  {field.description && (
-                    <p className="text-[12px] text-zinc-400">{field.description}</p>
-                  )}
-                  {field.options && field.options.length > 0 && (
-                    <div className="grid gap-1.5 sm:grid-cols-3">
-                      {field.options.map((opt, idx) => (
-                        <button
-                          key={opt.value}
-                          type="button"
-                          onClick={() => onAnswerForm(field.key, opt.value, opt.label)}
-                          className="group flex flex-col items-start rounded-md border border-zinc-800 bg-zinc-900/70 px-2.5 py-2 text-left transition-colors hover:border-orange-500/70"
-                        >
-                          <span className="text-[12px] font-medium text-zinc-100 group-hover:text-orange-400">
-                            {idx + 1}. {opt.label}
-                          </span>
-                          {opt.description && (
-                            <span className="mt-0.5 line-clamp-2 text-[11px] text-zinc-400">
-                              {opt.description}
-                            </span>
-                          )}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
+            <div className="mt-2.5">
+              <QuestionFormCard
+                form={liveSession.form}
+                fallbackTitle={formQuestionTitle}
+                variant="compact"
+                onSubmitAnswers={(answers, summaryLabel, steerPrompt) =>
+                  onAnswerForm(answers, undefined, summaryLabel, steerPrompt)
+                }
+                onSteer={(steerText) => onHandToAgent(steerText)}
+              />
             </div>
           )}
 
@@ -5416,6 +5481,240 @@ function TaskRow({
   );
 }
 
+function QuestionFormCard({
+  form,
+  fallbackTitle,
+  variant = "stage",
+  selectedByField: controlledSelected,
+  onSelectedChange,
+  onSubmitAnswers,
+  onSteer,
+}: {
+  form: OpenCodeFormRequest;
+  fallbackTitle?: string;
+  variant?: "compact" | "stage" | "zen";
+  selectedByField?: Record<string, string | string[]>;
+  onSelectedChange?: (next: Record<string, string | string[]>) => void;
+  onSubmitAnswers: (
+    answers: Record<string, string | string[]>,
+    summaryLabel: string,
+    steerPrompt?: string,
+  ) => void;
+  onSteer: (steerText: string) => void;
+}) {
+  const [internalSelected, setInternalSelected] = useState<Record<string, string | string[]>>({});
+  const [inlineSteer, setInlineSteer] = useState("");
+  const selected = controlledSelected ?? internalSelected;
+
+  const updateSelected = (next: Record<string, string | string[]>) => {
+    if (onSelectedChange) {
+      onSelectedChange(next);
+    } else {
+      setInternalSelected(next);
+    }
+  };
+
+  useEffect(() => {
+    setInternalSelected({});
+    setInlineSteer("");
+  }, [form.id]);
+
+  const isMulti =
+    form.fields.length > 1 || form.fields.some((f) => f.type === "multiselect");
+  const selectedCount = Object.keys(selected).length;
+  const hasSelections = selectedCount > 0;
+  const cleanSteer = inlineSteer.trim();
+
+  const buildSummaryLabel = (ans: Record<string, string | string[]>) => {
+    const parts: string[] = [];
+    for (const f of form.fields) {
+      const v = ans[f.key];
+      if (v === undefined) continue;
+      if (Array.isArray(v)) {
+        if (v.length > 0) parts.push(v.join(", "));
+      } else if (v) {
+        const opt = f.options?.find((o) => o.value === v);
+        parts.push(opt?.label || v);
+      }
+    }
+    return parts.join(" · ") || "answer";
+  };
+
+  const handleOptionClick = (
+    field: OpenCodeFormRequest["fields"][number],
+    optValue: string,
+    optLabel: string,
+  ) => {
+    if (!isMulti && !cleanSteer) {
+      onSubmitAnswers({ [field.key]: optValue }, optLabel);
+      return;
+    }
+    const next = { ...selected };
+    if (field.type === "multiselect") {
+      const prevArr = Array.isArray(next[field.key]) ? (next[field.key] as string[]) : [];
+      const exists = prevArr.includes(optValue);
+      const updated = exists
+        ? prevArr.filter((x) => x !== optValue)
+        : [...prevArr, optValue];
+      if (updated.length > 0) {
+        next[field.key] = updated;
+      } else {
+        delete next[field.key];
+      }
+    } else {
+      if (next[field.key] === optValue) {
+        delete next[field.key];
+      } else {
+        next[field.key] = optValue;
+      }
+    }
+    updateSelected(next);
+  };
+
+  const handleSubmit = () => {
+    if (hasSelections) {
+      onSubmitAnswers(
+        selected,
+        buildSummaryLabel(selected),
+        cleanSteer || undefined,
+      );
+      updateSelected({});
+      setInlineSteer("");
+      return;
+    }
+    if (cleanSteer) {
+      onSteer(cleanSteer);
+      setInlineSteer("");
+    }
+  };
+
+  const containerCls =
+    variant === "compact"
+      ? "space-y-3 rounded-lg border border-zinc-800/90 bg-zinc-950/90 p-3"
+      : variant === "zen"
+        ? "space-y-3.5 rounded-xl border border-orange-500/40 bg-zinc-950/90 p-4 text-[13px]"
+        : "space-y-3.5 rounded-xl border border-orange-500/35 bg-zinc-950/80 p-3.5 text-[13px]";
+
+  const gridCls =
+    variant === "compact"
+      ? "grid gap-1.5 sm:grid-cols-3"
+      : variant === "zen"
+        ? "grid gap-2 pt-1 sm:grid-cols-2"
+        : "grid gap-2 pt-1 sm:grid-cols-2 xl:grid-cols-3";
+
+  return (
+    <div className={containerCls}>
+      {form.fields.map((field, fIdx) => {
+        const curVal = selected[field.key];
+        return (
+          <div key={field.key} className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span
+                className={
+                  variant === "compact"
+                    ? "text-[13px] font-medium text-zinc-100"
+                    : "text-[15px] font-semibold text-zinc-100"
+                }
+              >
+                {form.fields.length > 1 ? `${fIdx + 1}. ` : ""}
+                {field.title || fallbackTitle || form.title}
+              </span>
+              {field.type === "multiselect" && (
+                <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-orange-400/90">
+                  Multi-select
+                </span>
+              )}
+            </div>
+            {field.description && (
+              <p className={variant === "compact" ? "text-[12px] text-zinc-400" : "text-[13px] text-zinc-400"}>
+                {field.description}
+              </p>
+            )}
+            {field.options && field.options.length > 0 && (
+              <div className={gridCls}>
+                {field.options.map((opt, idx) => {
+                  const isPicked = Array.isArray(curVal)
+                    ? curVal.includes(opt.value)
+                    : curVal === opt.value;
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => handleOptionClick(field, opt.value, opt.label)}
+                      className={`group flex flex-col items-start rounded-lg border px-3 py-2 text-left transition-colors ${
+                        isPicked
+                          ? "border-orange-500 bg-orange-950/35 text-orange-100"
+                          : "border-zinc-800 bg-zinc-900/70 hover:border-orange-500/70 hover:bg-zinc-900"
+                      }`}
+                    >
+                      <div className="flex w-full items-center justify-between gap-1.5">
+                        <span
+                          className={`text-[12px] sm:text-[13px] font-medium ${
+                            isPicked
+                              ? "text-orange-300"
+                              : "text-zinc-100 group-hover:text-orange-400"
+                          }`}
+                        >
+                          {idx + 1}. {opt.label}
+                        </span>
+                        {isPicked && (
+                          <span className="shrink-0 font-mono text-[11px] font-bold text-orange-400">
+                            ✓
+                          </span>
+                        )}
+                      </div>
+                      {opt.description && (
+                        <span className="mt-0.5 line-clamp-2 text-[11px] sm:text-[12px] leading-snug text-zinc-400">
+                          {opt.description}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {/* Inline Steer / Custom Reply bar inside the question card */}
+      <div className="flex items-center gap-2 border-t border-zinc-800/80 pt-2.5">
+        <input
+          type="text"
+          value={inlineSteer}
+          onChange={(e) => setInlineSteer(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              handleSubmit();
+            }
+          }}
+          placeholder={
+            hasSelections
+              ? "Add steer note to your selection (optional, Enter to submit)…"
+              : "Or steer agent / type custom answer instead (Enter to send)…"
+          }
+          className="min-w-0 flex-1 rounded-lg border border-zinc-800 bg-zinc-900/90 px-3 py-1.5 text-[12px] sm:text-[13px] text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-orange-500/70"
+        />
+        {(hasSelections || cleanSteer || isMulti) && (
+          <button
+            type="button"
+            disabled={!hasSelections && !cleanSteer}
+            onClick={handleSubmit}
+            className="shrink-0 rounded-lg bg-orange-600 px-3 py-1.5 text-[12px] font-semibold text-white transition-colors hover:bg-orange-500 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {hasSelections && cleanSteer
+              ? "Submit + Steer →"
+              : hasSelections
+                ? `Submit${form.fields.length > 1 ? ` (${selectedCount}/${form.fields.length})` : ""} →`
+                : "Steer →"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function RowEditor({
   t,
   large,
@@ -5446,6 +5745,7 @@ function RowEditor({
   onApprove,
   onAnswerForm,
   onStartCountdown,
+  onMove,
   onDemote,
   onMoveProject,
   projects,
@@ -5485,8 +5785,14 @@ function RowEditor({
     note?: string,
   ) => void;
   onApprove: (decision?: "once" | "always" | "reject") => void;
-  onAnswerForm: (fieldKey: string, value: string, label: string) => void;
+  onAnswerForm: (
+    fieldKeyOrAnswers: string | Record<string, string | string[]>,
+    value?: string | string[],
+    label?: string,
+    steerPrompt?: string,
+  ) => void;
   onStartCountdown?: () => void;
+  onMove?: (t: Task) => void;
   onDemote?: (t: Task) => void;
   onMoveProject?: (t: Task, projectId: string) => void;
   projects?: Project[];
@@ -5512,8 +5818,16 @@ function RowEditor({
   const [saveState, setSaveState] = useState<"" | "saving" | "saved">("");
   const [confirming, setConfirming] = useState(false);
   const [showMeta, setShowMeta] = useState(false);
+  const [configOpen, setConfigOpen] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [zenNotesOpen, setZenNotesOpen] = useState(false);
   const [replyText, setReplyText] = useState("");
+  const [draftFormAnswers, setDraftFormAnswers] = useState<Record<string, string | string[]>>({});
   const [pendingSteer, setPendingSteer] = useState<{ text: string; sentAt: number } | null>(null);
+
+  useEffect(() => {
+    setDraftFormAnswers({});
+  }, [liveSession?.form?.id]);
   const hasSessionOutput = Boolean(
     sessions.length > 0 ||
       initialMeta.sessions.length > 0 ||
@@ -5819,11 +6133,44 @@ function RowEditor({
       ? (model || undefined)
       : undefined;
     if (hasSessionOutput) {
-      const msg = replyText.trim() || prompt.trim() || titleLive.current.trim();
-      if (msg) {
-        setPendingSteer({ text: msg, sentAt: Date.now() });
+      const cleanReply = replyText.trim();
+      const hasDraftAnswers = Boolean(
+        liveSession?.form && Object.keys(draftFormAnswers).length > 0,
+      );
+      if (hasDraftAnswers && liveSession?.form) {
+        const summaryParts: string[] = [];
+        for (const f of liveSession.form.fields) {
+          const val = draftFormAnswers[f.key];
+          if (val === undefined) continue;
+          if (Array.isArray(val)) {
+            if (val.length > 0) summaryParts.push(val.join(", "));
+          } else if (val) {
+            const opt = f.options?.find((o) => o.value === val);
+            summaryParts.push(opt?.label || val);
+          }
+        }
+        if (cleanReply) {
+          setPendingSteer({ text: cleanReply, sentAt: Date.now() });
+        }
+        onAnswerForm(
+          draftFormAnswers,
+          undefined,
+          summaryParts.join(" · ") || "answer",
+          cleanReply || undefined,
+        );
+        setDraftFormAnswers({});
+        setReplyText("");
+        window.setTimeout(() => scrollThreadToBottom(true), 40);
+        return;
       }
-      onHandToAgent(msg || undefined, server, explicitModelOverride, repo, note);
+      const msg =
+        cleanReply || (!activeSid ? prompt.trim() || titleLive.current.trim() : "");
+      if (!msg) {
+        promptRef.current?.focus();
+        return;
+      }
+      setPendingSteer({ text: msg, sentAt: Date.now() });
+      onHandToAgent(msg, server, explicitModelOverride, repo, note);
       setReplyText("");
       window.setTimeout(() => scrollThreadToBottom(true), 40);
     } else {
@@ -5958,6 +6305,204 @@ function RowEditor({
       ))}
     </select>
   );
+
+  const currentProject = projects?.find((p) => p.id === t.project_id);
+  const currentProjectName = currentProject?.name;
+
+  const configCapsuleEl = (
+    <button
+      type="button"
+      onClick={() => setConfigOpen((o) => !o)}
+      title="Configure Target, Model, Folder, and Project routing"
+      className={`inline-flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-[11px] transition-colors ${
+        configOpen
+          ? "border-orange-500/50 bg-orange-500/10 text-orange-300"
+          : "border-zinc-800 bg-zinc-900/80 text-zinc-300 hover:border-zinc-700 hover:text-zinc-100"
+      }`}
+    >
+      <span
+        className={`h-1.5 w-1.5 rounded-full ${
+          !server
+            ? "bg-zinc-500"
+            : isTargetServerOnline
+              ? "bg-orange-500"
+              : "bg-zinc-600"
+        }`}
+      />
+      <span className="truncate max-w-44 sm:max-w-72">
+        {!server
+          ? "👤 Human"
+          : `${server}${repo ? `/${shortRepo(repo)}` : ""}${model ? ` · ${shortModelLabel(model)}` : ""}`}
+      </span>
+      {currentProjectName && (
+        <span className="text-zinc-500 hidden sm:inline">#{currentProjectName}</span>
+      )}
+      <span className="text-zinc-500 text-[9px]">{configOpen ? "▲" : "▼"}</span>
+    </button>
+  );
+
+  const configDrawerEl = configOpen ? (
+    <div className="rounded-xl border border-zinc-800/90 bg-zinc-950/95 p-3 space-y-2.5 text-[12px] shadow-lg">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        {targetPickerEl}
+        {server && (
+          <div className="flex items-center gap-1.5 font-mono text-[11px]">
+            <span className="text-zinc-500">Model:</span>
+            {modelSelectEl}
+          </div>
+        )}
+      </div>
+
+      {server && (
+        <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-[11px] border-t border-zinc-900 pt-2 text-zinc-400">
+          <div className="flex items-center gap-1.5 min-w-0 flex-1 truncate">
+            <span className="text-zinc-600">Dir:</span>
+            <span className="truncate text-zinc-400">
+              {liveSession?.directory ||
+                serverRepos.find((r) => r.label === repo)?.dir ||
+                activeSrvObj?.defaultDir ||
+                "/Users/justinyu"}
+            </span>
+          </div>
+          {activeSid && (
+            <div className="flex shrink-0 items-center gap-2">
+              {getOpenCodeWebUrl(activeSid, activeSrvObj) && (
+                <a
+                  href={getOpenCodeWebUrl(activeSid, activeSrvObj)!}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Open session in OpenCode Web UI"
+                  className="text-orange-400 hover:text-orange-300"
+                >
+                  Web ↗
+                </a>
+              )}
+              <button
+                type="button"
+                onClick={() => navigator.clipboard?.writeText(`opencode -s ${activeSid}`)}
+                title={`Copy "opencode -s ${activeSid}"`}
+                className="text-zinc-500 hover:text-zinc-300"
+              >
+                {activeSid.slice(0, 10)} 📋
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-3 border-t border-zinc-900 pt-2 font-mono text-[11px]">
+        {onMoveProject && projects && projects.length > 0 && !t.id.startsWith("tmp-") && (
+          <label className="flex items-center gap-1.5 text-zinc-400">
+            <span className="text-zinc-500">Project list:</span>
+            <select
+              aria-label="Move to another list"
+              value={t.project_id || ""}
+              onChange={(e) => e.target.value && onMoveProject(t, e.target.value)}
+              className="rounded border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-zinc-200 outline-none hover:border-zinc-700"
+            >
+              <option value="" disabled>
+                {currentProjectName || "Move to project…"}
+              </option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+
+        {effectiveJira && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-zinc-500">Jira:</span>
+            <span className="inline-flex items-center gap-1 rounded border border-blue-500/40 bg-blue-950/40 px-1.5 py-0.5 text-blue-300">
+              🎫 {effectiveJira}
+            </span>
+            {unlinkedJiraSession && (
+              <button
+                type="button"
+                onClick={() => {
+                  unlinkedExplicitlyRef.current = false;
+                  const next = Array.from(new Set([...sessions, unlinkedJiraSession.id]));
+                  setSessions(next);
+                  if (unlinkedJiraSession.serverId) setServer(unlinkedJiraSession.serverId);
+                  if (unlinkedJiraSession.repoShort && !repo) {
+                    setRepo(unlinkedJiraSession.repoShort);
+                  }
+                  metaLive.current = {
+                    ...metaLive.current,
+                    sessions: next,
+                    server: unlinkedJiraSession.serverId || server,
+                    repo: repo || unlinkedJiraSession.repoShort || "",
+                  };
+                  flush();
+                }}
+                title={`Auto-matched OpenCode session "${unlinkedJiraSession.title}" (${unlinkedJiraSession.serverId})`}
+                className="inline-flex items-center gap-1 rounded border border-orange-500/50 bg-orange-950/50 px-2 py-0.5 text-orange-300 hover:border-orange-400"
+              >
+                🔗 Link {unlinkedJiraSession.id.slice(0, 10)}
+              </button>
+            )}
+            {activeSid && (
+              <button
+                type="button"
+                disabled={jiraSyncState === "syncing"}
+                onClick={async () => {
+                  setJiraSyncState("syncing");
+                  const res = await syncSessionToJiraIssue({
+                    jiraKey: effectiveJira,
+                    sessionID: activeSid,
+                    sessionTitle: title,
+                    serverId: server || defaultServerId,
+                    repo,
+                  });
+                  setJiraSyncState(res.ok ? "synced" : "error");
+                  window.setTimeout(() => setJiraSyncState(""), 3000);
+                }}
+                title={`Link OpenCode session ${activeSid} onto Jira ticket ${effectiveJira} via Atlassian MCP`}
+                className="rounded border border-blue-500/30 bg-blue-950/30 px-2 py-0.5 text-blue-300 hover:border-blue-400 disabled:opacity-50"
+              >
+                {jiraSyncState === "syncing"
+                  ? "Linking to Jira…"
+                  : jiraSyncState === "synced"
+                    ? `✓ Linked in ${effectiveJira}`
+                    : jiraSyncState === "error"
+                      ? "⚠ Retry Jira Link"
+                      : "🔗 Sync to Jira"}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {showCustomFolder && (
+        <div className="flex w-full items-center gap-1.5 rounded border border-zinc-800 bg-zinc-950/70 p-1.5">
+          <input
+            type="text"
+            placeholder={`Path (e.g. ~/Develop/my-project or ${activeSrvObj?.defaultDir || "/Users/justinyu"}/...)`}
+            value={customFolderDir}
+            onChange={(e) => setCustomFolderDir(e.target.value)}
+            className="flex-1 bg-transparent px-2 py-1 font-mono text-[11px] text-zinc-100 outline-none placeholder:text-zinc-600"
+            autoFocus
+          />
+          <button
+            type="button"
+            onClick={handleAddCustomFolder}
+            className="shrink-0 rounded bg-orange-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-orange-500"
+          >
+            Add & Select
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowCustomFolder(false)}
+            className="shrink-0 text-[11px] text-zinc-500 hover:text-zinc-300"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+    </div>
+  ) : null;
 
   const [isBrowserFs, setIsBrowserFs] = useState(
     typeof document !== "undefined" && Boolean(document.fullscreenElement),
@@ -6470,39 +7015,31 @@ function RowEditor({
 
                   {/* Question / Option Picker Form */}
                   {liveSession?.form && (
-                    <div className="space-y-2 rounded-xl border border-orange-500/40 bg-zinc-950/90 p-4 text-[13px]">
-                      {liveSession.form.fields.map((field) => (
-                        <div key={field.key} className="space-y-2">
-                          <div className="text-[15px] font-semibold text-zinc-100">
-                            {field.title || liveSession.form?.title}
-                          </div>
-                          {field.description && (
-                            <p className="text-[13px] text-zinc-400">{field.description}</p>
-                          )}
-                          {field.options && field.options.length > 0 && (
-                            <div className="grid gap-2 pt-1 sm:grid-cols-2">
-                              {field.options.map((opt, idx) => (
-                                <button
-                                  key={opt.value}
-                                  type="button"
-                                  onClick={() => onAnswerForm(field.key, opt.value, opt.label)}
-                                  className="flex flex-col items-start rounded-lg border border-zinc-800 bg-zinc-900/60 px-3.5 py-2.5 text-left transition-colors hover:border-orange-500/70 hover:bg-zinc-900"
-                                >
-                                  <span className="text-[13px] font-medium text-zinc-100">
-                                    {idx + 1}. {opt.label}
-                                  </span>
-                                  {opt.description && (
-                                    <span className="mt-1 text-[12px] leading-snug text-zinc-400">
-                                      {opt.description}
-                                    </span>
-                                  )}
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
+                    <QuestionFormCard
+                      form={liveSession.form}
+                      variant="zen"
+                      selectedByField={draftFormAnswers}
+                      onSelectedChange={setDraftFormAnswers}
+                      onSubmitAnswers={(answers, summaryLabel, steerPrompt) => {
+                        if (steerPrompt) {
+                          setPendingSteer({ text: steerPrompt, sentAt: Date.now() });
+                        }
+                        onAnswerForm(answers, undefined, summaryLabel, steerPrompt);
+                        setDraftFormAnswers({});
+                        window.setTimeout(() => scrollThreadToBottom(true), 40);
+                      }}
+                      onSteer={(steerText) => {
+                        setPendingSteer({ text: steerText, sentAt: Date.now() });
+                        onHandToAgent(
+                          steerText,
+                          server,
+                          userChangedModelRef.current ? (model || undefined) : undefined,
+                          repo,
+                          note,
+                        );
+                        window.setTimeout(() => scrollThreadToBottom(true), 40);
+                      }}
+                    />
                   )}
 
                   {/* Permission Approval */}
@@ -6549,30 +7086,55 @@ function RowEditor({
               </div>
 
               {/* RIGHT: Task Notes & Steer Control */}
-              <div className="flex flex-col h-full min-h-0 justify-between gap-5 rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-5 sm:p-6 backdrop-blur-sm lg:col-span-5 xl:col-span-4">
-                {/* Task Notes / Context (Top) */}
-                <div className="flex flex-col flex-1 min-h-[160px] space-y-2">
-                  <div className="flex items-center justify-between pb-2 border-b border-zinc-800/60">
-                    <label className="font-mono text-[11px] text-zinc-400 uppercase tracking-wider">
-                      Task Notes / Context
-                    </label>
-                    <span className="font-mono text-[11px] text-zinc-500">
-                      Auto-saved
-                    </span>
+              <div className="flex flex-col h-full min-h-0 justify-between gap-4 rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-5 sm:p-6 backdrop-blur-sm lg:col-span-5 xl:col-span-4">
+                {/* Task Notes / Context (Collapsible in Zen mode) */}
+                <div className="rounded-xl border border-zinc-800/70 bg-zinc-950/40 p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <button
+                      type="button"
+                      onClick={() => setZenNotesOpen((o) => !o)}
+                      className="flex items-center gap-2 font-mono text-[11px] text-zinc-400 hover:text-zinc-200"
+                    >
+                      <span className="text-zinc-500 text-[10px]">{zenNotesOpen ? "▼" : "▶"}</span>
+                      <span className="uppercase tracking-wider font-semibold">Task Notes / Context</span>
+                      <span className="text-zinc-500 font-sans">
+                        {note.trim() ? `(${note.trim().split(/\s+/).filter(Boolean).length} words)` : "(empty)"}
+                      </span>
+                    </button>
+                    {!zenNotesOpen && !note.trim() ? (
+                      <button
+                        type="button"
+                        onClick={() => setZenNotesOpen(true)}
+                        className="text-zinc-500 hover:text-orange-400 text-[11px]"
+                      >
+                        + Add notes
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setZenNotesOpen((o) => !o)}
+                        className="text-zinc-500 hover:text-zinc-300 font-mono text-[10px]"
+                      >
+                        {zenNotesOpen ? "Collapse ▲" : "Expand ▼"}
+                      </button>
+                    )}
                   </div>
-                  <textarea
-                    value={note}
-                    onChange={(e) => {
-                      setNote(e.target.value);
-                      scheduleFlush();
-                    }}
-                    placeholder="Notes, references, next steps…"
-                    className="flex-1 min-h-0 w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/70 p-3.5 text-[13px] leading-relaxed text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-zinc-700 font-normal"
-                  />
+                  {zenNotesOpen && (
+                    <textarea
+                      value={note}
+                      onChange={(e) => {
+                        setNote(e.target.value);
+                        scheduleFlush();
+                      }}
+                      placeholder="Notes, references, next steps…"
+                      rows={5}
+                      className="w-full resize-none rounded-lg border border-zinc-800 bg-zinc-950/80 p-3 text-[13px] leading-relaxed text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-zinc-700"
+                    />
+                  )}
                 </div>
 
                 {/* Model & Steer Composer (Bottom) */}
-                <div className="space-y-3 pt-3 border-t border-zinc-800/60">
+                <div className="space-y-3 pt-3 border-t border-zinc-800/60 flex-1 flex flex-col justify-end">
                   <div className="flex items-center justify-between gap-2">
                     <label className="font-mono text-[11px] text-zinc-400 uppercase tracking-wider">
                       Steer OpenCode
@@ -6644,9 +7206,9 @@ function RowEditor({
     <div className={stageMode ? "flex-1 min-h-0 flex flex-col md:h-full" : undefined}>
       <div className={stageMode ? "flex-1 min-h-0 flex flex-col md:h-full" : undefined}>
         {stageMode ? (
-          <div className="shrink-0 space-y-3 pb-3 border-b border-zinc-800/80">
-            <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-[12px] text-zinc-400">
-              <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <div className="shrink-0 space-y-2.5 pb-2.5 border-b border-zinc-800/80">
+            <div className="flex flex-wrap items-center justify-between gap-2.5 font-mono text-[12px] text-zinc-400">
+              <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
                 <span
                   className={`h-2 w-2 shrink-0 rounded-full ${
                     triage === "needs_you"
@@ -6656,98 +7218,15 @@ function RowEditor({
                         : "bg-zinc-600"
                   }`}
                 />
-                {targetPickerEl}
-                {server && (
-                  <span className="truncate text-zinc-500 max-w-xs">
-                    {liveSession?.directory ||
-                      serverRepos.find((r) => r.label === repo)?.dir ||
-                      activeSrvObj?.defaultDir ||
-                      "/Users/justinyu"}
-                  </span>
-                )}
-                {activeSid && getOpenCodeWebUrl(activeSid, activeSrvObj) && (
-                  <a
-                    href={getOpenCodeWebUrl(activeSid, activeSrvObj)!}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title="Open session in OpenCode Web UI"
-                    className="text-orange-400 hover:text-orange-300"
-                  >
-                    Web ↗
-                  </a>
-                )}
-                {activeSid && (
-                  <button
-                    type="button"
-                    onClick={() => navigator.clipboard?.writeText(`opencode -s ${activeSid}`)}
-                    title={`Copy "opencode -s ${activeSid}"`}
-                    className="text-zinc-500 hover:text-zinc-300"
-                  >
-                    {activeSid.slice(0, 10)} ↗
-                  </button>
-                )}
-                {effectiveJira && (
-                  <span className="inline-flex items-center gap-1 rounded border border-blue-500/40 bg-blue-950/40 px-1.5 py-0.5 text-[11px] font-medium text-blue-300">
+                {configCapsuleEl}
+                {effectiveJira && !configOpen && (
+                  <span className="inline-flex items-center gap-1 rounded border border-blue-500/40 bg-blue-950/40 px-1.5 py-0.5 font-mono text-[11px] font-medium text-blue-300">
                     🎫 {effectiveJira}
                   </span>
-                )}
-                {effectiveJira && unlinkedJiraSession && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      unlinkedExplicitlyRef.current = false;
-                      const next = Array.from(new Set([...sessions, unlinkedJiraSession.id]));
-                      setSessions(next);
-                      if (unlinkedJiraSession.serverId) setServer(unlinkedJiraSession.serverId);
-                      if (unlinkedJiraSession.repoShort && !repo) {
-                        setRepo(unlinkedJiraSession.repoShort);
-                      }
-                      metaLive.current = {
-                        ...metaLive.current,
-                        sessions: next,
-                        server: unlinkedJiraSession.serverId || server,
-                        repo: repo || unlinkedJiraSession.repoShort || "",
-                      };
-                      flush();
-                    }}
-                    title={`Auto-matched OpenCode session "${unlinkedJiraSession.title}" (${unlinkedJiraSession.serverId})`}
-                    className="inline-flex items-center gap-1 rounded border border-orange-500/50 bg-orange-950/50 px-2 py-0.5 text-[11px] font-medium text-orange-300 hover:border-orange-400"
-                  >
-                    🔗 Link {unlinkedJiraSession.id.slice(0, 10)}
-                  </button>
-                )}
-                {effectiveJira && activeSid && (
-                  <button
-                    type="button"
-                    disabled={jiraSyncState === "syncing"}
-                    onClick={async () => {
-                      setJiraSyncState("syncing");
-                      const res = await syncSessionToJiraIssue({
-                        jiraKey: effectiveJira,
-                        sessionID: activeSid,
-                        sessionTitle: title,
-                        serverId: server || defaultServerId,
-                        repo,
-                      });
-                      setJiraSyncState(res.ok ? "synced" : "error");
-                      window.setTimeout(() => setJiraSyncState(""), 3000);
-                    }}
-                    title={`Link OpenCode session ${activeSid} onto Jira ticket ${effectiveJira} via Atlassian MCP`}
-                    className="rounded border border-blue-500/30 bg-blue-950/30 px-2 py-0.5 text-[11px] text-blue-300 hover:border-blue-400 disabled:opacity-50"
-                  >
-                    {jiraSyncState === "syncing"
-                      ? "Linking to Jira…"
-                      : jiraSyncState === "synced"
-                        ? `✓ Linked in ${effectiveJira}`
-                        : jiraSyncState === "error"
-                          ? "⚠ Retry Jira Link"
-                          : "🔗 Sync to Jira"}
-                  </button>
                 )}
               </div>
 
               <div className="flex shrink-0 items-center gap-2">
-                {server && modelSelectEl}
                 {dur}
                 {actions}
                 {onToggleZen && (
@@ -6763,6 +7242,8 @@ function RowEditor({
                 )}
               </div>
             </div>
+
+            {configDrawerEl}
 
             <div className="flex items-center gap-2.5">
               <input
@@ -6811,6 +7292,7 @@ function RowEditor({
                 {saveState === "saving" ? "Saving…" : "Saved ✓"}
               </span>
             )}
+            {configCapsuleEl}
             {dur}
             {actions}
             {onToggleZen && (
@@ -6835,66 +7317,7 @@ function RowEditor({
                 : "space-y-3 border-t border-zinc-800/70 px-3.5 pt-3 pb-3.5"
             }
           >
-            {/* 1. Target & Model Bar (inline mode only; stageMode has it in top bar) */}
-            {!stageMode && (
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/60 pb-2 text-[12px]">
-                {targetPickerEl}
-                <div className="flex shrink-0 items-center gap-2 font-mono text-[11px]">
-                  {server && modelSelectEl}
-                  {activeSid && getOpenCodeWebUrl(activeSid, activeSrvObj) && (
-                    <a
-                      href={getOpenCodeWebUrl(activeSid, activeSrvObj)!}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      title="Open session in OpenCode Web UI"
-                      className="shrink-0 text-orange-400 hover:text-orange-300"
-                    >
-                      Web ↗
-                    </a>
-                  )}
-                  {activeSid && (
-                    <button
-                      type="button"
-                      onClick={() => navigator.clipboard?.writeText(`opencode -s ${activeSid}`)}
-                      title={`Copy "opencode -s ${activeSid}"`}
-                      className="shrink-0 text-zinc-500 hover:text-zinc-300"
-                    >
-                      {activeSid.slice(0, 10)} ↗
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-            {showCustomFolder && (
-              <div className="flex w-full items-center gap-1.5 rounded border border-zinc-800 bg-zinc-950/70 p-1.5">
-                <input
-                  type="text"
-                  placeholder={`Path (e.g. ~/Develop/my-project or ${activeSrvObj?.defaultDir || "/Users/justinyu"}/...)`}
-                  value={customFolderDir}
-                  onChange={(e) => setCustomFolderDir(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") handleAddCustomFolder();
-                    if (e.key === "Escape") setShowCustomFolder(false);
-                  }}
-                  className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-[11px] text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-orange-500"
-                  autoFocus
-                />
-                <button
-                  type="button"
-                  onClick={handleAddCustomFolder}
-                  className="shrink-0 rounded bg-orange-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-orange-500"
-                >
-                  Add & Select
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowCustomFolder(false)}
-                  className="shrink-0 text-[11px] text-zinc-500 hover:text-zinc-300"
-                >
-                  Cancel
-                </button>
-              </div>
-            )}
+            {!stageMode && configDrawerEl}
 
             {/* Scrollable workspace region */}
             <div
@@ -6923,45 +7346,31 @@ function RowEditor({
 
               {/* 3. OpenCode Question / Option Picker */}
               {liveSession?.form && (
-                <div className="space-y-2 border-l-2 border-l-orange-500 pl-3.5 py-1 text-[13px]">
-                  {liveSession.form.fields.map((field) => (
-                    <div key={field.key} className="space-y-2">
-                      <div className="text-[15px] font-medium text-zinc-100">
-                        {field.title || liveSession.form?.title}
-                      </div>
-                      {field.description && (
-                        <p className="text-[13px] text-zinc-400">{field.description}</p>
-                      )}
-                      {field.options && field.options.length > 0 && (
-                        <div
-                          className={
-                            stageMode
-                              ? "grid gap-2 pt-1 sm:grid-cols-2 xl:grid-cols-3"
-                              : "grid gap-1.5 pt-1"
-                          }
-                        >
-                          {field.options.map((opt, idx) => (
-                            <button
-                              key={opt.value}
-                              type="button"
-                              onClick={() => onAnswerForm(field.key, opt.value, opt.label)}
-                              className="flex flex-col items-start rounded-lg border border-zinc-800 bg-zinc-950/90 px-3.5 py-2.5 text-left transition-colors hover:border-orange-500/70"
-                            >
-                              <span className="text-[13px] font-medium text-zinc-100">
-                                {stageMode ? `${idx + 1}. ${opt.label}` : opt.label}
-                              </span>
-                              {opt.description && (
-                                <span className="mt-1 text-[12px] leading-snug text-zinc-400">
-                                  {opt.description}
-                                </span>
-                              )}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
+                <QuestionFormCard
+                  form={liveSession.form}
+                  variant="stage"
+                  selectedByField={draftFormAnswers}
+                  onSelectedChange={setDraftFormAnswers}
+                  onSubmitAnswers={(answers, summaryLabel, steerPrompt) => {
+                    if (steerPrompt) {
+                      setPendingSteer({ text: steerPrompt, sentAt: Date.now() });
+                    }
+                    onAnswerForm(answers, undefined, summaryLabel, steerPrompt);
+                    setDraftFormAnswers({});
+                    window.setTimeout(() => scrollThreadToBottom(true), 40);
+                  }}
+                  onSteer={(steerText) => {
+                    setPendingSteer({ text: steerText, sentAt: Date.now() });
+                    onHandToAgent(
+                      steerText,
+                      server,
+                      userChangedModelRef.current ? (model || undefined) : undefined,
+                      repo,
+                      note,
+                    );
+                    window.setTimeout(() => scrollThreadToBottom(true), 40);
+                  }}
+                />
               )}
 
               {/* Fallback if a tool permission is pending */}
@@ -7049,31 +7458,56 @@ function RowEditor({
                 </div>
               )}
 
-              {/* Task Notes & Context (prominently displayed in stageMode) */}
+              {/* Task Notes & Context: Collapsed by default to maximize prompt & response view */}
               {stageMode && (
-                <div className="rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-4 sm:p-5 space-y-2">
-                  <div className="flex items-center justify-between font-mono text-[11px] text-zinc-400">
-                    <div className="flex items-center gap-2">
-                      <span className="h-2 w-2 rounded-full bg-orange-500/70" />
-                      <span className="font-semibold uppercase tracking-wider text-zinc-300">
-                        Task Notes &amp; Context
+                <div className="rounded-xl border border-zinc-800/70 bg-zinc-950/50 transition-colors">
+                  <div className="flex items-center justify-between px-3.5 py-2 text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => setNotesOpen((o) => !o)}
+                      className="flex items-center gap-2 font-mono text-zinc-400 hover:text-zinc-200 transition-colors"
+                    >
+                      <span className="text-zinc-500 text-[10px]">{notesOpen ? "▼" : "▶"}</span>
+                      <span className="font-medium text-zinc-300">Task Notes &amp; Context</span>
+                      <span className="text-zinc-500 font-sans">
+                        {note.trim()
+                          ? `(${note.trim().split(/\s+/).filter(Boolean).length} words)`
+                          : "(empty)"}
                       </span>
-                    </div>
-                    <span className="text-zinc-500">
-                      {note.trim() ? `${note.trim().split(/\s+/).filter(Boolean).length} words` : "Empty"} · auto-saves to description
-                    </span>
+                    </button>
+                    {!notesOpen && !note.trim() ? (
+                      <button
+                        type="button"
+                        onClick={() => setNotesOpen(true)}
+                        className="text-zinc-500 hover:text-orange-400 text-[11px]"
+                      >
+                        + Add notes
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setNotesOpen((o) => !o)}
+                        className="text-zinc-500 hover:text-zinc-300 font-mono text-[10px]"
+                      >
+                        {notesOpen ? "Collapse ▲" : "Expand ▼"}
+                      </button>
+                    )}
                   </div>
-                  <textarea
-                    ref={noteRef}
-                    value={note}
-                    onChange={(e) => {
-                      setNote(e.target.value);
-                      scheduleFlush();
-                    }}
-                    placeholder="Task notes, specs, steps, links, API snippets, or context…"
-                    rows={2}
-                    className="w-full resize-none overflow-hidden bg-transparent text-[14px] sm:text-[15px] leading-relaxed text-zinc-100 placeholder:text-zinc-600 outline-none"
-                  />
+                  {notesOpen && (
+                    <div className="border-t border-zinc-900/80 p-3.5 pt-2.5">
+                      <textarea
+                        ref={noteRef}
+                        value={note}
+                        onChange={(e) => {
+                          setNote(e.target.value);
+                          scheduleFlush();
+                        }}
+                        placeholder="Task notes, specs, steps, links, API snippets, or context…"
+                        rows={2}
+                        className="w-full resize-none overflow-hidden bg-transparent text-[13px] sm:text-[14px] leading-relaxed text-zinc-100 placeholder:text-zinc-600 outline-none"
+                      />
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -7141,6 +7575,17 @@ function RowEditor({
                 </div>
 
                 <div className="flex items-center gap-1.5">
+                  {onMove && (
+                    <button
+                      type="button"
+                      onClick={() => onMove(t)}
+                      title="Move task to Focus"
+                      aria-label="Move to Focus"
+                      className="inline-flex h-7 items-center justify-center gap-1 rounded border border-zinc-800 bg-zinc-900 px-2.5 text-[12px] font-medium text-orange-400 transition-colors hover:border-orange-500/50 hover:bg-zinc-800 hover:text-orange-300"
+                    >
+                      → Focus
+                    </button>
+                  )}
                   {onDemote && (
                     <button
                       type="button"
@@ -7172,7 +7617,9 @@ function RowEditor({
                         : hasSessionOutput
                           ? "Send (⌘↵)"
                           : isTargetServerOnline
-                            ? `Run on ${targetLabel} (⌘↵)`
+                            ? onMove
+                              ? `Run on ${targetLabel} & move to Focus (⌘↵)`
+                              : `Run on ${targetLabel} (⌘↵)`
                             : `Queue for ${targetLabel} (⌘↵)`
                     }
                     aria-label={
@@ -7181,12 +7628,20 @@ function RowEditor({
                         : hasSessionOutput
                           ? "Send"
                           : isTargetServerOnline
-                            ? `Run on ${targetLabel}`
+                            ? onMove
+                              ? `Run on ${targetLabel} & move to Focus`
+                              : `Run on ${targetLabel}`
                             : `Queue for ${targetLabel}`
                     }
                     className="inline-flex h-7 items-center justify-center gap-1 rounded bg-orange-600 px-3 text-[13px] font-medium text-white transition-colors hover:bg-orange-500"
                   >
-                    {!server ? "⏱ Start Timer" : hasSessionOutput ? "↑ Send" : "▶ Run Agent"}
+                    {!server
+                      ? "⏱ Start Timer"
+                      : hasSessionOutput
+                        ? "↑ Send"
+                        : onMove
+                          ? `▶ Run & Focus →`
+                          : "▶ Run Agent"}
                   </button>
                 </div>
               </div>
