@@ -14,11 +14,14 @@ body {
 }
 
 button, a, select {
-  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, transform 90ms ease;
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
 }
 
-button:active:not(:disabled) {
-  transform: translateY(0.5px);
+.sidebar-scroll {
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(113, 113, 122, 0.3) transparent;
+  overscroll-behavior-y: contain;
 }
 
 @keyframes grow {

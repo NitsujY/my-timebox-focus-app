@@ -3379,7 +3379,7 @@ function FocusView({
             </div>
           </div>
 
-          <p className="line-clamp-2 text-[13.5px] font-medium leading-snug text-zinc-100">
+          <p className="line-clamp-2 break-words text-[13.5px] font-medium leading-snug text-zinc-100">
             {t.content}
           </p>
 
@@ -3414,7 +3414,7 @@ function FocusView({
         <aside
           aria-label="Focus task queues"
           style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
-          className={`w-full shrink-0 space-y-3 md:w-[var(--sidebar-w)] md:h-full md:overflow-y-auto md:pr-1 [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent] ${
+          className={`w-full shrink-0 space-y-3 md:w-[var(--sidebar-w)] md:h-full min-h-0 md:overflow-y-auto md:overflow-x-hidden md:pr-1 sidebar-scroll ${
             sidebarCollapsed
               ? "hidden"
               : mobileShowStage && selectedTask
@@ -4341,7 +4341,7 @@ function BacklogView({
             </div>
           </div>
 
-          <p className="line-clamp-2 text-[13.5px] font-medium leading-snug text-zinc-100">
+          <p className="line-clamp-2 break-words text-[13.5px] font-medium leading-snug text-zinc-100">
             {t.content}
           </p>
         </div>
@@ -4360,7 +4360,7 @@ function BacklogView({
         <aside
           aria-label="Backlog task queue"
           style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
-          className={`w-full shrink-0 space-y-3 md:w-[var(--sidebar-w)] md:h-full md:overflow-y-auto md:pr-1 [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent] ${
+          className={`w-full shrink-0 space-y-3 md:w-[var(--sidebar-w)] md:h-full min-h-0 md:overflow-y-auto md:overflow-x-hidden md:pr-1 sidebar-scroll ${
             sidebarCollapsed
               ? "hidden"
               : mobileShowStage && (selectedTask || triageOpen)
@@ -7757,7 +7757,7 @@ function RowEditor({
               <div
                 ref={zenThreadScrollRef}
                 onScroll={handleThreadScroll}
-                className="flex-1 min-h-0 overflow-y-auto space-y-3 py-2 pr-1"
+                className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden space-y-3 py-2 pr-1 sidebar-scroll"
               >
                 {(turns.length > 0 ||
                   pendingSteer ||
@@ -8076,8 +8076,8 @@ function RowEditor({
               onScroll={handleThreadScroll}
               className={
                 stageMode
-                  ? "flex-1 min-h-0 overflow-y-auto space-y-2.5 pr-1 py-1 [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent]"
-                  : "max-h-96 overflow-y-auto space-y-3 pr-1"
+                  ? "flex-1 min-h-0 overflow-y-auto overflow-x-hidden space-y-2.5 pr-1 py-1 sidebar-scroll"
+                  : "max-h-96 overflow-y-auto overflow-x-hidden space-y-3 pr-1 sidebar-scroll"
               }
             >
               {/* 2. Live OpenCode Thread (User prompts/steers + default-collapsed Reasoning & Steps + Assistant responses) */}
