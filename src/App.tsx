@@ -239,11 +239,6 @@ const sortTasks = (ts: Task[]) =>
     return (b.added_at ?? "").localeCompare(a.added_at ?? ""); // ties: newest first
   });
 
-// orange fade for freshly added rows — keeps glowing after the tmp id is swapped for the real one
-const isNew = (t: Task) =>
-  t.id.startsWith("tmp-") ||
-  (t.added_at != null && Date.now() - Date.parse(t.added_at) < 1500);
-
 const pBar = (p: number) =>
   p === 4
     ? "border-l-zinc-200"
@@ -378,6 +373,7 @@ export default function App() {
   const [humanSecBy, setHumanSecBy] = useState<Record<string, number>>(() =>
     load("tb_human_sec", {}),
   );
+  const humanSecRef = useRef<Record<string, number>>(load("tb_human_sec", {}));
   const [agentSecBy, setAgentSecBy] = useState<Record<string, number>>(() =>
     load("tb_agent_sec", {}),
   );
@@ -538,15 +534,20 @@ export default function App() {
     };
   }, [token, projectId, syncOpenCode, runVerifyOpenCode, ocConfig.defaultServerId]);
 
-  // 1-second background ticker: increments humanSec on expanded task and agentSec on any task whose linked OpenCode session is `running`
+  // Background ticker: increments humanSec on expanded task and agentSec on any task whose linked OpenCode session is `running`
   useEffect(() => {
     const iv = setInterval(() => {
       if (expandedId) {
-        setHumanSecBy((prev) => {
-          const next = { ...prev, [expandedId]: (prev[expandedId] ?? 0) + 1 };
-          save("tb_human_sec", next);
-          return next;
-        });
+        const prevSec = humanSecRef.current[expandedId] ?? 0;
+        const nextSec = prevSec + 1;
+        humanSecRef.current[expandedId] = nextSec;
+        if (nextSec % 15 === 0) {
+          save("tb_human_sec", humanSecRef.current);
+        }
+        // Only trigger React state re-render when a full minute rolls over to prevent 1-second screen flashing
+        if (Math.floor(nextSec / 60) !== Math.floor(prevSec / 60)) {
+          setHumanSecBy((prev) => ({ ...prev, [expandedId]: nextSec }));
+        }
       }
       const runningIds = new Set(
         ocSessions.filter((s) => s.status === "running").map((s) => s.id),
@@ -1418,6 +1419,7 @@ export default function App() {
 
   const launchingQueueRef = useRef<Set<string>>(new Set());
   const queueFailCooldownRef = useRef<Map<string, number>>(new Map());
+  const autoPilotFailedRef = useRef<Set<string>>(new Set());
 
   // ponytail: single sequential auto-loop reuses handToAgent + native OpenCode question tool
   const [autoPilot, setAutoPilot] = useState(false);
@@ -1474,6 +1476,7 @@ export default function App() {
     );
     const isUnstarted = (t: Task) =>
       !launchingQueueRef.current.has(t.id) &&
+      !autoPilotFailedRef.current.has(t.id) &&
       parseTaskDescription(t.description).sessions.length === 0;
 
     const nextFocus = focusList.find(isUnstarted);
@@ -1504,9 +1507,13 @@ export default function App() {
       undefined,
       undefined,
       isBacklog,
-    ).finally(() => {
-      launchingQueueRef.current.delete(target.id);
-    });
+    )
+      .catch(() => {
+        autoPilotFailedRef.current.add(target.id);
+      })
+      .finally(() => {
+        launchingQueueRef.current.delete(target.id);
+      });
   }, [
     autoPilot,
     ocConnected,
@@ -3336,7 +3343,7 @@ function FocusView({
               : triage === "needs_you"
                 ? "border-zinc-800/90 bg-zinc-900/55 hover:border-zinc-700 hover:bg-zinc-900/80"
                 : "border-zinc-800/75 bg-zinc-900/30 hover:border-zinc-700 hover:bg-zinc-900/65"
-          } ${isNew(t) ? "row-new" : ""}`}
+          }`}
         >
           <div className="flex items-center justify-between gap-1.5 font-mono text-[10.5px]">
             <div className="flex min-w-0 items-center gap-1.5">
@@ -4292,7 +4299,7 @@ function BacklogView({
             active
               ? "border-orange-500 bg-zinc-900/95 shadow-sm"
               : "border-zinc-800/75 bg-zinc-900/30 hover:border-zinc-700 hover:bg-zinc-900/65"
-          } ${isNew(t) ? "row-new" : ""}`}
+          }`}
         >
           <div className="flex items-center justify-between gap-1.5 font-mono text-[10.5px]">
             <div className="flex min-w-0 items-center gap-1.5">
@@ -5602,16 +5609,28 @@ function TaskRow({
         assignedServerId,
         force,
       ).then((res) => {
-        if (!cancelled && res) setSummary(res);
+        if (cancelled || !res) return;
+        setSummary((prev) => {
+          if (!prev) return res;
+          // Guard against redundant re-renders when data has not changed
+          if (
+            prev.lastAssistantText === res.lastAssistantText &&
+            prev.lastToolCall === res.lastToolCall &&
+            prev.turns.length === res.turns.length &&
+            prev.filesChanged.length === res.filesChanged.length &&
+            prev.recentTools.length === res.recentTools.length
+          ) {
+            return prev;
+          }
+          return res;
+        });
       });
     };
     loadSummary(lastSteerAt > 0);
     const recentlySteered = lastSteerAt > 0 && Date.now() - lastSteerAt < 20_000;
-    const shouldPoll =
-      liveSession?.status === "running" ||
-      recentlySteered ||
-      !summary?.lastAssistantText;
-    const iv = shouldPoll ? window.setInterval(() => loadSummary(true), 1000) : undefined;
+    // Only poll when the session is actively running or recently steered — idle sessions do not poll
+    const shouldPoll = liveSession?.status === "running" || recentlySteered;
+    const iv = shouldPoll ? window.setInterval(() => loadSummary(true), 1500) : undefined;
     return () => {
       cancelled = true;
       if (iv) window.clearInterval(iv);
@@ -5622,7 +5641,6 @@ function TaskRow({
     liveSession?.status,
     expanded,
     assignedServerId,
-    summary?.lastAssistantText,
     lastSteerAt,
   ]);
 
@@ -5833,7 +5851,7 @@ function TaskRow({
       ref={rootRef}
       className={`rounded-xl transition-colors duration-150 ${rowLeftBorder} ${
         !expanded && !stageMode ? "hover:bg-zinc-900/65" : ""
-      } ${isNew(t) ? "row-new" : ""}`}
+      }`}
     >
       {expanded ? (
         <RowEditor
