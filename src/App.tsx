@@ -6768,7 +6768,7 @@ function RowEditor({
   // Follow live response as new steps, reasoning, and text stream in
   useEffect(() => {
     if (!followLiveRef.current) return;
-    if (pendingSteer || liveSession?.status === "running" || turns.length > 0) {
+    if (pendingSteer || liveSession?.status === "running") {
       const id = window.requestAnimationFrame(() => scrollThreadToBottom(Boolean(pendingSteer)));
       return () => window.cancelAnimationFrame(id);
     }
