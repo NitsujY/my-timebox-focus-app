@@ -3271,7 +3271,7 @@ function FocusView({
       <li key={t.id}>
         <div
           onClick={() => selectTask(t.id, true)}
-          className={`group flex cursor-pointer flex-col gap-1 rounded-lg border px-2.5 py-2 transition-all duration-150 ${
+          className={`group flex cursor-pointer flex-col gap-1 rounded-lg border px-2.5 py-2 transition-colors duration-150 ${
             active
               ? "border-orange-500 bg-zinc-900/95 shadow-sm"
               : triage === "needs_you"
@@ -3295,7 +3295,7 @@ function FocusView({
                 ✓
               </button>
               <span
-                className={
+                className={`tabular-nums ${
                   triage === "needs_you"
                     ? liveSession?.form || liveSession?.permission
                       ? "font-medium text-orange-400"
@@ -3305,7 +3305,7 @@ function FocusView({
                       : isQueuedForAgent
                         ? "text-amber-400"
                         : "text-zinc-500"
-                }
+                }`}
               >
                 {statusLabel}
               </span>
@@ -4229,7 +4229,7 @@ function BacklogView({
       <li key={t.id}>
         <div
           onClick={() => selectTask(t.id, true)}
-          className={`group flex cursor-pointer flex-col gap-1 rounded-lg border px-2.5 py-2 transition-all duration-150 ${
+          className={`group flex cursor-pointer flex-col gap-1 rounded-lg border px-2.5 py-2 transition-colors duration-150 ${
             active
               ? "border-orange-500 bg-zinc-900/95 shadow-sm"
               : "border-zinc-800/75 bg-zinc-900/30 hover:border-zinc-700 hover:bg-zinc-900/65"
@@ -5023,8 +5023,18 @@ function SessionThread({
   const handleContainerScroll = useCallback(() => {
     const scrollContainer = containerRef.current?.closest(".overflow-y-auto") as HTMLElement | null;
     if (!scrollContainer) return;
+
+    // Pin activeIndex to latest turn when scrolled to/near bottom to avoid oscillation
+    const distFromBottom =
+      scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight;
+    if (distFromBottom < 40 && displayTurns.length > 0) {
+      const lastIdx = displayTurns.length - 1;
+      setActiveIndex((prev) => (prev !== lastIdx ? lastIdx : prev));
+      return;
+    }
+
     const containerRect = scrollContainer.getBoundingClientRect();
-    const threshold = containerRect.top + 70;
+    const threshold = containerRect.top + 50;
 
     let bestIdx = 0;
     let minDiff = Infinity;
@@ -5042,7 +5052,7 @@ function SessionThread({
         bestIdx = i;
       }
     }
-    setActiveIndex(bestIdx);
+    setActiveIndex((prev) => (prev !== bestIdx ? bestIdx : prev));
   }, [displayTurns.length]);
 
   useEffect(() => {
@@ -5213,7 +5223,7 @@ function SessionThread({
               }}
               data-turn-id={turn.id}
               data-turn-role="user"
-              className={`rounded-lg border border-zinc-800/90 border-l-[3px] border-l-amber-500 bg-gradient-to-r from-amber-500/[0.06] via-zinc-900/85 to-zinc-900/70 px-3 py-2 space-y-1.5 shadow-sm transition-all duration-300 ${
+              className={`rounded-lg border border-zinc-800/90 border-l-[3px] border-l-amber-500 bg-gradient-to-r from-amber-500/[0.06] via-zinc-900/85 to-zinc-900/70 px-3 py-2 space-y-1.5 shadow-sm transition-[box-shadow,ring-color] duration-150 ${
                 highlightedId === turn.id
                   ? "ring-2 ring-amber-400/80 shadow-lg shadow-amber-500/10"
                   : ""
@@ -5282,7 +5292,7 @@ function SessionThread({
             }}
             data-turn-id={turn.id}
             data-turn-role="assistant"
-            className={`rounded-lg border border-zinc-800/80 border-l-[3px] border-l-sky-500/70 bg-zinc-950/75 px-3 py-2.5 space-y-2 transition-all duration-300 ${
+            className={`rounded-lg border border-zinc-800/80 border-l-[3px] border-l-sky-500/70 bg-zinc-950/75 px-3 py-2.5 space-y-2 transition-[box-shadow,ring-color] duration-150 ${
               highlightedId === turn.id
                 ? "ring-2 ring-sky-400/80 shadow-lg shadow-sky-500/10"
                 : ""
@@ -6445,7 +6455,7 @@ function RowEditor({
   useEffect(() => {
     const el = promptRef.current;
     if (el) {
-      el.style.height = "0";
+      el.style.height = "auto";
       const minH = zen && !hasSessionOutput ? 88 : 26;
       el.style.height = `${Math.max(minH, el.scrollHeight)}px`;
     }
@@ -6454,7 +6464,7 @@ function RowEditor({
   useEffect(() => {
     const el = noteRef.current;
     if (el) {
-      el.style.height = "0";
+      el.style.height = "auto";
       el.style.height = `${Math.max(72, el.scrollHeight)}px`;
     }
   }, [note, stageMode]);
@@ -6724,10 +6734,13 @@ function RowEditor({
     for (const ref of [threadScrollRef, zenThreadScrollRef]) {
       const el = ref.current;
       if (el) {
-        el.scrollTo({
-          top: el.scrollHeight,
-          behavior: smooth ? "smooth" : "auto",
-        });
+        const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+        if (distFromBottom > 4) {
+          el.scrollTo({
+            top: el.scrollHeight,
+            behavior: smooth ? "smooth" : "auto",
+          });
+        }
       }
     }
   }, []);

@@ -1935,12 +1935,6 @@ export async function fetchOpenCodeSessionSummary(
         }
 
         if (part.type === "tool" && part.name) {
-          // If the assistant emitted narration text before this tool call, move that narration into intermediate steps
-          if (curTurn.text.trim()) {
-            curTurn.steps.push({ kind: "reasoning", text: curTurn.text.trim() });
-            curTurn.text = "";
-          }
-
           const inp = part.state?.input;
           const questionDetail =
             part.name === "question" && Array.isArray(inp?.questions)
