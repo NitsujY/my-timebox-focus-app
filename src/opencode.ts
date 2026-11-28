@@ -1295,7 +1295,7 @@ async function fetchSingleServerSnapshot(srv: OpenCodeServer): Promise<{
         serverName: srv.name,
         modelKey: formatModelKey(s.model) || undefined,
         status,
-        updatedAt: s.time?.updated ?? s.time?.created ?? Date.now(),
+        updatedAt: s.time?.updated ?? s.time?.created ?? 0,
         busyAt: s.time?.busy,
         idleAt: s.time?.idle,
         viewedAt: s.time?.viewed,

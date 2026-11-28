@@ -388,12 +388,57 @@ export default function App() {
   // Poll configured OpenCode servers every 3s + listen to SSE `/event` on default server
   const syncOpenCode = useCallback(async () => {
     const snap = await fetchOpenCodeSnapshot();
-    setOcConnected(snap.connected);
-    setOcServerOnlineById(snap.serverOnlineById);
+    setOcConnected((prev) => (prev !== snap.connected ? snap.connected : prev));
+    setOcServerOnlineById((prev) => {
+      const keys = Object.keys(snap.serverOnlineById);
+      if (keys.length !== Object.keys(prev).length) return snap.serverOnlineById;
+      for (const k of keys) {
+        if (prev[k] !== snap.serverOnlineById[k]) return snap.serverOnlineById;
+      }
+      return prev;
+    });
     if (snap.connected) {
-      setOcSessions(snap.sessions);
-      setOcModelsByServer(snap.modelsByServer);
-      setOcProjectsByServer((prev) => ({ ...prev, ...snap.projectsByServer }));
+      setOcSessions((prev) => {
+        if (prev.length !== snap.sessions.length) return snap.sessions;
+        const changed = snap.sessions.some((s, i) => {
+          const p = prev[i];
+          return (
+            !p ||
+            p.id !== s.id ||
+            p.status !== s.status ||
+            p.updatedAt !== s.updatedAt ||
+            p.modelKey !== s.modelKey ||
+            p.form?.id !== s.form?.id ||
+            p.permission?.id !== s.permission?.id
+          );
+        });
+        return changed ? snap.sessions : prev;
+      });
+      setOcModelsByServer((prev) => {
+        const srvKeys = Object.keys(snap.modelsByServer);
+        if (srvKeys.length !== Object.keys(prev).length) return snap.modelsByServer;
+        const changed = srvKeys.some((k) => {
+          const pList = prev[k] || [];
+          const nList = snap.modelsByServer[k] || [];
+          return (
+            pList.length !== nList.length ||
+            pList.some((m, idx) => m.key !== nList[idx]?.key)
+          );
+        });
+        return changed ? snap.modelsByServer : prev;
+      });
+      setOcProjectsByServer((prev) => {
+        const srvKeys = Object.keys(snap.projectsByServer);
+        const changed = srvKeys.some((k) => {
+          const pList = prev[k] || [];
+          const nList = snap.projectsByServer[k] || [];
+          return (
+            pList.length !== nList.length ||
+            pList.some((r, idx) => r.dir !== nList[idx]?.dir)
+          );
+        });
+        return changed ? { ...prev, ...snap.projectsByServer } : prev;
+      });
     }
   }, []);
 
@@ -1303,8 +1348,10 @@ export default function App() {
         if (nextDesc !== (currentTask.description ?? "")) {
           await updateTask(currentTask.id, { description: nextDesc }).catch(() => {});
         }
-        showToast(`"${serverId}" offline — queued in Todoist`);
-        return;
+        if (!meta.queued) {
+          showToast(`"${serverId}" offline — queued in Todoist`);
+        }
+        throw new Error(`Server ${serverId} unreachable`);
       }
 
       const freshId = tmpIdMapRef.current.get(t.id) ?? resolvedId;
@@ -1370,6 +1417,7 @@ export default function App() {
   );
 
   const launchingQueueRef = useRef<Set<string>>(new Set());
+  const queueFailCooldownRef = useRef<Map<string, number>>(new Map());
 
   // ponytail: single sequential auto-loop reuses handToAgent + native OpenCode question tool
   const [autoPilot, setAutoPilot] = useState(false);
@@ -1377,14 +1425,20 @@ export default function App() {
   const runQueuedTasks = useCallback(
     async (list: Task[] = queuedForAgentTasks) => {
       if (!ocConnected) return;
+      const now = Date.now();
       for (const t of list) {
         if (launchingQueueRef.current.has(t.id)) continue;
+        const lastFailed = queueFailCooldownRef.current.get(t.id) ?? 0;
+        if (now - lastFailed < 60_000) continue;
         const meta = parseTaskDescription(t.description);
         const srv = resolveServer(meta.server || ocConfig.defaultServerId, ocConfig);
         if (!ocServerOnlineById[srv.id]) continue;
         launchingQueueRef.current.add(t.id);
         try {
           await handToAgent(t, undefined, srv.id);
+          queueFailCooldownRef.current.delete(t.id);
+        } catch {
+          queueFailCooldownRef.current.set(t.id, Date.now());
         } finally {
           launchingQueueRef.current.delete(t.id);
         }
@@ -1393,11 +1447,16 @@ export default function App() {
     [ocConnected, queuedForAgentTasks, handToAgent, ocConfig, ocServerOnlineById],
   );
 
+  const queuedKey = useMemo(
+    () => queuedForAgentTasks.map((t) => t.id).sort().join(","),
+    [queuedForAgentTasks],
+  );
+
   useEffect(() => {
     if (ocConnected && ocConfig.autoRunQueued && queuedForAgentTasks.length > 0) {
       void runQueuedTasks(queuedForAgentTasks);
     }
-  }, [ocConnected, ocConfig.autoRunQueued, queuedForAgentTasks, runQueuedTasks]);
+  }, [ocConnected, ocConfig.autoRunQueued, queuedKey, runQueuedTasks]);
 
   useEffect(() => {
     if (!autoPilot || !ocConnected) return;
