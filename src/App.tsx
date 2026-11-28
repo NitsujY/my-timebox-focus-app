@@ -17,8 +17,10 @@ import {
   fetchOpenCodeSessionSummary,
   fetchOpenCodeSnapshot,
   fetchServerProjects,
+  fetchSlashItemsForServer,
   findMatchingSessionsForJira,
   formatTaskDescription,
+  getCachedSlashItems,
   getOpenCodeEventUrl,
   getOpenCodeWebUrl,
   interruptOpenCodeSession,
@@ -52,6 +54,7 @@ import {
   type OpenCodeModelOption,
   type OpenCodeRepo,
   type OpenCodeServer,
+  type OpenCodeSlashItem,
   type OpenCodeVerifyResult,
   type SessionFileDiff,
   type SessionStepItem,
@@ -881,8 +884,10 @@ export default function App() {
       ? resolveServer(explicitServer || ocConfig.defaultServerId, ocConfig)
       : null;
     const serverId = targetSrv ? targetSrv.id : "";
+    const serverModels = serverId ? (ocModelsByServer[serverId] ?? []) : [];
+    const discoveredNodeDefault = serverModels.find((m) => m.isDefault)?.key;
     const model = hasAgentContext
-      ? (extra?.model || targetSrv?.defaultModel || ocConfig.defaultModel || "")
+      ? (extra?.model || targetSrv?.defaultModel || ocConfig.defaultModel || discoveredNodeDefault || "")
       : "";
     const prompt = extra?.prompt || p.prompt || "";
     const note = extra?.note || "";
@@ -1200,6 +1205,8 @@ export default function App() {
         ocConfig,
       );
       const serverId = targetSrv.id;
+      const serverModels = ocModelsByServer[serverId] ?? [];
+      const discoveredNodeDefault = serverModels.find((m) => m.isDefault)?.key;
       // For an existing session, preserve its active model (`existingLive.modelKey`) unless an explicit modelOverride was given.
       const modelKey = latestSid
         ? (modelOverride || existingLive?.modelKey || meta.model || "")
@@ -1207,6 +1214,7 @@ export default function App() {
             meta.model ||
             targetSrv.defaultModel ||
             ocConfig.defaultModel ||
+            discoveredNodeDefault ||
             "");
 
       let sid = latestSid;
@@ -2976,10 +2984,15 @@ function FocusView({
     const title = `[${issue.key}] ${issue.summary}`;
     const noteParts = [issue.url, issue.description].filter(Boolean);
     const hasMatchedSession = matchedSessionIds.length > 0;
+    const srvModels = ocModelsByServer[defaultServerId] ?? [];
+    const discoveredNodeDefault = srvModels.find((m) => m.isDefault)?.key;
+    const targetSrv = ocServers.find((s) => s.id === defaultServerId);
+    const resolvedModel = targetSrv?.defaultModel || discoveredNodeDefault;
     onAdd(title, target === "backlog" ? undefined : focusId, {
       jira: issue.key,
       repo: issue.suggestedRepo || undefined,
       server: defaultServerId,
+      model: resolvedModel || undefined,
       note: noteParts.join("\n"),
       prompt: `Work on Jira issue ${issue.key}: ${issue.summary}`,
       sessions: matchedSessionIds,
@@ -4037,12 +4050,17 @@ function BacklogView({
     const title = `[${issue.key}] ${issue.summary}`;
     const noteParts = [issue.url, issue.description].filter(Boolean);
     const hasMatchedSession = matchedSessionIds.length > 0;
+    const srvModels = ocModelsByServer[defaultServerId] ?? [];
+    const discoveredNodeDefault = srvModels.find((m) => m.isDefault)?.key;
+    const targetSrv = ocServers.find((s) => s.id === defaultServerId);
+    const resolvedModel = targetSrv?.defaultModel || discoveredNodeDefault;
     onAdd(
       `${title}${target === "focus" ? " #Focus" : ""}`,
       {
         jira: issue.key,
         repo: issue.suggestedRepo || undefined,
         server: defaultServerId,
+        model: resolvedModel || undefined,
         note: noteParts.join("\n"),
         prompt: `Work on Jira issue ${issue.key}: ${issue.summary}`,
         sessions: matchedSessionIds,
@@ -6453,8 +6471,228 @@ function RowEditor({
   );
   const serverModels = ocModelsByServer[server] ?? [];
   const defaultModelObj = serverModels.find((m) => m.isDefault);
+  const effectiveDefaultModel = activeSrvObj?.defaultModel || defaultModelObj?.key || "";
   const isTargetServerOnline = ocServerOnlineById[server] ?? ocConnected;
   const targetLabel = repo ? `${server}/${shortRepo(repo)}` : server;
+
+  // Slash (`/`) commands, skills & tools autocomplete state
+  const effectiveSrvId = server || defaultServerId || "local";
+  const [slashItems, setSlashItems] = useState<OpenCodeSlashItem[]>(() =>
+    getCachedSlashItems(effectiveSrvId),
+  );
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [slashDismissedFor, setSlashDismissedFor] = useState<string | null>(null);
+  const [forceSlashOpen, setForceSlashOpen] = useState(false);
+
+  useEffect(() => {
+    if (!server) return;
+    let cancelled = false;
+    const repoDir = repo ? resolveRepoDir(repo, server) : undefined;
+    void fetchSlashItemsForServer(server, repoDir).then((items) => {
+      if (!cancelled) setSlashItems(items);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [server, repo]);
+
+  const activeSlashToken = useMemo(() => {
+    if (!server) return null;
+    // Match `/` at start of text or after whitespace right at the end of inputVal
+    const m = inputVal.match(/(?:^|\s)\/([a-zA-Z0-9_:-]*)$/);
+    if (m) {
+      return {
+        query: m[1] ?? "",
+        fullToken: `/${m[1] ?? ""}`,
+      };
+    }
+    if (forceSlashOpen) {
+      return {
+        query: "",
+        fullToken: "",
+      };
+    }
+    return null;
+  }, [inputVal, server, forceSlashOpen]);
+
+  const filteredSlashItems = useMemo(() => {
+    if (!activeSlashToken) return [];
+    const q = activeSlashToken.query.toLowerCase();
+    if (!q) return slashItems.slice(0, 12);
+    const scored = slashItems
+      .map((item) => {
+        const idLower = item.id.toLowerCase();
+        const nameLower = item.name.toLowerCase();
+        const descLower = item.description.toLowerCase();
+        if (idLower === q) return { item, score: 0 };
+        if (idLower.startsWith(q)) return { item, score: 1 };
+        if (nameLower.startsWith(q)) return { item, score: 2 };
+        if (idLower.includes(q) || nameLower.includes(q)) return { item, score: 3 };
+        if (descLower.includes(q)) return { item, score: 4 };
+        return null;
+      })
+      .filter((x): x is { item: OpenCodeSlashItem; score: number } => x !== null);
+    scored.sort((a, b) => a.score - b.score || a.item.id.localeCompare(b.item.id));
+    return scored.slice(0, 10).map((x) => x.item);
+  }, [activeSlashToken, slashItems]);
+
+  const isSlashMenuOpen = Boolean(
+    server &&
+      activeSlashToken &&
+      filteredSlashItems.length > 0 &&
+      slashDismissedFor !== inputVal,
+  );
+
+  useEffect(() => {
+    setSlashIndex(0);
+  }, [activeSlashToken?.query, isSlashMenuOpen]);
+
+  const updateComposerText = (next: string) => {
+    if (hasSessionOutput && server) {
+      setReplyText(next);
+    } else {
+      setPrompt(next);
+      scheduleFlush();
+    }
+  };
+
+  const applySlashSelection = (item: OpenCodeSlashItem) => {
+    const replacement = `/${item.id} `;
+    let nextVal: string;
+    if (inputVal.match(/(?:^|\s)\/[a-zA-Z0-9_:-]*$/)) {
+      nextVal = inputVal.replace(/\/([a-zA-Z0-9_:-]*)$/, replacement);
+    } else {
+      const prefix = inputVal && !inputVal.endsWith(" ") ? `${inputVal} ` : inputVal;
+      nextVal = `${prefix}${replacement}`;
+    }
+    updateComposerText(nextVal);
+    setForceSlashOpen(false);
+    setSlashDismissedFor(nextVal);
+    window.requestAnimationFrame(() => {
+      const el = promptRef.current;
+      if (el) {
+        el.focus();
+        el.setSelectionRange(nextVal.length, nextVal.length);
+      }
+    });
+  };
+
+  const handleToggleSlashButton = () => {
+    if (isSlashMenuOpen) {
+      setForceSlashOpen(false);
+      setSlashDismissedFor(inputVal);
+      return;
+    }
+    setSlashDismissedFor(null);
+    if (!inputVal.match(/(?:^|\s)\/[a-zA-Z0-9_:-]*$/)) {
+      const nextVal = inputVal && !inputVal.endsWith(" ") ? `${inputVal} /` : `${inputVal}/`;
+      updateComposerText(nextVal);
+      window.requestAnimationFrame(() => {
+        const el = promptRef.current;
+        if (el) {
+          el.focus();
+          el.setSelectionRange(nextVal.length, nextVal.length);
+        }
+      });
+    } else {
+      setForceSlashOpen(true);
+      promptRef.current?.focus();
+    }
+  };
+
+  const handleComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (isSlashMenuOpen && filteredSlashItems.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSlashIndex((i) => (i + 1) % filteredSlashItems.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSlashIndex(
+          (i) => (i - 1 + filteredSlashItems.length) % filteredSlashItems.length,
+        );
+        return;
+      }
+      if (e.key === "Tab" || (e.key === "Enter" && !e.metaKey && !e.ctrlKey && !e.shiftKey)) {
+        const picked = filteredSlashItems[slashIndex] ?? filteredSlashItems[0];
+        if (picked) {
+          e.preventDefault();
+          applySlashSelection(picked);
+          return;
+        }
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        setForceSlashOpen(false);
+        setSlashDismissedFor(inputVal);
+        return;
+      }
+    }
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      setForceSlashOpen(false);
+      submitToAgent();
+    }
+  };
+
+  const slashMenuEl = isSlashMenuOpen ? (
+    <div
+      role="listbox"
+      aria-label="Slash commands, skills, and tools"
+      className="absolute bottom-full left-0 right-0 z-40 mb-1.5 max-h-60 overflow-y-auto rounded-xl border border-zinc-700/90 bg-zinc-950/98 p-1.5 shadow-2xl backdrop-blur-md"
+    >
+      <div className="flex items-center justify-between px-2 py-1 text-[10px] font-mono uppercase tracking-wider text-zinc-500 border-b border-zinc-800/80 mb-1">
+        <span>Commands · Skills · Tools ({server})</span>
+        <span>↑↓ navigate · ↵/Tab insert · Esc close</span>
+      </div>
+      {filteredSlashItems.map((item, idx) => {
+        const active = idx === slashIndex;
+        const badgeCls =
+          item.kind === "command"
+            ? "border-orange-500/40 bg-orange-950/50 text-orange-300"
+            : item.kind === "skill"
+              ? "border-sky-500/40 bg-sky-950/50 text-sky-300"
+              : "border-emerald-500/40 bg-emerald-950/50 text-emerald-300";
+        return (
+          <button
+            key={`${item.kind}:${item.id}`}
+            type="button"
+            role="option"
+            aria-selected={active}
+            onMouseEnter={() => setSlashIndex(idx)}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              applySlashSelection(item);
+            }}
+            className={`flex w-full items-start justify-between gap-2.5 rounded-lg px-2.5 py-1.5 text-left transition-colors ${
+              active ? "bg-zinc-800/90 text-zinc-100" : "text-zinc-300 hover:bg-zinc-900"
+            }`}
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5">
+                <span className="font-mono text-[12.5px] font-semibold text-orange-400">
+                  /{item.id}
+                </span>
+                {item.argHint && (
+                  <span className="font-mono text-[11px] text-zinc-500">
+                    {item.argHint}
+                  </span>
+                )}
+              </div>
+              <p className="truncate text-[11.5px] text-zinc-400">{item.description}</p>
+            </div>
+            <span
+              className={`mt-0.5 shrink-0 rounded border px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-wider ${badgeCls}`}
+            >
+              {item.kind}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  ) : null;
 
   const handleAddCustomFolder = () => {
     const rawDir = customFolderDir.trim();
@@ -6645,10 +6883,12 @@ function RowEditor({
       if (initialMsg) {
         setPendingSteer({ text: initialMsg, sentAt: Date.now() });
       }
+      const resolvedModelForStart =
+        model || effectiveDefaultModel || undefined;
       onHandToAgent(
         prompt,
         server,
-        activeSid ? explicitModelOverride : (model || undefined),
+        activeSid ? explicitModelOverride : resolvedModelForStart,
         repo,
         note,
       );
@@ -6760,7 +7000,11 @@ function RowEditor({
       className="max-w-52 truncate rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[11px] text-zinc-200 outline-none hover:border-zinc-700"
     >
       <option value="">
-        {defaultModelObj ? `Default (${defaultModelObj.name})` : "Default model"}
+        {effectiveDefaultModel
+          ? `Default (${shortModelLabel(effectiveDefaultModel, serverModels)})`
+          : defaultModelObj
+            ? `Default (${defaultModelObj.name})`
+            : "Default model"}
       </option>
       {model && !serverModels.some((m) => m.key === model) && (
         <option value={model}>{shortModelLabel(model)}</option>
@@ -7335,31 +7579,42 @@ function RowEditor({
                 {/* Prompt Composer & Launch Action */}
                 <div className="space-y-3 pt-4 border-t border-zinc-800/60">
                   <div className="flex items-center justify-between">
-                    <label className="font-mono text-[11px] text-zinc-400 uppercase tracking-wider">
-                      Initial Prompt for {targetLabel}
-                    </label>
+                    <div className="flex items-center gap-2">
+                      <label className="font-mono text-[11px] text-zinc-400 uppercase tracking-wider">
+                        Initial Prompt for {targetLabel}
+                      </label>
+                      {server && (
+                        <button
+                          type="button"
+                          onClick={handleToggleSlashButton}
+                          title="Browse /commands, skills, and tools"
+                          className="rounded border border-zinc-800 bg-zinc-900/90 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 hover:border-orange-500/50 hover:text-orange-300 transition-colors"
+                        >
+                          / commands & skills
+                        </button>
+                      )}
+                    </div>
                     <span className="font-mono text-[11px] text-zinc-500">
-                      Press ⌘↵ to start
+                      Type <code className="text-zinc-300">/</code> for skills · ⌘↵ to start
                     </span>
                   </div>
 
-                  <textarea
-                    ref={promptRef}
-                    rows={5}
-                    value={prompt}
-                    onChange={(e) => {
-                      setPrompt(e.target.value);
-                      scheduleFlush();
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                        e.preventDefault();
-                        submitToAgent();
-                      }
-                    }}
-                    placeholder={`Describe the objective for OpenCode on ${targetLabel}…`}
-                    className="w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/90 p-3.5 text-[14px] leading-relaxed text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-orange-500/70 transition-colors"
-                  />
+                  <div className="relative">
+                    {slashMenuEl}
+                    <textarea
+                      ref={promptRef}
+                      rows={5}
+                      value={prompt}
+                      onChange={(e) => {
+                        setForceSlashOpen(false);
+                        setPrompt(e.target.value);
+                        scheduleFlush();
+                      }}
+                      onKeyDown={handleComposerKeyDown}
+                      placeholder={`Describe the objective for OpenCode on ${targetLabel}… (type / for commands, skills & tools)`}
+                      className="w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/90 p-3.5 text-[14px] leading-relaxed text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-orange-500/70 transition-colors"
+                    />
+                  </div>
 
                   <div className="flex items-center justify-between pt-1">
                     <div className="flex items-center gap-2">
@@ -7574,19 +7829,29 @@ function RowEditor({
               </div>
 
               {/* Compact Bottom Steer Composer */}
-              <div className="shrink-0 mt-1.5 flex items-end gap-2 rounded-xl border border-zinc-800 bg-zinc-950/95 px-3 py-1.5 focus-within:border-orange-500/70">
+              <div className="relative shrink-0 mt-1.5 flex items-end gap-2 rounded-xl border border-zinc-800 bg-zinc-950/95 px-3 py-1.5 focus-within:border-orange-500/70">
+                {slashMenuEl}
+                {server && (
+                  <button
+                    type="button"
+                    onClick={handleToggleSlashButton}
+                    title="Browse /commands, skills, and tools"
+                    aria-label="Slash commands and skills"
+                    className="mb-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-zinc-800 bg-zinc-900 font-mono text-[12px] font-semibold text-zinc-400 hover:border-orange-500/50 hover:text-orange-300 transition-colors"
+                  >
+                    /
+                  </button>
+                )}
                 <textarea
                   ref={promptRef}
                   rows={1}
                   value={replyText}
-                  onChange={(e) => setReplyText(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                      e.preventDefault();
-                      submitToAgent();
-                    }
+                  onChange={(e) => {
+                    setForceSlashOpen(false);
+                    setReplyText(e.target.value);
                   }}
-                  placeholder={`Steer OpenCode on ${targetLabel} (⌘↵ to send)…`}
+                  onKeyDown={handleComposerKeyDown}
+                  placeholder={`Steer OpenCode on ${targetLabel} (type / for skills & commands · ⌘↵ to send)…`}
                   className="min-w-0 flex-1 resize-none overflow-y-auto max-h-36 bg-transparent py-0.5 text-[13.5px] leading-relaxed text-zinc-100 outline-none placeholder:text-zinc-600"
                 />
                 <div className="flex shrink-0 items-center gap-1.5 pb-0.5">
@@ -7934,10 +8199,22 @@ function RowEditor({
 
             {/* 5. Compact Single-Line Steer / Prompt Composer */}
             <div
-              className={`flex items-end gap-2 rounded-lg border border-zinc-800/90 bg-zinc-950 px-2.5 py-1.5 focus-within:border-zinc-700 ${
+              className={`relative flex items-end gap-2 rounded-lg border border-zinc-800/90 bg-zinc-950 px-2.5 py-1.5 focus-within:border-zinc-700 ${
                 stageMode ? "shrink-0 mt-1.5" : "mt-2"
               }`}
             >
+              {slashMenuEl}
+              {server && (
+                <button
+                  type="button"
+                  onClick={handleToggleSlashButton}
+                  title="Browse /commands, skills, and tools"
+                  aria-label="Slash commands and skills"
+                  className="mb-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-zinc-800 bg-zinc-900 font-mono text-[11.5px] font-semibold text-zinc-400 hover:border-orange-500/50 hover:text-orange-300 transition-colors"
+                >
+                  /
+                </button>
+              )}
               <textarea
                 ref={promptRef}
                 className="min-w-0 flex-1 resize-none overflow-y-auto max-h-36 bg-transparent py-0.5 text-[13px] sm:text-[13.5px] leading-relaxed text-zinc-100 outline-none placeholder:text-zinc-600"
@@ -7945,12 +8222,13 @@ function RowEditor({
                   !server
                     ? "Add notes, steps, or scratchpad for this focus session…"
                     : hasSessionOutput
-                      ? `Steer OpenCode on ${targetLabel}… (⌘↵ to send)`
-                      : `Prompt for ${targetLabel}… (⌘↵ to run)`
+                      ? `Steer OpenCode on ${targetLabel}… (/ for skills & commands · ⌘↵ to send)`
+                      : `Prompt for ${targetLabel}… (/ for skills & commands · ⌘↵ to run)`
                 }
                 rows={1}
                 value={inputVal}
                 onChange={(e) => {
+                  setForceSlashOpen(false);
                   if (hasSessionOutput && server) {
                     setReplyText(e.target.value);
                   } else {
@@ -7958,12 +8236,7 @@ function RowEditor({
                     scheduleFlush();
                   }
                 }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                    e.preventDefault();
-                    submitToAgent();
-                  }
-                }}
+                onKeyDown={handleComposerKeyDown}
               />
               <div className="flex shrink-0 items-center gap-1 pb-0.5 text-[12px]">
                 {!stageMode && (
@@ -8302,6 +8575,7 @@ function AddRow({
   );
   const serverModels = ocModelsByServer[effectiveServerId || defaultServerId] ?? [];
   const defaultModelObj = serverModels.find((m) => m.isDefault);
+  const effectiveDefaultModel = activeSrvObj?.defaultModel || defaultModelObj?.key || "";
   const effectiveRepo = parsed.repo || (showDetails ? pickedRepo : "");
   const isTargetServerOnline = effectiveServerId
     ? (ocServerOnlineById[effectiveServerId] ?? ocConnected)
@@ -8336,7 +8610,7 @@ function AddRow({
     onAdd(raw, {
       repo: effectiveRepo || undefined,
       server: serverToUse || undefined,
-      model: pickedModel || undefined,
+      model: pickedModel || (serverToUse ? effectiveDefaultModel : undefined),
       prompt: combinedPrompt || undefined,
       mode,
     });
@@ -8516,7 +8790,11 @@ function AddRow({
               className="max-w-52 truncate rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[11px] text-zinc-200 outline-none"
             >
               <option value="">
-                {defaultModelObj ? `Default (${defaultModelObj.name})` : "Default model"}
+                {effectiveDefaultModel
+                  ? `Default (${shortModelLabel(effectiveDefaultModel, serverModels)})`
+                  : defaultModelObj
+                    ? `Default (${defaultModelObj.name})`
+                    : "Default model"}
               </option>
               {serverModels.map((m) => (
                 <option key={m.key} value={m.key}>

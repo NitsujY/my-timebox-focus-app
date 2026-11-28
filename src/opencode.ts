@@ -1053,6 +1053,160 @@ export async function fetchServerProjects(
   }
 }
 
+export type OpenCodeSlashItem = {
+  id: string;
+  name: string;
+  description: string;
+  kind: "command" | "skill" | "tool";
+  argHint?: string;
+};
+
+export const BUILTIN_TOOL_SLASH_ITEMS: OpenCodeSlashItem[] = [
+  {
+    id: "explore",
+    name: "explore",
+    description: "Spawn the fast explore subagent to search files and analyze code",
+    kind: "tool",
+    argHint: "<query or question>",
+  },
+  {
+    id: "websearch",
+    name: "websearch",
+    description: "Search the web for documentation, recent releases, or answers",
+    kind: "tool",
+    argHint: "<search query>",
+  },
+  {
+    id: "webfetch",
+    name: "webfetch",
+    description: "Fetch and read content from an HTTP/HTTPS URL",
+    kind: "tool",
+    argHint: "<url> [instructions]",
+  },
+  {
+    id: "browser",
+    name: "browser",
+    description: "Open and interact with pages in the OpenCode browser",
+    kind: "tool",
+    argHint: "<url or action>",
+  },
+  {
+    id: "shell",
+    name: "shell",
+    description: "Execute a shell command in the workspace",
+    kind: "tool",
+    argHint: "<command>",
+  },
+  {
+    id: "subagent",
+    name: "subagent",
+    description: "Run a complex multi-step task in a background subagent",
+    kind: "tool",
+    argHint: "<task description>",
+  },
+];
+
+type ServerCatalogEntry = {
+  fetchedAt: number;
+  commands: Set<string>;
+  skills: Set<string>;
+  items: OpenCodeSlashItem[];
+};
+
+const serverSlashCatalogCache = new Map<string, ServerCatalogEntry>();
+
+export function getCachedSlashItems(serverId?: string): OpenCodeSlashItem[] {
+  const srv = resolveServer(serverId);
+  return serverSlashCatalogCache.get(srv.id)?.items ?? BUILTIN_TOOL_SLASH_ITEMS;
+}
+
+export async function fetchSlashItemsForServer(
+  serverId?: string,
+  directory?: string,
+  force = false,
+): Promise<OpenCodeSlashItem[]> {
+  const srv = resolveServer(serverId);
+  const cacheKey = srv.id;
+  const cached = serverSlashCatalogCache.get(cacheKey);
+  if (!force && cached && Date.now() - cached.fetchedAt < 60_000) {
+    return cached.items;
+  }
+  const base = resolveOpenCodeBase(srv.endpoint);
+  const headers = buildServerHeaders(srv);
+  const dirQuery = directory?.trim()
+    ? `?location[directory]=${encodeURIComponent(directory.trim())}`
+    : "";
+  try {
+    const [cmdRes, skillRes] = await Promise.all([
+      fetch(`${base}/command${dirQuery}`, { headers }).catch(() => null),
+      fetch(`${base}/skill${dirQuery}`, { headers }).catch(() => null),
+    ]);
+    const commands = new Set<string>();
+    const skills = new Set<string>();
+    const byId = new Map<string, OpenCodeSlashItem>();
+
+    if (cmdRes && cmdRes.ok) {
+      const cmdJson = (await cmdRes.json()) as {
+        data?: Array<{ name?: string; description?: string }>;
+      };
+      for (const c of cmdJson.data ?? []) {
+        const name = c?.name?.trim();
+        if (!name) continue;
+        commands.add(name);
+        byId.set(name, {
+          id: name,
+          name,
+          description: c.description?.trim() || `Run /${name} command`,
+          kind: "command",
+        });
+      }
+    }
+
+    if (skillRes && skillRes.ok) {
+      const skillJson = (await skillRes.json()) as {
+        data?: Array<{ id?: string; name?: string; description?: string }>;
+      };
+      for (const s of skillJson.data ?? []) {
+        const id = (s?.id || s?.name || "").trim();
+        if (!id) continue;
+        skills.add(id);
+        if (!byId.has(id)) {
+          byId.set(id, {
+            id,
+            name: s?.name?.trim() || id,
+            description: s?.description?.trim() || `Load ${id} skill`,
+            kind: "skill",
+          });
+        }
+      }
+    }
+
+    for (const toolItem of BUILTIN_TOOL_SLASH_ITEMS) {
+      if (!byId.has(toolItem.id)) {
+        byId.set(toolItem.id, toolItem);
+      }
+    }
+
+    const items = Array.from(byId.values()).sort((a, b) => {
+      const order = { command: 0, skill: 1, tool: 2 };
+      if (order[a.kind] !== order[b.kind]) return order[a.kind] - order[b.kind];
+      return a.id.localeCompare(b.id);
+    });
+
+    if (commands.size > 0 || skills.size > 0) {
+      serverSlashCatalogCache.set(cacheKey, {
+        fetchedAt: Date.now(),
+        commands,
+        skills,
+        items,
+      });
+    }
+    return items;
+  } catch {
+    return cached?.items ?? BUILTIN_TOOL_SLASH_ITEMS;
+  }
+}
+
 export function getOpenCodeWebUrl(sessionID?: string, srv?: OpenCodeServer): string | null {
   const s = srv ?? resolveServer();
   const base = resolveOpenCodeBase(s.endpoint);
@@ -1222,8 +1376,13 @@ export async function createAndPromptOpenCodeSession(opts: {
   onSessionCreated?: (sessionID: string) => void;
 }): Promise<string> {
   const srv = resolveServer(opts.serverId);
+  const cfg = loadOpenCodeConfig();
   const base = resolveOpenCodeBase(srv.endpoint);
-  const modelRef = parseModelKey(opts.modelKey);
+  const cachedModels = serverModelsCache.get(srv.id)?.models;
+  const discoveredDefaultModel = cachedModels?.find((m) => m.isDefault)?.key;
+  const effectiveModelKey =
+    opts.modelKey || srv.defaultModel || cfg.defaultModel || discoveredDefaultModel;
+  const modelRef = parseModelKey(effectiveModelKey);
   const createRes = await fetch(`${base}/session`, {
     method: "POST",
     headers: buildServerHeaders(srv, true),
@@ -1321,13 +1480,95 @@ export async function sendOpenCodePrompt(
     /* ignore form discovery errors */
   }
 
-  // 1. Admit the steer prompt to the session inbox first so the runner drains it immediately when the tool unblocks
-  const res = await fetch(`${base}/session/${sessionID}/prompt`, {
-    method: "POST",
-    headers: buildServerHeaders(srv, true),
-    body: JSON.stringify({ text, delivery: "steer" }),
-  });
-  if (!res.ok) throw new Error(`Prompt on ${srv.name} failed: ${res.status}`);
+  // Ensure command & skill catalog is warm when user uses `/` or `@`
+  const trimmed = text.trim();
+  if ((trimmed.includes("/") || trimmed.includes("@")) && !serverSlashCatalogCache.has(srv.id)) {
+    await fetchSlashItemsForServer(srv.id).catch(() => {});
+  }
+  const catalog = serverSlashCatalogCache.get(srv.id);
+
+  // Detect any `/skill-id` or `@skill-id` mentions that match registered skills on this server
+  const skillIdSet = new Set<string>();
+  if (catalog && catalog.skills.size > 0) {
+    const tokenRegex = /(?:^|\s)[/@]([a-zA-Z0-9_:-]+(?:\/[a-zA-Z0-9_:-]+)*)/g;
+    let m: RegExpExecArray | null;
+    while ((m = tokenRegex.exec(trimmed)) !== null) {
+      const candidate = m[1];
+      if (catalog.skills.has(candidate)) {
+        skillIdSet.add(candidate);
+      }
+    }
+  }
+
+  let dispatched = false;
+  let effectiveText = text;
+
+  if (trimmed.startsWith("/")) {
+    const slashMatch = trimmed
+      .slice(1)
+      .match(/^([a-zA-Z0-9_:-]+(?:\/[a-zA-Z0-9_:-]+)*)(?:\s+([\s\S]*))?$/);
+    if (slashMatch) {
+      const [, slashName, rawArgs = ""] = slashMatch;
+      const restArgs = rawArgs.trim();
+
+      if (catalog?.commands.has(slashName)) {
+        // 1a. Execute registered OpenCode slash command via `/session/:id/command`
+        const matchedSkills = Array.from(skillIdSet).map((id) => ({ id }));
+        const cmdRes = await fetch(`${base}/session/${sessionID}/command`, {
+          method: "POST",
+          headers: buildServerHeaders(srv, true),
+          body: JSON.stringify({
+            name: slashName,
+            text: restArgs,
+            ...(matchedSkills.length > 0 ? { skills: matchedSkills } : {}),
+            delivery: "steer",
+          }),
+        }).catch(() => null);
+        if (cmdRes && cmdRes.ok) {
+          dispatched = true;
+        }
+      } else if (catalog?.skills.has(slashName)) {
+        // 1b. Registered skill invoked with `/skill-id [args]`
+        skillIdSet.add(slashName);
+        if (!restArgs) {
+          effectiveText = `/${slashName}`;
+        }
+      } else {
+        // 1c. Built-in tool / subagent slash shortcut
+        if (slashName === "explore" && restArgs) {
+          effectiveText = `Use the explore subagent to investigate: ${restArgs}`;
+        } else if (slashName === "websearch" && restArgs) {
+          effectiveText = `Use the websearch tool to search for: ${restArgs}`;
+        } else if (slashName === "webfetch" && restArgs) {
+          effectiveText = `Use the webfetch tool to fetch and read: ${restArgs}`;
+        } else if (slashName === "browser") {
+          if (catalog?.skills.has("browser")) skillIdSet.add("browser");
+          if (restArgs) {
+            effectiveText = `Use the browser tool to: ${restArgs}`;
+          }
+        } else if (slashName === "shell" && restArgs) {
+          effectiveText = `Use the shell tool to run: \`${restArgs}\``;
+        } else if (slashName === "subagent" && restArgs) {
+          effectiveText = `Use a subagent to execute: ${restArgs}`;
+        }
+      }
+    }
+  }
+
+  // 1. Admit the steer prompt (with any matched skill attachments) to the session inbox first
+  if (!dispatched) {
+    const matchedSkills = Array.from(skillIdSet).map((id) => ({ id }));
+    const res = await fetch(`${base}/session/${sessionID}/prompt`, {
+      method: "POST",
+      headers: buildServerHeaders(srv, true),
+      body: JSON.stringify({
+        text: effectiveText,
+        ...(matchedSkills.length > 0 ? { skills: matchedSkills } : {}),
+        delivery: "steer",
+      }),
+    });
+    if (!res.ok) throw new Error(`Prompt on ${srv.name} failed: ${res.status}`);
+  }
 
   // 2. If the session was blocked on a pending question form, cancel the form so the agent unblocks and processes the steer
   if (formIds.size > 0) {
@@ -1561,6 +1802,8 @@ export async function fetchOpenCodeSessionSummary(
         id?: string;
         type?: string;
         text?: string;
+        skill?: string;
+        name?: string;
         metadata?: { displayText?: string };
         error?: { message?: string };
         time?: { created?: number; completed?: number };
@@ -1643,6 +1886,24 @@ export async function fetchOpenCodeSessionSummary(
             steps: [],
             timestamp: m.time?.created,
           });
+        }
+        continue;
+      }
+
+      if (m.type === "skill") {
+        const skillLabel = (m.skill || m.name || "").trim();
+        if (skillLabel) {
+          const prevTurn = groupedTurns[groupedTurns.length - 1];
+          if (!prevTurn || prevTurn.role !== "user" || !prevTurn.text.includes(skillLabel)) {
+            groupedTurns.push({
+              id: m.id ?? `skill_${groupedTurns.length}`,
+              role: "user",
+              text: `/${skillLabel}`,
+              tools: [],
+              steps: [],
+              timestamp: m.time?.created,
+            });
+          }
         }
         continue;
       }
