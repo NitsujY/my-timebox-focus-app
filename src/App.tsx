@@ -1748,169 +1748,179 @@ export default function App() {
 
   return (
     <div className="min-h-screen md:h-screen flex flex-col">
-      <header className="shrink-0 z-10 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur">
+      <header className="shrink-0 z-10 border-b border-zinc-800/80 bg-zinc-950/95 backdrop-blur">
         <div
-          className={`mx-auto flex w-full items-center justify-between gap-2 px-4 py-2.5 sm:px-6 lg:px-8 ${
+          className={`mx-auto flex w-full items-center justify-between gap-2 px-3 py-1.5 sm:px-4 ${
             view === "focus" || view === "backlog" ? "max-w-none" : "max-w-5xl"
           }`}
         >
-          <div className="flex shrink-0 items-center gap-2.5">
-            <span className="hidden text-[15px] font-semibold tracking-tight text-zinc-100 sm:inline">
+          {/* Left: Brand + Inline List Switcher + OpenCode Status */}
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:gap-2">
+            <span className="hidden shrink-0 text-[13px] font-semibold tracking-tight text-zinc-100 sm:inline">
               Timebox
             </span>
-            <button
-              type="button"
-              onClick={async () => {
-                setView("settings");
-                const res = await runVerifyOpenCode();
-                showToast(
-                  res.ok
-                    ? `✓ OpenCode connected · ${res.sessionCount} sessions (${res.latencyMs}ms)`
-                    : `OpenCode offline (${res.error || "unreachable"})`,
-                );
-              }}
-              className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-zinc-800/90 bg-zinc-900/70 px-2.5 py-1 font-mono text-[11px] leading-none tabular-nums text-zinc-400 transition-colors hover:border-zinc-700 hover:bg-zinc-800/80 hover:text-zinc-200"
-              title={
-                ocConnected
-                  ? `Connected to ${onlineServerCount}/${totalServerCount} OpenCode server(s) (${ocSessions.length} sessions) — click to verify / manage servers`
-                  : `OpenCode offline — click to configure servers or mobile queue`
-              }
-            >
-              <span
-                className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                  ocVerifying
-                    ? "bg-orange-400 animate-ping"
-                    : ocConnected
-                      ? runningOcCount > 0
-                        ? "bg-orange-500 animate-pulse"
-                        : "bg-orange-500"
-                      : queuedForAgentTasks.length > 0
-                        ? "bg-amber-400"
-                        : "bg-zinc-600"
-                }`}
-              />
-              {ocConnected ? (
-                <>
-                  <span className="text-zinc-200">
-                    {onlineServerCount}/{totalServerCount}
-                  </span>
-                  <span className="hidden text-zinc-500 sm:inline">online</span>
-                  {needsYouFocusCount > 0 && (
-                    <>
-                      <span className="text-zinc-700" aria-hidden="true">
-                        ·
-                      </span>
-                      <span className="font-medium text-orange-400">
-                        {needsYouFocusCount}
-                        <span className="hidden sm:inline"> need you</span>
-                      </span>
-                    </>
-                  )}
-                  {runningOcCount > 0 && (
-                    <>
-                      <span className="text-zinc-700" aria-hidden="true">
-                        ·
-                      </span>
-                      <span className="font-medium text-zinc-200">
-                        {runningOcCount}
-                        <span className="hidden sm:inline"> working</span>
-                      </span>
-                    </>
-                  )}
-                </>
-              ) : queuedForAgentTasks.length > 0 ? (
-                <>
-                  <span className="hidden text-zinc-500 sm:inline">offline</span>
-                  <span className="hidden text-zinc-700 sm:inline" aria-hidden="true">
-                    ·
-                  </span>
-                  <span className="text-amber-400">
-                    {queuedForAgentTasks.length}
-                    <span className="hidden sm:inline"> queued</span>
-                    <span className="sm:hidden">q</span>
-                  </span>
-                </>
-              ) : (
-                <>
-                  <span className="text-zinc-500 sm:hidden">off</span>
-                  <span className="hidden text-zinc-500 sm:inline">offline</span>
-                </>
-              )}
-            </button>
-            {ocConnected && (
+
+            {projects.length >= 2 && (
+              <div className="flex min-w-0 items-center gap-1 overflow-x-auto border-zinc-800/80 sm:border-l sm:pl-2 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+                <span className="hidden shrink-0 font-mono text-[10px] text-zinc-500 lg:inline">
+                  List:
+                </span>
+                {projects.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    title={`Switch to ${p.name}`}
+                    className={`max-w-32 shrink-0 truncate rounded px-2 py-0.5 text-[11px] transition-colors ${
+                      p.id === projectId
+                        ? "bg-zinc-800 font-medium text-zinc-100"
+                        : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
+                    }`}
+                    onClick={() => p.id !== projectId && switchProject(p.id)}
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="hidden shrink-0 items-center gap-1.5 md:flex">
               <button
                 type="button"
-                onClick={() => setAutoPilot((v) => !v)}
-                className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 font-mono text-[11px] leading-none transition-colors ${
-                  autoPilot
-                    ? "border-orange-500/60 bg-orange-500/15 text-orange-300"
-                    : "border-zinc-800/90 bg-zinc-900/70 text-zinc-400 hover:border-zinc-700 hover:bg-zinc-800/80 hover:text-zinc-200"
-                }`}
-                title="Auto-loop through unstarted Focus (execute) and Backlog (spec & ask) tasks one at a time"
+                onClick={async () => {
+                  setView("settings");
+                  const res = await runVerifyOpenCode();
+                  showToast(
+                    res.ok
+                      ? `✓ OpenCode connected · ${res.sessionCount} sessions (${res.latencyMs}ms)`
+                      : `OpenCode offline (${res.error || "unreachable"})`,
+                  );
+                }}
+                className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-zinc-800/90 bg-zinc-900/70 px-2 py-0.5 font-mono text-[10.5px] leading-none tabular-nums text-zinc-400 transition-colors hover:border-zinc-700 hover:bg-zinc-800/80 hover:text-zinc-200"
+                title={
+                  ocConnected
+                    ? `Connected to ${onlineServerCount}/${totalServerCount} OpenCode server(s) (${ocSessions.length} sessions) — click to verify / manage servers`
+                    : `OpenCode offline — click to configure servers or mobile queue`
+                }
               >
                 <span
-                  className={`h-1.5 w-1.5 rounded-full ${
-                    autoPilot ? "bg-orange-400 animate-pulse" : "bg-zinc-600"
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                    ocVerifying
+                      ? "bg-orange-400 animate-ping"
+                      : ocConnected
+                        ? runningOcCount > 0
+                          ? "bg-orange-500 animate-pulse"
+                          : "bg-orange-500"
+                        : queuedForAgentTasks.length > 0
+                          ? "bg-amber-400"
+                          : "bg-zinc-600"
                   }`}
                 />
-                <span>{autoPilot ? "Auto-Loop ON" : "Auto-Loop"}</span>
+                {ocConnected ? (
+                  <>
+                    <span className="text-zinc-200">
+                      {onlineServerCount}/{totalServerCount}
+                    </span>
+                    {needsYouFocusCount > 0 && (
+                      <>
+                        <span className="text-zinc-700" aria-hidden="true">
+                          ·
+                        </span>
+                        <span className="font-medium text-orange-400">
+                          {needsYouFocusCount} need you
+                        </span>
+                      </>
+                    )}
+                    {runningOcCount > 0 && (
+                      <>
+                        <span className="text-zinc-700" aria-hidden="true">
+                          ·
+                        </span>
+                        <span className="font-medium text-zinc-200">
+                          {runningOcCount} working
+                        </span>
+                      </>
+                    )}
+                  </>
+                ) : queuedForAgentTasks.length > 0 ? (
+                  <span className="text-amber-400">{queuedForAgentTasks.length}q</span>
+                ) : (
+                  <span className="text-zinc-500">offline</span>
+                )}
               </button>
-            )}
+              {ocConnected && (
+                <button
+                  type="button"
+                  onClick={() => setAutoPilot((v) => !v)}
+                  className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 font-mono text-[10.5px] leading-none transition-colors ${
+                    autoPilot
+                      ? "border-orange-500/60 bg-orange-500/15 text-orange-300"
+                      : "border-zinc-800/90 bg-zinc-900/70 text-zinc-400 hover:border-zinc-700 hover:bg-zinc-800/80 hover:text-zinc-200"
+                  }`}
+                  title="Auto-loop through unstarted Focus (execute) and Backlog (spec & ask) tasks one at a time"
+                >
+                  <span
+                    className={`h-1.5 w-1.5 rounded-full ${
+                      autoPilot ? "bg-orange-400 animate-pulse" : "bg-zinc-600"
+                    }`}
+                  />
+                  <span>{autoPilot ? "Auto-Loop ON" : "Auto-Loop"}</span>
+                </button>
+              )}
+            </div>
           </div>
-          <nav className="flex shrink-0 items-center justify-center gap-0.5 sm:gap-1">
-            {(["focus", "backlog", "review", "analysis"] as const).map((v) => (
+
+          {/* Right: Views + Help & Settings */}
+          <div className="flex shrink-0 items-center gap-1">
+            <nav className="flex shrink-0 items-center gap-0.5">
+              {(["focus", "backlog", "review", "analysis"] as const).map((v) => (
+                <button
+                  key={v}
+                  className="whitespace-nowrap rounded px-2 py-1 text-[12px] capitalize text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200 data-[active=true]:bg-zinc-800/90 data-[active=true]:font-medium data-[active=true]:text-zinc-100"
+                  data-active={view === v}
+                  onClick={() => setView(v)}
+                >
+                  {v}
+                  {v === "focus" && needsYouFocusCount > 0 && (
+                    <span className="ml-1 font-mono text-[10.5px] tabular-nums text-orange-400">
+                      {needsYouFocusCount}
+                    </span>
+                  )}
+                  {v === "backlog" && backlogTasks.length > 0 && (
+                    <span className="ml-1 font-mono text-[10.5px] tabular-nums text-zinc-500">
+                      {backlogTasks.length}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </nav>
+            <div className="flex shrink-0 items-center gap-0.5 border-l border-zinc-800/80 pl-1">
               <button
-                key={v}
-                className={`${btn} whitespace-nowrap px-2 py-1.5 capitalize sm:px-2.5 ${view === v ? "bg-zinc-800/90 font-medium text-zinc-100" : ""}`}
-                onClick={() => setView(v)}
+                className="rounded px-1.5 py-1 text-[12px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+                title="How it works (?)"
+                onClick={() => setShowRef((s) => !s)}
               >
-                {v}
-                {v === "focus" && needsYouFocusCount > 0 && (
-                  <span className="ml-1 font-mono text-[11px] tabular-nums text-orange-400">
-                    {needsYouFocusCount}
-                  </span>
-                )}
-                {v === "backlog" && backlogTasks.length > 0 && (
-                  <span className="ml-1 font-mono text-[11px] tabular-nums text-zinc-500">
-                    {backlogTasks.length}
-                  </span>
-                )}
+                ?
               </button>
-            ))}
-          </nav>
-          <div className="flex shrink-0 items-center justify-end gap-1">
-            <button
-              className={`${btn} px-2 py-1.5 text-zinc-500`}
-              title="How it works (?)"
-              onClick={() => setShowRef((s) => !s)}
-            >
-              ?
-            </button>
-            <button
-              className={`${btn} px-2 py-1.5 text-zinc-500 ${view === "settings" ? "text-zinc-200" : ""}`}
-              title="Settings"
-              onClick={() => setView(view === "settings" ? "focus" : "settings")}
-            >
-              ⚙
-            </button>
-            <span
-              className={`ml-0.5 h-1.5 w-1.5 shrink-0 rounded-full ${error ? "bg-red-500" : "bg-zinc-700"}`}
-              title={error || "in sync"}
-            />
+              <button
+                className={`rounded px-1.5 py-1 text-[12px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 ${view === "settings" ? "text-zinc-200" : ""}`}
+                title="Settings"
+                onClick={() => setView(view === "settings" ? "focus" : "settings")}
+              >
+                ⚙
+              </button>
+              <span
+                className={`ml-0.5 h-1.5 w-1.5 shrink-0 rounded-full ${error ? "bg-red-500" : "bg-zinc-700"}`}
+                title={error || "in sync"}
+              />
+            </div>
           </div>
         </div>
-        <ProjectChips
-          projects={projects}
-          projectId={projectId}
-          onProject={switchProject}
-          wide={view === "focus" || view === "backlog"}
-        />
       </header>
       <main
-        className={`mx-auto w-full flex-1 min-h-0 flex flex-col px-4 sm:px-6 lg:px-8 ${
+        className={`mx-auto w-full flex-1 min-h-0 flex flex-col px-2.5 sm:px-4 ${
           view === "focus" || view === "backlog"
-            ? "pt-3 pb-3 max-w-none overflow-y-auto"
-            : "pt-6 pb-12 max-w-5xl overflow-y-auto"
+            ? "py-1.5 max-w-none overflow-y-auto md:overflow-hidden"
+            : "pt-5 pb-10 max-w-5xl overflow-y-auto"
         }`}
       >
         {error && <p className="mb-4 text-[13px] text-zinc-500">{error}</p>}
@@ -2921,9 +2931,19 @@ function FocusView({
   const [jiraData, setJiraData] = useState<JiraPullResult | null>(() => loadCachedJiraIssues());
 
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
-    const saved = Number(load("tb_sidebar_width", 420));
-    return saved >= 280 && saved <= 760 ? saved : 420;
+    const saved = Number(load("tb_sidebar_width", 340));
+    return saved >= 240 && saved <= 760 ? saved : 340;
   });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() =>
+    load("tb_sidebar_collapsed", false),
+  );
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      save("tb_sidebar_collapsed", next);
+      return next;
+    });
+  }, []);
   const [isResizing, setIsResizing] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(expandedId);
   const [mobileShowStage, setMobileShowStage] = useState(false);
@@ -3118,8 +3138,8 @@ function FocusView({
   };
 
   const resetSidebarWidth = () => {
-    setSidebarWidth(420);
-    save("tb_sidebar_width", 420);
+    setSidebarWidth(340);
+    save("tb_sidebar_width", 340);
   };
 
   const combinedTasks = useMemo(() => {
@@ -3238,7 +3258,7 @@ function FocusView({
       <li key={t.id}>
         <div
           onClick={() => selectTask(t.id, true)}
-          className={`group flex cursor-pointer flex-col gap-1.5 rounded-lg border px-3.5 py-3 transition-all duration-150 ${
+          className={`group flex cursor-pointer flex-col gap-1 rounded-lg border px-2.5 py-2 transition-all duration-150 ${
             active
               ? "border-orange-500 bg-zinc-900/95 shadow-sm"
               : triage === "needs_you"
@@ -3246,8 +3266,8 @@ function FocusView({
                 : "border-zinc-800/75 bg-zinc-900/30 hover:border-zinc-700 hover:bg-zinc-900/65"
           } ${isNew(t) ? "row-new" : ""}`}
         >
-          <div className="flex items-center justify-between gap-2 font-mono text-[11px]">
-            <div className="flex min-w-0 items-center gap-2">
+          <div className="flex items-center justify-between gap-1.5 font-mono text-[10.5px]">
+            <div className="flex min-w-0 items-center gap-1.5">
               <button
                 type="button"
                 onClick={(e) => {
@@ -3257,7 +3277,7 @@ function FocusView({
                 }}
                 title="Mark task Done"
                 aria-label="Mark task Done"
-                className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-zinc-700 text-[10px] text-transparent transition-colors hover:border-orange-500 hover:text-orange-400"
+                className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border border-zinc-700 text-[9px] text-transparent transition-colors hover:border-orange-500 hover:text-orange-400"
               >
                 ✓
               </button>
@@ -3278,9 +3298,9 @@ function FocusView({
               </span>
             </div>
 
-            <div className="flex shrink-0 items-center gap-1.5">
+            <div className="flex shrink-0 items-center gap-1">
               {meta.jira && (
-                <span className="rounded border border-blue-500/30 bg-blue-950/40 px-1.5 py-0.2 font-mono text-[10px] text-blue-300">
+                <span className="rounded border border-blue-500/30 bg-blue-950/40 px-1 py-0.2 font-mono text-[9.5px] text-blue-300">
                   {meta.jira}
                 </span>
               )}
@@ -3320,7 +3340,7 @@ function FocusView({
                   }}
                   title={`Start ${planned}m Pomodoro timer`}
                   aria-label={`Start ${planned}m Pomodoro timer`}
-                  className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 text-[10px] font-medium text-zinc-200 hover:border-orange-500/60 hover:text-orange-300 transition-colors"
+                  className="rounded border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 text-[10px] font-medium text-zinc-200 hover:border-orange-500/60 hover:text-orange-300 transition-colors"
                 >
                   ⏱ Start
                 </button>
@@ -3338,7 +3358,7 @@ function FocusView({
                       ? `Run on ${assignedServerId}`
                       : `Queue for ${assignedServerId}`
                   }
-                  className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 text-[10px] font-medium text-orange-400 hover:border-orange-500/60 hover:text-orange-300"
+                  className="rounded border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 text-[10px] font-medium text-orange-400 hover:border-orange-500/60 hover:text-orange-300"
                 >
                   Run
                 </button>
@@ -3346,17 +3366,17 @@ function FocusView({
             </div>
           </div>
 
-          <p className="line-clamp-2 text-[15px] font-medium leading-snug text-zinc-100">
+          <p className="line-clamp-2 text-[13.5px] font-medium leading-snug text-zinc-100">
             {t.content}
           </p>
 
           {liveSession?.form && (
-            <p className="truncate text-[12px] text-orange-300/90">
+            <p className="truncate text-[11.5px] text-orange-300/90">
               {liveSession.form.fields?.[0]?.title || liveSession.form.title}
             </p>
           )}
           {liveSession?.permission && (
-            <p className="truncate font-mono text-[11px] text-orange-300/90">
+            <p className="truncate font-mono text-[10.5px] text-orange-300/90">
               Allow {liveSession.permission.action}: {liveSession.permission.resources.join(" ")}
             </p>
           )}
@@ -3370,79 +3390,7 @@ function FocusView({
     Object.values(ocVerifyById ?? {}).some((v) => v?.error?.includes("401"));
 
   return (
-    <div className="space-y-3 flex-1 min-h-0 flex flex-col md:h-full">
-      {queuedTasks.length > 0 && (
-        <div className="flex items-center justify-between gap-3 rounded-md border border-zinc-800 bg-zinc-900/90 px-3.5 py-2.5 text-[13px]">
-          <div className="flex min-w-0 items-center gap-2 text-zinc-300">
-            <span className="h-2 w-2 shrink-0 rounded-full bg-amber-400 animate-pulse" />
-            <span className="truncate">
-              {ocConnected
-                ? autoRunQueued
-                  ? `Launching ${queuedTasks.length} queued task${queuedTasks.length === 1 ? "" : "s"} on connected OpenCode server…`
-                  : `${queuedTasks.length} task${queuedTasks.length === 1 ? "" : "s"} queued for OpenCode`
-                : isAuthRequired
-                  ? `${queuedTasks.length} task${queuedTasks.length === 1 ? "" : "s"} queued — OpenCode password required`
-                  : `${queuedTasks.length} task${queuedTasks.length === 1 ? "" : "s"} queued in Todoist — will run when assigned server connects`}
-            </span>
-          </div>
-          {ocConnected && !autoRunQueued ? (
-            <button
-              type="button"
-              onClick={onRunQueued}
-              className="shrink-0 rounded bg-orange-600 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-orange-500"
-            >
-              ▶ Run now
-            </button>
-          ) : !ocConnected ? (
-            <button
-              type="button"
-              onClick={onOpenOcSettings}
-              className="shrink-0 rounded border border-orange-500/40 bg-orange-950/30 px-2.5 py-1 text-[12px] font-medium text-orange-400 hover:border-orange-500 hover:bg-orange-950/50"
-            >
-              {isAuthRequired ? "Set Password ⚙" : "Servers ⚙"}
-            </button>
-          ) : null}
-        </div>
-      )}
-
-      {showPlan && (
-        <div className="flex items-center justify-between gap-4 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-3">
-          <p className="text-[13px] text-zinc-400">
-            Plan your day — pull up to {cap} tasks into Focus
-          </p>
-          <div className="flex shrink-0 gap-1.5">
-            <button
-              className="rounded bg-orange-600 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-orange-500"
-              onClick={() => {
-                setTriageOpen(true);
-                setMobileShowStage(true);
-                if (!triageData && !triageLoading) void runTriage();
-              }}
-            >
-              ⚡ Triage Backlog
-            </button>
-            <button className={`${btn} text-orange-500`} onClick={onGoBacklog}>
-              Browse Backlog
-            </button>
-            <button
-              className={btn}
-              onClick={() => {
-                save("tb_plan_dismissed", todayStr());
-                setDismissed(todayStr());
-              }}
-            >
-              Dismiss
-            </button>
-          </div>
-        </div>
-      )}
-
-      {focusTasks.length > cap && (
-        <p className="rounded-md border border-zinc-800 bg-zinc-900 px-4 py-3 text-[13px] text-zinc-400">
-          Too many priorities — Focus holds {cap}. Move something back to Backlog.
-        </p>
-      )}
-
+    <div className="flex-1 min-h-0 flex flex-col md:h-full">
       {/* Draggable Triage Sidebar + Wide Main Stage */}
       <div
         className={`flex flex-1 min-h-0 flex-col md:flex-row items-stretch ${
@@ -3453,90 +3401,161 @@ function FocusView({
         <aside
           aria-label="Focus task queues"
           style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
-          className={`w-full shrink-0 space-y-6 md:w-[var(--sidebar-w)] md:h-full md:overflow-y-auto md:pr-1.5 [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent] ${
-            mobileShowStage && selectedTask ? "hidden md:block" : "block"
+          className={`w-full shrink-0 space-y-3 md:w-[var(--sidebar-w)] md:h-full md:overflow-y-auto md:pr-1 [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent] ${
+            sidebarCollapsed
+              ? "hidden"
+              : mobileShowStage && selectedTask
+                ? "hidden md:block"
+                : "block"
           }`}
         >
-          {/* GROUP 1: WAITING FOR YOUR ANSWER */}
-          <section className="space-y-2">
-            <div className="flex items-center justify-between px-1">
-              <div className="flex items-center gap-2">
-                <span className="h-2 w-2 rounded-full bg-orange-500" />
-                <h2 className="text-[12px] font-semibold uppercase tracking-wider text-orange-400">
-                  Waiting for Your Answer
-                </h2>
+          {queuedTasks.length > 0 && (
+            <div className="flex items-center justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-900/90 px-2.5 py-1.5 text-[11.5px]">
+              <div className="flex min-w-0 items-center gap-1.5 text-zinc-300">
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400 animate-pulse" />
+                <span className="truncate">
+                  {ocConnected
+                    ? autoRunQueued
+                      ? `Launching ${queuedTasks.length} queued…`
+                      : `${queuedTasks.length} queued`
+                    : isAuthRequired
+                      ? `${queuedTasks.length} queued (auth req)`
+                      : `${queuedTasks.length} queued offline`}
+                </span>
               </div>
-              <span className="font-mono text-[12px] tabular-nums text-orange-400">
-                {laneNeedsYou.length}
-              </span>
+              {ocConnected && !autoRunQueued ? (
+                <button
+                  type="button"
+                  onClick={onRunQueued}
+                  className="shrink-0 rounded bg-orange-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-orange-500"
+                >
+                  ▶ Run
+                </button>
+              ) : !ocConnected ? (
+                <button
+                  type="button"
+                  onClick={onOpenOcSettings}
+                  className="shrink-0 rounded border border-orange-500/40 bg-orange-950/30 px-2 py-0.5 text-[11px] font-medium text-orange-400 hover:border-orange-500"
+                >
+                  ⚙
+                </button>
+              ) : null}
             </div>
+          )}
 
-            {laneNeedsYou.length === 0 ? (
-              <p className="rounded-lg border border-zinc-900 bg-zinc-950/50 px-3.5 py-3 text-[13px] text-zinc-500">
-                No tasks blocked on your input.
-              </p>
-            ) : (
-              <ul className="space-y-1.5">
+          {showPlan && (
+            <div className="flex items-center justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[11.5px]">
+              <span className="truncate text-zinc-400">Pull up to {cap} tasks</span>
+              <div className="flex shrink-0 items-center gap-1">
+                <button
+                  className="rounded bg-orange-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-orange-500"
+                  onClick={() => {
+                    setTriageOpen(true);
+                    setMobileShowStage(true);
+                    if (!triageData && !triageLoading) void runTriage();
+                  }}
+                >
+                  ⚡ Triage
+                </button>
+                <button
+                  className="px-1 text-zinc-500 hover:text-zinc-300"
+                  onClick={() => {
+                    save("tb_plan_dismissed", todayStr());
+                    setDismissed(todayStr());
+                  }}
+                  title="Dismiss"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* GROUP 1: WAITING FOR YOUR ANSWER (only rendered when non-empty) */}
+          {laneNeedsYou.length > 0 && (
+            <section className="space-y-1.5">
+              <div className="flex items-center justify-between px-1">
+                <div className="flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full bg-orange-500" />
+                  <h2 className="text-[11px] font-semibold uppercase tracking-wider text-orange-400">
+                    Waiting for Your Answer
+                  </h2>
+                </div>
+                <span className="font-mono text-[11px] tabular-nums text-orange-400">
+                  {laneNeedsYou.length}
+                </span>
+              </div>
+              <ul className="space-y-1">
                 {laneNeedsYou.map((t) => renderSidebarCard(t, t.section_id === bufferId))}
               </ul>
-            )}
-          </section>
+            </section>
+          )}
 
           {/* GROUP 1B: PARKED (AGENT FINISHED · READY FOR REVIEW) */}
           {laneParked.length > 0 && (
-            <section className="space-y-2">
+            <section className="space-y-1.5">
               <div className="flex items-center justify-between px-1">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5">
                   <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                  <h2 className="text-[12px] font-semibold uppercase tracking-wider text-emerald-400">
+                  <h2 className="text-[11px] font-semibold uppercase tracking-wider text-emerald-400">
                     Parked (Ready for Review)
                   </h2>
                 </div>
-                <span className="font-mono text-[12px] tabular-nums text-emerald-400">
+                <span className="font-mono text-[11px] tabular-nums text-emerald-400">
                   {laneParked.length}
                 </span>
               </div>
-              <ul className="space-y-1.5">
+              <ul className="space-y-1">
                 {laneParked.map((t) => renderSidebarCard(t, t.section_id === bufferId))}
               </ul>
             </section>
           )}
 
-          {/* GROUP 2: AGENT PROCESSING */}
-          <section className="space-y-2">
-            <div className="flex items-center justify-between px-1">
-              <div className="flex items-center gap-2">
-                <span className="h-2 w-2 rounded-full bg-zinc-200 animate-pulse" />
-                <h2 className="text-[12px] font-semibold uppercase tracking-wider text-zinc-300">
-                  Agent Processing
-                </h2>
+          {/* GROUP 2: AGENT PROCESSING (only rendered when non-empty) */}
+          {laneWorking.length > 0 && (
+            <section className="space-y-1.5">
+              <div className="flex items-center justify-between px-1">
+                <div className="flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full bg-zinc-200 animate-pulse" />
+                  <h2 className="text-[11px] font-semibold uppercase tracking-wider text-zinc-300">
+                    Agent Processing
+                  </h2>
+                </div>
+                <span className="font-mono text-[11px] tabular-nums text-zinc-400">
+                  {laneWorking.length}
+                </span>
               </div>
-              <span className="font-mono text-[12px] tabular-nums text-zinc-400">
-                {laneWorking.length}
-              </span>
-            </div>
-
-            {laneWorking.length === 0 ? (
-              <p className="rounded-lg border border-zinc-900 bg-zinc-950/50 px-3.5 py-2.5 text-[13px] text-zinc-500">
-                No agents currently running.
-              </p>
-            ) : (
-              <ul className="space-y-1.5">
+              <ul className="space-y-1">
                 {laneWorking.map((t) => renderSidebarCard(t, t.section_id === bufferId))}
               </ul>
-            )}
-          </section>
+            </section>
+          )}
 
           {/* GROUP 3: READY IN FOCUS & BUFFER */}
-          <section className="space-y-2">
+          <section className="space-y-1.5">
             <div className="flex items-center justify-between px-1">
-              <div className="flex items-center gap-2">
-                <span className="h-2 w-2 rounded-full bg-zinc-600" />
-                <h2 className="text-[12px] font-semibold uppercase tracking-wider text-zinc-400">
-                  Ready in Focus
-                </h2>
-              </div>
               <div className="flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-full bg-zinc-600" />
+                <h2 className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
+                  Focus
+                </h2>
+                <span
+                  title={
+                    focusTasks.length > cap
+                      ? `Too many priorities — Focus holds ${cap}. Move something back to Backlog.`
+                      : `Focus capacity: ${focusTasks.length}/${cap}`
+                  }
+                  className={`rounded px-1.5 py-0.2 font-mono text-[10px] tabular-nums ${
+                    focusTasks.length > cap
+                      ? "border border-amber-500/40 bg-amber-950/40 text-amber-300"
+                      : "text-zinc-500"
+                  }`}
+                >
+                  {focusTasks.length}/{cap}
+                  {focusTasks.length > cap ? " over" : ""}
+                </span>
+              </div>
+              <div className="flex items-center gap-1">
                 <button
                   type="button"
                   onClick={() => {
@@ -3545,7 +3564,7 @@ function FocusView({
                     setMobileShowStage(true);
                     if (!jiraData?.issues?.length && !jiraLoading) void runJiraPull();
                   }}
-                  className="inline-flex items-center gap-1 rounded border border-blue-500/40 bg-zinc-900/80 px-2 py-0.5 font-mono text-[10px] font-medium text-blue-400 hover:border-blue-500 hover:text-blue-300"
+                  className="inline-flex items-center gap-1 rounded border border-blue-500/40 bg-zinc-900/80 px-1.5 py-0.5 font-mono text-[10px] font-medium text-blue-400 hover:border-blue-500 hover:text-blue-300"
                   title="Pull assigned Jira issues via Atlassian MCP"
                 >
                   🎫 Jira
@@ -3559,27 +3578,32 @@ function FocusView({
                       setMobileShowStage(true);
                       if (!triageData && !triageLoading) void runTriage();
                     }}
-                    className="inline-flex items-center gap-1 rounded border border-orange-500/40 bg-zinc-900/80 px-2 py-0.5 font-mono text-[10px] font-medium text-orange-400 hover:border-orange-500 hover:text-orange-300"
+                    className="inline-flex items-center gap-1 rounded border border-orange-500/40 bg-zinc-900/80 px-1.5 py-0.5 font-mono text-[10px] font-medium text-orange-400 hover:border-orange-500 hover:text-orange-300"
                     title="Triage top tasks from Backlog"
                   >
                     ⚡ Triage
                   </button>
                 )}
-                <span className="font-mono text-[12px] tabular-nums text-zinc-500">
-                  {laneQueuedFocus.length + laneQueuedBuffer.length}
-                </span>
+                <button
+                  type="button"
+                  onClick={toggleSidebar}
+                  className="hidden md:inline-flex items-center justify-center rounded border border-zinc-800 bg-zinc-900/80 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                  title="Collapse task list sidebar"
+                >
+                  «
+                </button>
               </div>
             </div>
 
             {laneQueuedFocus.length === 0 && laneQueuedBuffer.length === 0 ? (
-              <div className="rounded-lg border border-zinc-900 bg-zinc-950/50 p-3 space-y-2">
-                <div className="flex items-center justify-between text-[12px] text-zinc-400">
-                  <span>Focus slots open (0/{cap})</span>
-                  <span className="font-mono text-[11px] text-zinc-500">
+              <div className="rounded-lg border border-zinc-900 bg-zinc-950/50 p-2.5 space-y-1.5">
+                <div className="flex items-center justify-between text-[11.5px] text-zinc-400">
+                  <span>No queued tasks ({focusTasks.length}/{cap})</span>
+                  <span className="font-mono text-[10.5px] text-zinc-500">
                     {backlogTasks.length} in backlog
                   </span>
                 </div>
-                {backlogTasks.length > 0 ? (
+                {backlogTasks.length > 0 && (
                   <button
                     type="button"
                     onClick={() => {
@@ -3587,19 +3611,14 @@ function FocusView({
                       setMobileShowStage(true);
                       if (!triageData && !triageLoading) void runTriage();
                     }}
-                    className="flex w-full items-center justify-center gap-2 rounded border border-orange-500/40 bg-orange-950/30 px-3 py-2 text-[13px] font-medium text-orange-400 hover:border-orange-500 hover:bg-orange-950/50 transition-colors"
+                    className="flex w-full items-center justify-center gap-1.5 rounded border border-orange-500/40 bg-orange-950/30 px-2.5 py-1.5 text-[12px] font-medium text-orange-400 hover:border-orange-500 hover:bg-orange-950/50 transition-colors"
                   >
-                    <span>⚡ Triage Backlog</span>
-                    <span className="font-mono text-[11px] text-orange-300/80">
-                      ({backlogTasks.length})
-                    </span>
+                    <span>⚡ Triage Backlog ({backlogTasks.length})</span>
                   </button>
-                ) : (
-                  <p className="text-[13px] text-zinc-500">Backlog is empty.</p>
                 )}
               </div>
             ) : (
-              <ul className="space-y-1.5">
+              <ul className="space-y-1">
                 {laneQueuedFocus.map((t) => renderSidebarCard(t, false))}
                 {laneQueuedBuffer.map((t) => renderSidebarCard(t, true))}
               </ul>
@@ -3641,17 +3660,17 @@ function FocusView({
           </section>
 
           {unlinkedOcSessions.length > 0 && (
-            <section className="border-t border-zinc-900 pt-3">
-              <p className="mb-1.5 px-1 text-[12px] text-zinc-500">
-                Unlinked OpenCode sessions (last 24h)
+            <section className="border-t border-zinc-900 pt-2">
+              <p className="mb-1 px-1 text-[11px] text-zinc-500">
+                Unlinked sessions (24h)
               </p>
-              <ul className="space-y-1">
+              <ul className="space-y-0.5">
                 {unlinkedOcSessions.slice(0, 6).map((s) => (
                   <li
                     key={s.id}
-                    className="flex min-h-9 items-center justify-between gap-2 rounded-md px-2 text-[13px] text-zinc-400 hover:bg-zinc-900"
+                    className="flex min-h-7 items-center justify-between gap-2 rounded px-1.5 text-[12px] text-zinc-400 hover:bg-zinc-900"
                   >
-                    <div className="flex min-w-0 items-center gap-2">
+                    <div className="flex min-w-0 items-center gap-1.5">
                       <span
                         className={`h-1.5 w-1.5 shrink-0 rounded-full ${
                           s.status === "running"
@@ -3660,28 +3679,28 @@ function FocusView({
                         }`}
                       />
                       {ocServers.length > 1 && (
-                        <span className="shrink-0 rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.2 font-mono text-[11px] text-zinc-400">
+                        <span className="shrink-0 rounded border border-zinc-800 bg-zinc-900 px-1 py-0.2 font-mono text-[10px] text-zinc-400">
                           {s.serverId}
                         </span>
                       )}
                       <span className="truncate text-zinc-300">{s.title}</span>
                       {s.repoShort && (
-                        <span className="shrink-0 font-mono text-[11px] text-zinc-600">
+                        <span className="shrink-0 font-mono text-[10px] text-zinc-600">
                           {s.repoShort}
                         </span>
                       )}
                     </div>
-                    <div className="flex shrink-0 items-center gap-2">
+                    <div className="flex shrink-0 items-center gap-1.5">
                       <button
                         onClick={() => onTrackOcSession(s)}
-                        className="text-[12px] text-zinc-400 hover:text-orange-500"
+                        className="text-[11px] text-zinc-400 hover:text-orange-500"
                         title="Create a Todoist Focus task linked to this session"
                       >
                         ＋ Track
                       </button>
                       <button
                         onClick={() => onIgnoreOcSession(s.id)}
-                        className="px-1 text-[12px] text-zinc-600 hover:text-zinc-400"
+                        className="px-1 text-[11px] text-zinc-600 hover:text-zinc-400"
                         title="Hide this session from Unlinked list (keeps session in OpenCode)"
                       >
                         ×
@@ -3695,23 +3714,25 @@ function FocusView({
         </aside>
 
         {/* DRAGGABLE RESIZE HANDLE (Desktop md+) */}
-        <div
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="Drag to resize sidebar (double-click to reset)"
-          title="Drag to resize sidebar · Double-click to reset"
-          onPointerDown={startResize}
-          onDoubleClick={resetSidebarWidth}
-          className="group hidden md:flex w-6 shrink-0 cursor-col-resize items-stretch justify-center self-stretch py-2 select-none md:h-full"
-        >
+        {!sidebarCollapsed && (
           <div
-            className={`w-px transition-colors duration-150 ${
-              isResizing
-                ? "w-0.5 bg-orange-500"
-                : "bg-zinc-800/80 group-hover:w-0.5 group-hover:bg-orange-500/80"
-            }`}
-          />
-        </div>
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Drag to resize sidebar (double-click to reset)"
+            title="Drag to resize sidebar · Double-click to reset"
+            onPointerDown={startResize}
+            onDoubleClick={resetSidebarWidth}
+            className="group hidden md:flex w-3 shrink-0 cursor-col-resize items-stretch justify-center self-stretch py-1 select-none md:h-full"
+          >
+            <div
+              className={`w-px transition-colors duration-150 ${
+                isResizing
+                  ? "w-0.5 bg-orange-500"
+                  : "bg-zinc-800/80 group-hover:w-0.5 group-hover:bg-orange-500/80"
+              }`}
+            />
+          </div>
+        )}
 
         {/* RIGHT MAIN STAGE WORKSPACE */}
         <div
@@ -3727,7 +3748,7 @@ function FocusView({
                 setTriageOpen(false);
                 setJiraOpen(false);
               }}
-              className="mb-3 inline-flex items-center gap-1.5 text-[13px] font-medium text-orange-400 md:hidden"
+              className="mb-2 inline-flex items-center gap-1.5 text-[12px] font-medium text-orange-400 md:hidden"
             >
               ← Back to Focus queues
               {laneNeedsYou.length > 0 ? ` (${laneNeedsYou.length} waiting)` : ""}
@@ -3772,6 +3793,8 @@ function FocusView({
                 t={selectedTask}
                 large
                 stageMode
+                sidebarCollapsed={sidebarCollapsed}
+                onToggleSidebar={toggleSidebar}
                 durations={durations}
                 defaultMinutes={defaultMinutes}
                 spentBy={spentBy}
@@ -3824,6 +3847,15 @@ function FocusView({
             </div>
           ) : (
             <div className="flex-1 flex flex-col items-center justify-center rounded-xl border border-zinc-800/80 bg-zinc-900/30 p-8 text-center">
+              {sidebarCollapsed && (
+                <button
+                  type="button"
+                  onClick={toggleSidebar}
+                  className="mb-3 rounded border border-zinc-800 bg-zinc-900 px-2.5 py-1 font-mono text-[11px] text-zinc-300 hover:border-zinc-700"
+                >
+                  » Show Sidebar
+                </button>
+              )}
               <p className="text-[15px] font-medium text-zinc-200">
                 No active tasks in Focus
               </p>
@@ -3949,9 +3981,19 @@ function BacklogView({
   onDelete: (t: Task) => void;
 }) {
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
-    const saved = Number(load("tb_sidebar_width", 420));
-    return saved >= 280 && saved <= 760 ? saved : 420;
+    const saved = Number(load("tb_sidebar_width", 340));
+    return saved >= 240 && saved <= 760 ? saved : 340;
   });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() =>
+    load("tb_sidebar_collapsed", false),
+  );
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      save("tb_sidebar_collapsed", next);
+      return next;
+    });
+  }, []);
   const [isResizing, setIsResizing] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(expandedId);
   const [mobileShowStage, setMobileShowStage] = useState(false);
@@ -4084,8 +4126,8 @@ function BacklogView({
   };
 
   const resetSidebarWidth = () => {
-    setSidebarWidth(420);
-    save("tb_sidebar_width", 420);
+    setSidebarWidth(340);
+    save("tb_sidebar_width", 340);
   };
 
   const selectedTask =
@@ -4169,14 +4211,14 @@ function BacklogView({
       <li key={t.id}>
         <div
           onClick={() => selectTask(t.id, true)}
-          className={`group flex cursor-pointer flex-col gap-1.5 rounded-lg border px-3.5 py-3 transition-all duration-150 ${
+          className={`group flex cursor-pointer flex-col gap-1 rounded-lg border px-2.5 py-2 transition-all duration-150 ${
             active
               ? "border-orange-500 bg-zinc-900/95 shadow-sm"
               : "border-zinc-800/75 bg-zinc-900/30 hover:border-zinc-700 hover:bg-zinc-900/65"
           } ${isNew(t) ? "row-new" : ""}`}
         >
-          <div className="flex items-center justify-between gap-2 font-mono text-[11px]">
-            <div className="flex min-w-0 items-center gap-2">
+          <div className="flex items-center justify-between gap-1.5 font-mono text-[10.5px]">
+            <div className="flex min-w-0 items-center gap-1.5">
               <button
                 type="button"
                 onClick={(e) => {
@@ -4185,7 +4227,7 @@ function BacklogView({
                 }}
                 title="Mark task Done"
                 aria-label="Mark task Done"
-                className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-zinc-700 text-[10px] text-transparent transition-colors hover:border-orange-500 hover:text-orange-400"
+                className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border border-zinc-700 text-[9px] text-transparent transition-colors hover:border-orange-500 hover:text-orange-400"
               >
                 ✓
               </button>
@@ -4227,9 +4269,9 @@ function BacklogView({
               </span>
             </div>
 
-            <div className="flex shrink-0 items-center gap-1.5">
+            <div className="flex shrink-0 items-center gap-1">
               {meta.jira && (
-                <span className="rounded border border-blue-500/30 bg-blue-950/40 px-1.5 py-0.2 font-mono text-[10px] text-blue-300">
+                <span className="rounded border border-blue-500/30 bg-blue-950/40 px-1 py-0.2 font-mono text-[9.5px] text-blue-300">
                   {meta.jira}
                 </span>
               )}
@@ -4256,7 +4298,7 @@ function BacklogView({
                   }}
                   title={`Move to Focus & start ${planned}m timer`}
                   aria-label={`Move to Focus & start ${planned}m timer`}
-                  className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 text-[10px] font-medium text-zinc-200 hover:border-orange-500/60 hover:text-orange-300 transition-colors"
+                  className="rounded border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 text-[10px] font-medium text-zinc-200 hover:border-orange-500/60 hover:text-orange-300 transition-colors"
                 >
                   ⏱ Start
                 </button>
@@ -4273,7 +4315,7 @@ function BacklogView({
                       ? `Move to Focus & run on ${assignedServerId}`
                       : `Move to Focus & queue for ${assignedServerId}`
                   }
-                  className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 text-[10px] font-medium text-orange-400 hover:border-orange-500/60 hover:text-orange-300"
+                  className="rounded border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 text-[10px] font-medium text-orange-400 hover:border-orange-500/60 hover:text-orange-300"
                 >
                   Run
                 </button>
@@ -4281,7 +4323,7 @@ function BacklogView({
             </div>
           </div>
 
-          <p className="line-clamp-2 text-[15px] font-medium leading-snug text-zinc-100">
+          <p className="line-clamp-2 text-[13.5px] font-medium leading-snug text-zinc-100">
             {t.content}
           </p>
         </div>
@@ -4290,7 +4332,7 @@ function BacklogView({
   };
 
   return (
-    <div className="space-y-3 flex-1 min-h-0 flex flex-col md:h-full">
+    <div className="flex-1 min-h-0 flex flex-col md:h-full">
       <div
         className={`flex flex-1 min-h-0 flex-col md:flex-row items-stretch ${
           isResizing ? "select-none cursor-col-resize" : ""
@@ -4300,76 +4342,83 @@ function BacklogView({
         <aside
           aria-label="Backlog task queue"
           style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
-          className={`w-full shrink-0 space-y-4 md:w-[var(--sidebar-w)] md:h-full md:overflow-y-auto md:pr-1.5 [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent] ${
-            mobileShowStage && (selectedTask || triageOpen) ? "hidden md:block" : "block"
+          className={`w-full shrink-0 space-y-3 md:w-[var(--sidebar-w)] md:h-full md:overflow-y-auto md:pr-1 [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent] ${
+            sidebarCollapsed
+              ? "hidden"
+              : mobileShowStage && (selectedTask || triageOpen)
+                ? "hidden md:block"
+                : "block"
           }`}
         >
           {backlogNeedsYou.length > 0 && (
-            <section className="space-y-2">
+            <section className="space-y-1.5">
               <div className="flex items-center justify-between px-1">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5">
                   <span className="h-2 w-2 rounded-full bg-orange-500" />
-                  <h2 className="text-[12px] font-semibold uppercase tracking-wider text-orange-400">
+                  <h2 className="text-[11px] font-semibold uppercase tracking-wider text-orange-400">
                     Waiting for Your Answer
                   </h2>
                 </div>
-                <span className="font-mono text-[12px] tabular-nums text-orange-400">
+                <span className="font-mono text-[11px] tabular-nums text-orange-400">
                   {backlogNeedsYou.length}
                 </span>
               </div>
-              <ul className="space-y-1.5">
+              <ul className="space-y-1">
                 {backlogNeedsYou.map((t) => renderBacklogCard(t))}
               </ul>
             </section>
           )}
 
           {backlogParked.length > 0 && (
-            <section className="space-y-2">
+            <section className="space-y-1.5">
               <div className="flex items-center justify-between px-1">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5">
                   <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                  <h2 className="text-[12px] font-semibold uppercase tracking-wider text-emerald-400">
+                  <h2 className="text-[11px] font-semibold uppercase tracking-wider text-emerald-400">
                     Parked (Ready for Review)
                   </h2>
                 </div>
-                <span className="font-mono text-[12px] tabular-nums text-emerald-400">
+                <span className="font-mono text-[11px] tabular-nums text-emerald-400">
                   {backlogParked.length}
                 </span>
               </div>
-              <ul className="space-y-1.5">
+              <ul className="space-y-1">
                 {backlogParked.map((t) => renderBacklogCard(t))}
               </ul>
             </section>
           )}
 
           {backlogWorking.length > 0 && (
-            <section className="space-y-2">
+            <section className="space-y-1.5">
               <div className="flex items-center justify-between px-1">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5">
                   <span className="h-2 w-2 rounded-full bg-zinc-200 animate-pulse" />
-                  <h2 className="text-[12px] font-semibold uppercase tracking-wider text-zinc-300">
+                  <h2 className="text-[11px] font-semibold uppercase tracking-wider text-zinc-300">
                     Agent Processing
                   </h2>
                 </div>
-                <span className="font-mono text-[12px] tabular-nums text-zinc-400">
+                <span className="font-mono text-[11px] tabular-nums text-zinc-400">
                   {backlogWorking.length}
                 </span>
               </div>
-              <ul className="space-y-1.5">
+              <ul className="space-y-1">
                 {backlogWorking.map((t) => renderBacklogCard(t))}
               </ul>
             </section>
           )}
 
-          <section className="space-y-2.5">
+          <section className="space-y-2">
             <div className="flex items-center justify-between px-1">
-              <div className="flex items-center gap-2">
-                <span className="h-2 w-2 rounded-full bg-zinc-500" />
-                <h2 className="text-[12px] font-semibold uppercase tracking-wider text-zinc-300">
-                  Backlog Queue
-                </h2>
-              </div>
               <div className="flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-full bg-zinc-500" />
+                <h2 className="text-[11px] font-semibold uppercase tracking-wider text-zinc-300">
+                  Backlog
+                </h2>
+                <span className="font-mono text-[11px] tabular-nums text-zinc-500">
+                  {backlogTasks.length}
+                </span>
+              </div>
+              <div className="flex items-center gap-1">
                 <button
                   type="button"
                   onClick={() => {
@@ -4378,7 +4427,7 @@ function BacklogView({
                     setMobileShowStage(true);
                     if (!jiraData?.issues?.length && !jiraLoading) void runJiraPull();
                   }}
-                  className="inline-flex items-center gap-1 rounded border border-blue-500/40 bg-zinc-900/80 px-2 py-0.5 font-mono text-[10px] font-medium text-blue-400 hover:border-blue-500 hover:text-blue-300"
+                  className="inline-flex items-center gap-1 rounded border border-blue-500/40 bg-zinc-900/80 px-1.5 py-0.5 font-mono text-[10px] font-medium text-blue-400 hover:border-blue-500 hover:text-blue-300"
                   title="Pull assigned Jira issues via Atlassian MCP"
                 >
                   🎫 Jira
@@ -4392,15 +4441,20 @@ function BacklogView({
                       setMobileShowStage(true);
                       if (!triageData && !triageLoading) void runTriage();
                     }}
-                    className="inline-flex items-center gap-1 rounded border border-orange-500/40 bg-zinc-900/80 px-2 py-0.5 font-mono text-[10px] font-medium text-orange-400 hover:border-orange-500 hover:text-orange-300"
+                    className="inline-flex items-center gap-1 rounded border border-orange-500/40 bg-zinc-900/80 px-1.5 py-0.5 font-mono text-[10px] font-medium text-orange-400 hover:border-orange-500 hover:text-orange-300"
                     title="Triage top tasks into Focus"
                   >
                     ⚡ Triage
                   </button>
                 )}
-                <span className="font-mono text-[12px] tabular-nums text-zinc-400">
-                  {backlogTasks.length}
-                </span>
+                <button
+                  type="button"
+                  onClick={toggleSidebar}
+                  className="hidden md:inline-flex items-center justify-center rounded border border-zinc-800 bg-zinc-900/80 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                  title="Collapse backlog sidebar"
+                >
+                  «
+                </button>
               </div>
             </div>
 
@@ -4421,12 +4475,12 @@ function BacklogView({
             />
 
             {backlogTasks.length === 0 ? (
-              <p className="rounded-lg border border-zinc-900 bg-zinc-950/50 px-3.5 py-4 text-[13px] text-zinc-500">
+              <p className="rounded-lg border border-zinc-900 bg-zinc-950/50 px-3 py-3 text-[12px] text-zinc-500">
                 Your parking lot for ideas. Dump anything here — it waits without interrupting you.
               </p>
             ) : (
               <>
-                <ul className="space-y-1.5">
+                <ul className="space-y-1">
                   {visibleTasks.map((t) => renderBacklogCard(t))}
                 </ul>
                 {!showAll && backlogQueued.length > PAGE && (
@@ -4440,23 +4494,25 @@ function BacklogView({
         </aside>
 
         {/* DRAGGABLE RESIZE HANDLE */}
-        <div
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="Drag to resize sidebar (double-click to reset)"
-          title="Drag to resize sidebar · Double-click to reset"
-          onPointerDown={startResize}
-          onDoubleClick={resetSidebarWidth}
-          className="group hidden md:flex w-6 shrink-0 cursor-col-resize items-stretch justify-center self-stretch py-2 select-none md:h-full"
-        >
+        {!sidebarCollapsed && (
           <div
-            className={`w-px transition-colors duration-150 ${
-              isResizing
-                ? "w-0.5 bg-orange-500"
-                : "bg-zinc-800/80 group-hover:w-0.5 group-hover:bg-orange-500/80"
-            }`}
-          />
-        </div>
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Drag to resize sidebar (double-click to reset)"
+            title="Drag to resize sidebar · Double-click to reset"
+            onPointerDown={startResize}
+            onDoubleClick={resetSidebarWidth}
+            className="group hidden md:flex w-3 shrink-0 cursor-col-resize items-stretch justify-center self-stretch py-1 select-none md:h-full"
+          >
+            <div
+              className={`w-px transition-colors duration-150 ${
+                isResizing
+                  ? "w-0.5 bg-orange-500"
+                  : "bg-zinc-800/80 group-hover:w-0.5 group-hover:bg-orange-500/80"
+              }`}
+            />
+          </div>
+        )}
 
         {/* RIGHT MAIN STAGE WORKSPACE */}
         <div
@@ -4472,7 +4528,7 @@ function BacklogView({
                 setTriageOpen(false);
                 setJiraOpen(false);
               }}
-              className="mb-3 inline-flex items-center gap-1.5 text-[13px] font-medium text-orange-400 md:hidden"
+              className="mb-2 inline-flex items-center gap-1.5 text-[12px] font-medium text-orange-400 md:hidden"
             >
               ← Back to Backlog ({backlogTasks.length})
             </button>
@@ -4522,6 +4578,8 @@ function BacklogView({
                 t={selectedTask}
                 large
                 stageMode
+                sidebarCollapsed={sidebarCollapsed}
+                onToggleSidebar={toggleSidebar}
                 durations={durations}
                 defaultMinutes={defaultMinutes}
                 spentBy={spentBy}
@@ -4558,6 +4616,15 @@ function BacklogView({
             </div>
           ) : (
             <div className="flex-1 flex flex-col items-center justify-center rounded-xl border border-zinc-800/80 bg-zinc-900/30 p-8 text-center">
+              {sidebarCollapsed && (
+                <button
+                  type="button"
+                  onClick={toggleSidebar}
+                  className="mb-3 rounded border border-zinc-800 bg-zinc-900 px-2.5 py-1 font-mono text-[11px] text-zinc-300 hover:border-zinc-700"
+                >
+                  » Show Sidebar
+                </button>
+              )}
               <p className="text-[15px] font-medium text-zinc-200">Backlog is empty</p>
               <p className="mt-1 text-[13px] text-zinc-500">
                 Add ideas or upcoming tasks in the left sidebar — trigger any task to move it directly into Focus.
@@ -5024,14 +5091,14 @@ function SessionThread({
   const currentTurnMeta = turnMeta.metaList[activeIndex] ?? turnMeta.metaList[0];
 
   return (
-    <div ref={containerRef} className="space-y-3 relative">
+    <div ref={containerRef} className="space-y-2 relative">
       {/* Sticky Thread Navigation Bar (Visible when there are 2+ turns) */}
       {displayTurns.length > 1 && (
-        <div className="sticky top-0 z-20 -mx-1 px-1 py-1 bg-zinc-950/85 backdrop-blur-md">
-          <div className="flex items-center justify-between gap-2 rounded-lg border border-zinc-800/80 bg-zinc-900/90 px-2.5 py-1.5 shadow-sm">
+        <div className="sticky top-0 z-20 -mx-1 px-1 py-0.5 bg-zinc-950/85 backdrop-blur-md">
+          <div className="flex items-center justify-between gap-2 rounded-md border border-zinc-800/80 bg-zinc-900/90 px-2 py-1 shadow-sm">
             {/* Left: Indicator & Active Turn Tag */}
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="font-mono text-[10.5px] uppercase tracking-wider text-zinc-400 shrink-0">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-400 shrink-0">
                 {currentTurn.role === "user" ? (
                   <span className="inline-flex items-center gap-1 font-semibold text-amber-300">
                     <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
@@ -5066,14 +5133,14 @@ function SessionThread({
                 type="button"
                 onClick={() => scrollToTurn(activeIndex - 1)}
                 disabled={activeIndex <= 0}
-                className="inline-flex items-center gap-1 rounded border border-zinc-700/60 bg-zinc-800/80 px-2 py-0.5 font-mono text-[11px] font-medium text-zinc-200 transition-colors hover:border-zinc-500 hover:bg-zinc-750 hover:text-white disabled:pointer-events-none disabled:opacity-30"
+                className="inline-flex items-center gap-0.5 rounded border border-zinc-700/60 bg-zinc-800/80 px-1.5 py-0.2 font-mono text-[10px] font-medium text-zinc-200 transition-colors hover:border-zinc-500 hover:bg-zinc-750 hover:text-white disabled:pointer-events-none disabled:opacity-30"
                 title="Navigate to previous prompt/response [Alt+↑]"
                 aria-label="Previous prompt or response"
               >
-                <svg className="w-3.5 h-3.5 text-zinc-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <svg className="w-3 h-3 text-zinc-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M5 15l7-7 7 7" />
                 </svg>
-                <span className="text-[10.5px]">Up</span>
+                <span>Up</span>
               </button>
 
               {/* Down Button */}
@@ -5081,12 +5148,12 @@ function SessionThread({
                 type="button"
                 onClick={() => scrollToTurn(activeIndex + 1)}
                 disabled={activeIndex >= displayTurns.length - 1}
-                className="inline-flex items-center gap-1 rounded border border-zinc-700/60 bg-zinc-800/80 px-2 py-0.5 font-mono text-[11px] font-medium text-zinc-200 transition-colors hover:border-zinc-500 hover:bg-zinc-750 hover:text-white disabled:pointer-events-none disabled:opacity-30"
+                className="inline-flex items-center gap-0.5 rounded border border-zinc-700/60 bg-zinc-800/80 px-1.5 py-0.2 font-mono text-[10px] font-medium text-zinc-200 transition-colors hover:border-zinc-500 hover:bg-zinc-750 hover:text-white disabled:pointer-events-none disabled:opacity-30"
                 title="Navigate to next prompt/response [Alt+↓]"
                 aria-label="Next prompt or response"
               >
-                <span className="text-[10.5px]">Down</span>
-                <svg className="w-3.5 h-3.5 text-zinc-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <span>Down</span>
+                <svg className="w-3 h-3 text-zinc-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M19 9l-7 7-7-7" />
                 </svg>
               </button>
@@ -5096,7 +5163,7 @@ function SessionThread({
                 <button
                   type="button"
                   onClick={() => scrollToTurn(displayTurns.length - 1)}
-                  className="inline-flex items-center gap-0.5 rounded border border-zinc-700/60 bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200"
+                  className="inline-flex items-center gap-0.5 rounded border border-zinc-700/60 bg-zinc-800/60 px-1.5 py-0.2 font-mono text-[10px] text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200"
                   title="Jump to latest response"
                   aria-label="Jump to latest response"
                 >
@@ -5128,24 +5195,21 @@ function SessionThread({
               }}
               data-turn-id={turn.id}
               data-turn-role="user"
-              className={`rounded-lg border border-zinc-800/90 border-l-[3.5px] border-l-amber-500 bg-gradient-to-r from-amber-500/[0.06] via-zinc-900/85 to-zinc-900/70 px-4 py-3 space-y-2 shadow-sm transition-all duration-300 ${
+              className={`rounded-lg border border-zinc-800/90 border-l-[3px] border-l-amber-500 bg-gradient-to-r from-amber-500/[0.06] via-zinc-900/85 to-zinc-900/70 px-3 py-2 space-y-1.5 shadow-sm transition-all duration-300 ${
                 highlightedId === turn.id
                   ? "ring-2 ring-amber-400/80 shadow-lg shadow-amber-500/10"
                   : ""
               }`}
             >
-              <div className="flex items-center justify-between gap-2 border-b border-zinc-800/60 pb-1.5 font-mono text-[10px] tracking-wider text-zinc-400">
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/15 px-2 py-0.5 font-mono text-[10px] font-semibold tracking-wider text-amber-300">
-                    <svg className="w-3 h-3 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                    </svg>
+              <div className="flex items-center justify-between gap-2 border-b border-zinc-800/60 pb-1 font-mono text-[10px] tracking-wider text-zinc-400">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="inline-flex items-center gap-1 rounded border border-amber-500/30 bg-amber-500/15 px-1.5 py-0.2 font-mono text-[9.5px] font-semibold tracking-wider text-amber-300">
                     PROMPT #{meta.number}
                   </span>
-                  <span className="text-zinc-400 font-medium uppercase text-[10px]">You</span>
+                  <span className="text-zinc-400 font-medium uppercase text-[9.5px]">You</span>
                 </div>
 
-                <div className="flex items-center gap-1.5 shrink-0">
+                <div className="flex items-center gap-1 shrink-0">
                   {turn.timestamp && (
                     <span className="font-mono text-[10px] text-zinc-500 mr-1">
                       {new Date(turn.timestamp).toLocaleTimeString([], {
@@ -5160,23 +5224,13 @@ function SessionThread({
                     <button
                       type="button"
                       onClick={() => copyText(turn.id, turn.text)}
-                      className="inline-flex items-center gap-1 rounded border border-zinc-700/60 bg-zinc-800/70 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 hover:border-zinc-500 hover:text-zinc-200 transition-colors"
+                      className="inline-flex items-center gap-1 rounded border border-zinc-700/60 bg-zinc-800/70 px-1.5 py-0.2 font-mono text-[9.5px] text-zinc-400 hover:border-zinc-500 hover:text-zinc-200 transition-colors"
                       title="Copy prompt text"
                     >
                       {copiedId === turn.id ? (
-                        <>
-                          <svg className="w-3 h-3 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
-                          </svg>
-                          <span className="text-emerald-400 font-medium">Copied</span>
-                        </>
+                        <span className="text-emerald-400 font-medium">Copied</span>
                       ) : (
-                        <>
-                          <svg className="w-3 h-3 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                          </svg>
-                          <span>Copy</span>
-                        </>
+                        <span>Copy</span>
                       )}
                     </button>
                   )}
@@ -5186,17 +5240,16 @@ function SessionThread({
                     <button
                       type="button"
                       onClick={() => scrollToTurn(meta.nextResponseIdx)}
-                      className="inline-flex items-center gap-1 rounded border border-zinc-700/60 bg-zinc-800/80 px-2 py-0.5 font-mono text-[10.5px] text-zinc-300 hover:border-zinc-500 hover:bg-zinc-750 hover:text-white transition-colors"
+                      className="inline-flex items-center gap-1 rounded border border-zinc-700/60 bg-zinc-800/80 px-1.5 py-0.2 font-mono text-[9.5px] text-zinc-300 hover:border-zinc-500 hover:bg-zinc-750 hover:text-white transition-colors"
                       title="Jump to corresponding response"
                     >
-                      <span>Response</span>
-                      <span className="text-[12px] leading-none">↓</span>
+                      <span>Response ↓</span>
                     </button>
                   )}
                 </div>
               </div>
 
-              <p className="whitespace-pre-wrap text-[13.5px] sm:text-[14px] leading-relaxed text-zinc-100 font-normal">
+              <p className="whitespace-pre-wrap text-[13.5px] leading-relaxed text-zinc-100 font-normal">
                 {turn.text}
               </p>
             </div>
@@ -5211,33 +5264,30 @@ function SessionThread({
             }}
             data-turn-id={turn.id}
             data-turn-role="assistant"
-            className={`rounded-lg border border-zinc-800/80 border-l-[3.5px] border-l-sky-500/70 bg-zinc-950/75 p-3.5 sm:p-4 space-y-2.5 transition-all duration-300 ${
+            className={`rounded-lg border border-zinc-800/80 border-l-[3px] border-l-sky-500/70 bg-zinc-950/75 px-3 py-2.5 space-y-2 transition-all duration-300 ${
               highlightedId === turn.id
                 ? "ring-2 ring-sky-400/80 shadow-lg shadow-sky-500/10"
                 : ""
             }`}
           >
             {/* Assistant Header */}
-            <div className="flex items-center justify-between gap-2 border-b border-zinc-800/60 pb-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <span className="inline-flex items-center gap-1.5 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold tracking-wider text-sky-300">
-                  <svg className="w-3 h-3 text-sky-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                  </svg>
+            <div className="flex items-center justify-between gap-2 border-b border-zinc-800/60 pb-1">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="inline-flex items-center gap-1 rounded border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.2 font-mono text-[9.5px] font-semibold tracking-wider text-sky-300">
                   RESPONSE #{meta.number}
                 </span>
-                <span className="truncate font-mono text-[11px] text-zinc-400">
+                <span className="truncate font-mono text-[10.5px] text-zinc-400">
                   {serverLabel}
                 </span>
                 {isTurnRunning && (
-                  <span className="inline-flex items-center gap-1 rounded bg-orange-500/15 border border-orange-500/30 px-1.5 py-0.5 font-mono text-[10px] text-orange-300">
+                  <span className="inline-flex items-center gap-1 rounded bg-orange-500/15 border border-orange-500/30 px-1.5 py-0.2 font-mono text-[9.5px] text-orange-300">
                     <span className="h-1.5 w-1.5 rounded-full bg-orange-500 animate-pulse" />
                     Responding…
                   </span>
                 )}
               </div>
 
-              <div className="flex items-center gap-1.5 shrink-0">
+              <div className="flex items-center gap-1 shrink-0">
                 {turn.timestamp && (
                   <span className="font-mono text-[10px] text-zinc-500 mr-1">
                     {new Date(turn.timestamp).toLocaleTimeString([], {
@@ -5252,23 +5302,13 @@ function SessionThread({
                   <button
                     type="button"
                     onClick={() => copyText(turn.id, turn.text)}
-                    className="inline-flex items-center gap-1 rounded border border-zinc-700/60 bg-zinc-800/70 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 hover:border-zinc-500 hover:text-zinc-200 transition-colors"
+                    className="inline-flex items-center gap-1 rounded border border-zinc-700/60 bg-zinc-800/70 px-1.5 py-0.2 font-mono text-[9.5px] text-zinc-400 hover:border-zinc-500 hover:text-zinc-200 transition-colors"
                     title="Copy response markdown"
                   >
                     {copiedId === turn.id ? (
-                      <>
-                        <svg className="w-3 h-3 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
-                        </svg>
-                        <span className="text-emerald-400 font-medium">Copied</span>
-                      </>
+                      <span className="text-emerald-400 font-medium">Copied</span>
                     ) : (
-                      <>
-                        <svg className="w-3 h-3 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                        </svg>
-                        <span>Copy</span>
-                      </>
+                      <span>Copy</span>
                     )}
                   </button>
                 )}
@@ -5278,11 +5318,10 @@ function SessionThread({
                   <button
                     type="button"
                     onClick={() => scrollToTurn(meta.prevPromptIdx)}
-                    className="inline-flex items-center gap-1 rounded border border-zinc-700/60 bg-zinc-800/80 px-2 py-0.5 font-mono text-[10.5px] text-zinc-300 hover:border-zinc-500 hover:bg-zinc-750 hover:text-white transition-colors"
+                    className="inline-flex items-center gap-1 rounded border border-zinc-700/60 bg-zinc-800/80 px-1.5 py-0.2 font-mono text-[9.5px] text-zinc-300 hover:border-zinc-500 hover:bg-zinc-750 hover:text-white transition-colors"
                     title="Jump to user prompt"
                   >
-                    <span className="text-[12px] leading-none">↑</span>
-                    <span>Prompt</span>
+                    <span>↑ Prompt</span>
                   </button>
                 )}
               </div>
@@ -5301,7 +5340,7 @@ function SessionThread({
                 <SimpleMarkdown text={turn.text} />
               </div>
             ) : isTurnRunning ? (
-              <div className="flex items-center gap-2 rounded-lg border border-zinc-800/50 bg-zinc-900/40 px-3.5 py-2.5 font-mono text-[12px] text-zinc-400">
+              <div className="flex items-center gap-2 rounded-lg border border-zinc-800/50 bg-zinc-900/40 px-3 py-2 font-mono text-[11.5px] text-zinc-400">
                 <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-orange-500 animate-pulse" />
                 <span>{serverLabel} is responding…</span>
               </div>
@@ -5317,6 +5356,8 @@ function TaskRow({
   t,
   large,
   stageMode = false,
+  sidebarCollapsed,
+  onToggleSidebar,
   expanded,
   onToggle,
   onHandToAgent,
@@ -5352,6 +5393,8 @@ function TaskRow({
   t: Task;
   large?: boolean;
   stageMode?: boolean;
+  sidebarCollapsed?: boolean;
+  onToggleSidebar?: () => void;
   expanded: boolean;
   onToggle: () => void;
   onHandToAgent: (
@@ -5689,7 +5732,7 @@ function TaskRow({
   );
 
   const rowLeftBorder = stageMode
-    ? "border border-zinc-800/90 bg-zinc-900/40 p-4 sm:p-5 lg:p-6 flex-1 min-h-0 flex flex-col md:h-full"
+    ? "border border-zinc-800/90 bg-zinc-900/40 px-3 py-2 sm:px-3.5 sm:py-2 flex-1 min-h-0 flex flex-col md:h-full"
     : expanded
       ? "border-l-2 border-l-orange-500 bg-zinc-900/80 ring-1 ring-zinc-800"
       : isBlockedOnHuman
@@ -5710,6 +5753,8 @@ function TaskRow({
           t={t}
           large={large}
           stageMode={stageMode}
+          sidebarCollapsed={sidebarCollapsed}
+          onToggleSidebar={onToggleSidebar}
           zen={zen}
           onToggleZen={() => setZen((z) => !z)}
           dur={dur}
@@ -6137,6 +6182,8 @@ function RowEditor({
   t,
   large,
   stageMode = false,
+  sidebarCollapsed,
+  onToggleSidebar,
   zen = false,
   onToggleZen,
   dur,
@@ -6173,6 +6220,8 @@ function RowEditor({
   t: Task;
   large?: boolean;
   stageMode?: boolean;
+  sidebarCollapsed?: boolean;
+  onToggleSidebar?: () => void;
   zen?: boolean;
   onToggleZen?: () => void;
   dur: ReactNode;
@@ -6379,7 +6428,7 @@ function RowEditor({
     const el = promptRef.current;
     if (el) {
       el.style.height = "0";
-      const minH = zen ? 88 : 44;
+      const minH = zen && !hasSessionOutput ? 88 : 26;
       el.style.height = `${Math.max(minH, el.scrollHeight)}px`;
     }
   }, [inputVal, hasSessionOutput, zen]);
@@ -7349,268 +7398,209 @@ function RowEditor({
             </div>
           ) : (
             /* ===============================================================
-               ACTIVE SESSION SETUP: Two-pane review stream + steer workspace
+               ACTIVE SESSION SETUP: Full-height & full-width prompt/response stream
                =============================================================== */
-            <div className="grid h-full min-h-0 gap-6 lg:grid-cols-12 overflow-y-auto lg:overflow-hidden">
-              {/* LEFT: Live Workstream, Diff Viewer, Markdown & Checkpoints */}
-              <div className="flex flex-col h-full min-h-[400px] lg:min-h-0 rounded-2xl border border-zinc-800/80 bg-zinc-900/30 p-5 sm:p-6 backdrop-blur-sm lg:col-span-7 xl:col-span-8">
-                {/* Header with Server, Session ID, Web UI */}
-                <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-zinc-800/60">
-                  <div className="flex items-center gap-2.5 font-mono text-[12px]">
-                    <span className={`h-2 w-2 rounded-full ${isTargetServerOnline ? "bg-orange-500" : "bg-zinc-600"}`} />
-                    {targetPickerEl}
-                    {server && (
-                      <span className="truncate text-zinc-400 max-w-xs">
-                        {liveSession?.directory || serverRepos.find((r) => r.label === repo)?.dir || activeSrvObj?.defaultDir}
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="flex items-center gap-2.5">
-                    {sessions.length > 1 && (
-                      <select
-                        value={activeSid}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          unlinkedExplicitlyRef.current = !val;
-                          const next = val ? Array.from(new Set([...sessions, val])) : [];
-                          setSessions(next);
-                          metaLive.current = { ...metaLive.current, sessions: next };
-                          scheduleFlush();
-                        }}
-                        className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[11px] text-zinc-300 outline-none"
-                      >
-                        {sessions.map((sid) => (
-                          <option key={sid} value={sid}>
-                            {sid.slice(0, 10)}
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                    {getOpenCodeWebUrl(activeSid, activeSrvObj) && (
-                      <a
-                        href={getOpenCodeWebUrl(activeSid, activeSrvObj)!}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="font-mono text-[11px] text-orange-400 hover:text-orange-300"
-                      >
-                        Web UI ↗
-                      </a>
-                    )}
-                    {activeSid && (
-                      <button
-                        type="button"
-                        onClick={() => navigator.clipboard?.writeText(`opencode -s ${activeSid}`)}
-                        title={`Copy CLI command: opencode -s ${activeSid}`}
-                        className="rounded border border-zinc-800 bg-zinc-900/60 px-2 py-0.5 font-mono text-[11px] text-zinc-400 hover:text-zinc-200"
-                      >
-                        CLI: {activeSid.slice(0, 10)} ↗
-                      </button>
-                    )}
-                  </div>
+            <div className="flex flex-1 min-h-0 flex-col rounded-xl border border-zinc-800/80 bg-zinc-900/30 px-4 py-2.5 backdrop-blur-sm overflow-hidden">
+              {/* Compact 1-line Session Bar */}
+              <div className="shrink-0 flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-zinc-800/60 font-mono text-[11px]">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className={`h-2 w-2 shrink-0 rounded-full ${isTargetServerOnline ? "bg-orange-500" : "bg-zinc-600"}`} />
+                  {configCapsuleEl}
+                  {server && (
+                    <span className="hidden lg:inline truncate text-zinc-500 max-w-xs">
+                      {liveSession?.directory || serverRepos.find((r) => r.label === repo)?.dir || activeSrvObj?.defaultDir}
+                    </span>
+                  )}
                 </div>
 
-                {/* Scrollable Workstream Body */}
-                <div
-                  ref={zenThreadScrollRef}
-                  onScroll={handleThreadScroll}
-                  className="flex-1 min-h-0 overflow-y-auto space-y-4 pt-4 pr-1"
-                >
-                  {/* Live Session Thread (User prompts/steers + default-collapsed Reasoning & Steps + Assistant responses) */}
-                  {(turns.length > 0 ||
-                    pendingSteer ||
-                    summary?.lastAssistantText ||
-                    summary?.lastToolCall) && (
-                    <SessionThread
-                      turns={turns}
-                      pendingSteer={pendingSteer}
-                      isRunning={liveSession?.status === "running"}
-                      serverLabel={targetLabel}
-                      fallbackText={summary?.lastAssistantText}
-                      fallbackTool={summary?.lastToolCall}
-                    />
-                  )}
-
-                  {/* Question / Option Picker Form */}
-                  {liveSession?.form && (
-                    <QuestionFormCard
-                      form={liveSession.form}
-                      variant="zen"
-                      selectedByField={draftFormAnswers}
-                      onSelectedChange={setDraftFormAnswers}
-                      onSubmitAnswers={(answers, summaryLabel, steerPrompt) => {
-                        if (steerPrompt) {
-                          setPendingSteer({ text: steerPrompt, sentAt: Date.now() });
-                        }
-                        onAnswerForm(answers, undefined, summaryLabel, steerPrompt);
-                        setDraftFormAnswers({});
-                        window.setTimeout(() => scrollThreadToBottom(true), 40);
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setZenNotesOpen((o) => !o)}
+                    className={`rounded border px-2 py-0.5 text-[10.5px] transition-colors ${
+                      zenNotesOpen || note.trim()
+                        ? "border-orange-500/40 bg-orange-500/10 text-orange-300"
+                        : "border-zinc-800 bg-zinc-900/80 text-zinc-400 hover:text-zinc-200"
+                    }`}
+                  >
+                    📝 Notes{note.trim() ? ` (${note.trim().split(/\s+/).filter(Boolean).length}w)` : ""}
+                  </button>
+                  {sessions.length > 1 && (
+                    <select
+                      value={activeSid}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        unlinkedExplicitlyRef.current = !val;
+                        const next = val ? Array.from(new Set([...sessions, val])) : [];
+                        setSessions(next);
+                        metaLive.current = { ...metaLive.current, sessions: next };
+                        scheduleFlush();
                       }}
-                      onSteer={(steerText) => {
-                        setPendingSteer({ text: steerText, sentAt: Date.now() });
-                        onHandToAgent(
-                          steerText,
-                          server,
-                          userChangedModelRef.current ? (model || undefined) : undefined,
-                          repo,
-                          note,
-                        );
-                        window.setTimeout(() => scrollThreadToBottom(true), 40);
-                      }}
-                    />
+                      className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[10.5px] text-zinc-300 outline-none"
+                    >
+                      {sessions.map((sid) => (
+                        <option key={sid} value={sid}>
+                          {sid.slice(0, 10)}
+                        </option>
+                      ))}
+                    </select>
                   )}
-
-                  {/* Permission Approval */}
-                  {liveSession?.permission && (
-                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-orange-500/40 bg-zinc-950/90 px-4 py-3 text-[12px]">
-                      <div className="min-w-0 truncate font-mono text-zinc-200">
-                        <span className="text-orange-400">Allow {liveSession.permission.action}: </span>
-                        {liveSession.permission.resources.join(" ")}
-                      </div>
-                      <div className="flex shrink-0 items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => onApprove("once")}
-                          className="rounded bg-orange-600 px-3 py-1 font-medium text-white hover:bg-orange-500"
-                        >
-                          Allow once
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onApprove("always")}
-                          className="rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-zinc-200 hover:border-zinc-600"
-                        >
-                          Always
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onApprove("reject")}
-                          className="rounded px-2.5 py-1 text-zinc-400 hover:bg-zinc-900 hover:text-red-400"
-                        >
-                          Reject
-                        </button>
-                      </div>
-                    </div>
+                  {getOpenCodeWebUrl(activeSid, activeSrvObj) && (
+                    <a
+                      href={getOpenCodeWebUrl(activeSid, activeSrvObj)!}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-orange-400 hover:text-orange-300"
+                    >
+                      Web ↗
+                    </a>
                   )}
-
-                  {/* Inline File Diff Viewer */}
-                  {summary?.filesChanged && summary.filesChanged.length > 0 && (
-                    <InlineDiffViewer
-                      files={summary.filesChanged}
-                      onAcceptAndComplete={onComplete}
-                    />
+                  {activeSid && (
+                    <button
+                      type="button"
+                      onClick={() => navigator.clipboard?.writeText(`opencode -s ${activeSid}`)}
+                      title={`Copy CLI command: opencode -s ${activeSid}`}
+                      className="rounded border border-zinc-800 bg-zinc-900/60 px-1.5 py-0.5 text-[10.5px] text-zinc-400 hover:text-zinc-200"
+                    >
+                      {activeSid.slice(0, 10)} ↗
+                    </button>
                   )}
                 </div>
               </div>
 
-              {/* RIGHT: Task Notes & Steer Control */}
-              <div className="flex flex-col h-full min-h-0 justify-between gap-4 rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-5 sm:p-6 backdrop-blur-sm lg:col-span-5 xl:col-span-4">
-                {/* Task Notes / Context (Collapsible in Zen mode) */}
-                <div className="rounded-xl border border-zinc-800/70 bg-zinc-950/40 p-3 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <button
-                      type="button"
-                      onClick={() => setZenNotesOpen((o) => !o)}
-                      className="flex items-center gap-2 font-mono text-[11px] text-zinc-400 hover:text-zinc-200"
-                    >
-                      <span className="text-zinc-500 text-[10px]">{zenNotesOpen ? "▼" : "▶"}</span>
-                      <span className="uppercase tracking-wider font-semibold">Task Notes / Context</span>
-                      <span className="text-zinc-500 font-sans">
-                        {note.trim() ? `(${note.trim().split(/\s+/).filter(Boolean).length} words)` : "(empty)"}
-                      </span>
-                    </button>
-                    {!zenNotesOpen && !note.trim() ? (
-                      <button
-                        type="button"
-                        onClick={() => setZenNotesOpen(true)}
-                        className="text-zinc-500 hover:text-orange-400 text-[11px]"
-                      >
-                        + Add notes
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => setZenNotesOpen((o) => !o)}
-                        className="text-zinc-500 hover:text-zinc-300 font-mono text-[10px]"
-                      >
-                        {zenNotesOpen ? "Collapse ▲" : "Expand ▼"}
-                      </button>
-                    )}
-                  </div>
-                  {zenNotesOpen && (
-                    <textarea
-                      value={note}
-                      onChange={(e) => {
-                        setNote(e.target.value);
-                        scheduleFlush();
-                      }}
-                      placeholder="Notes, references, next steps…"
-                      rows={5}
-                      className="w-full resize-none rounded-lg border border-zinc-800 bg-zinc-950/80 p-3 text-[13px] leading-relaxed text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-zinc-700"
-                    />
-                  )}
-                </div>
+              {configOpen && <div className="shrink-0 pt-2">{configDrawerEl}</div>}
 
-                {/* Model & Steer Composer (Bottom) */}
-                <div className="space-y-3 pt-3 border-t border-zinc-800/60 flex-1 flex flex-col justify-end">
-                  <div className="flex items-center justify-between gap-2">
-                    <label className="font-mono text-[11px] text-zinc-400 uppercase tracking-wider">
-                      Steer OpenCode
-                    </label>
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-mono text-[11px] text-zinc-500">Model:</span>
-                      {modelSelectEl}
-                    </div>
-                  </div>
-
+              {zenNotesOpen && (
+                <div className="shrink-0 pt-2">
                   <textarea
-                    ref={promptRef}
-                    rows={4}
-                    value={replyText}
-                    onChange={(e) => setReplyText(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                        e.preventDefault();
-                        submitToAgent();
-                      }
+                    value={note}
+                    onChange={(e) => {
+                      setNote(e.target.value);
+                      scheduleFlush();
                     }}
-                    placeholder={`Steer OpenCode on ${targetLabel} (⌘↵ to send)…`}
-                    className="w-full resize-none rounded-xl border border-zinc-800 bg-zinc-950/90 p-3.5 text-[14px] leading-relaxed text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-orange-500/70 transition-colors"
+                    placeholder="Task notes, references, next steps…"
+                    rows={3}
+                    className="w-full resize-none rounded-lg border border-zinc-800 bg-zinc-950/90 p-2.5 text-[13px] leading-relaxed text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-zinc-700"
                   />
+                </div>
+              )}
 
-                  <div className="flex items-center justify-between pt-1">
-                    <div className="flex items-center gap-2">
-                      {onDemote && (
-                        <button
-                          type="button"
-                          onClick={() => onDemote(t)}
-                          className="rounded-lg border border-zinc-800 px-3 py-1.5 text-[12px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-colors"
-                        >
-                          ↓ Move to Backlog
-                        </button>
-                      )}
+              {/* Scrollable Workstream Body (Full Height) */}
+              <div
+                ref={zenThreadScrollRef}
+                onScroll={handleThreadScroll}
+                className="flex-1 min-h-0 overflow-y-auto space-y-3 py-2 pr-1"
+              >
+                {(turns.length > 0 ||
+                  pendingSteer ||
+                  summary?.lastAssistantText ||
+                  summary?.lastToolCall) && (
+                  <SessionThread
+                    turns={turns}
+                    pendingSteer={pendingSteer}
+                    isRunning={liveSession?.status === "running"}
+                    serverLabel={targetLabel}
+                    fallbackText={summary?.lastAssistantText}
+                    fallbackTool={summary?.lastToolCall}
+                  />
+                )}
+
+                {liveSession?.form && (
+                  <QuestionFormCard
+                    form={liveSession.form}
+                    variant="zen"
+                    selectedByField={draftFormAnswers}
+                    onSelectedChange={setDraftFormAnswers}
+                    onSubmitAnswers={(answers, summaryLabel, steerPrompt) => {
+                      if (steerPrompt) {
+                        setPendingSteer({ text: steerPrompt, sentAt: Date.now() });
+                      }
+                      onAnswerForm(answers, undefined, summaryLabel, steerPrompt);
+                      setDraftFormAnswers({});
+                      window.setTimeout(() => scrollThreadToBottom(true), 40);
+                    }}
+                    onSteer={(steerText) => {
+                      setPendingSteer({ text: steerText, sentAt: Date.now() });
+                      onHandToAgent(
+                        steerText,
+                        server,
+                        userChangedModelRef.current ? (model || undefined) : undefined,
+                        repo,
+                        note,
+                      );
+                      window.setTimeout(() => scrollThreadToBottom(true), 40);
+                    }}
+                  />
+                )}
+
+                {liveSession?.permission && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-orange-500/40 bg-zinc-950/90 px-4 py-2.5 text-[12px]">
+                    <div className="min-w-0 truncate font-mono text-zinc-200">
+                      <span className="text-orange-400">Allow {liveSession.permission.action}: </span>
+                      {liveSession.permission.resources.join(" ")}
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1.5">
                       <button
                         type="button"
-                        onClick={() => (confirming ? onDelete(t) : setConfirming(true))}
-                        className={`text-[12px] px-2 py-1 transition-colors ${
-                          confirming ? "text-red-500 font-medium" : "text-zinc-600 hover:text-zinc-400"
-                        }`}
+                        onClick={() => onApprove("once")}
+                        className="rounded bg-orange-600 px-3 py-1 font-medium text-white hover:bg-orange-500"
                       >
-                        {confirming ? "Confirm Delete?" : "Delete"}
+                        Allow once
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onApprove("always")}
+                        className="rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-zinc-200 hover:border-zinc-600"
+                      >
+                        Always
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onApprove("reject")}
+                        className="rounded px-2.5 py-1 text-zinc-400 hover:bg-zinc-900 hover:text-red-400"
+                      >
+                        Reject
                       </button>
                     </div>
-
-                    <button
-                      type="button"
-                      onClick={submitToAgent}
-                      title="Send (⌘↵)"
-                      aria-label="Send"
-                      className="inline-flex items-center gap-1.5 rounded-xl bg-orange-600 px-4 py-2 text-[13px] font-semibold text-white shadow-lg shadow-orange-950/40 hover:bg-orange-500 transition-colors cursor-pointer"
-                    >
-                      <span>↑</span>
-                      <span>Send</span>
-                    </button>
                   </div>
+                )}
+
+                {summary?.filesChanged && summary.filesChanged.length > 0 && (
+                  <InlineDiffViewer
+                    files={summary.filesChanged}
+                    onAcceptAndComplete={onComplete}
+                  />
+                )}
+              </div>
+
+              {/* Compact Bottom Steer Composer */}
+              <div className="shrink-0 mt-1.5 flex items-end gap-2 rounded-xl border border-zinc-800 bg-zinc-950/95 px-3 py-1.5 focus-within:border-orange-500/70">
+                <textarea
+                  ref={promptRef}
+                  rows={1}
+                  value={replyText}
+                  onChange={(e) => setReplyText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                      e.preventDefault();
+                      submitToAgent();
+                    }
+                  }}
+                  placeholder={`Steer OpenCode on ${targetLabel} (⌘↵ to send)…`}
+                  className="min-w-0 flex-1 resize-none overflow-y-auto max-h-36 bg-transparent py-0.5 text-[13.5px] leading-relaxed text-zinc-100 outline-none placeholder:text-zinc-600"
+                />
+                <div className="flex shrink-0 items-center gap-1.5 pb-0.5">
+                  {modelSelectEl}
+                  <button
+                    type="button"
+                    onClick={submitToAgent}
+                    title="Send (⌘↵)"
+                    aria-label="Send"
+                    className="inline-flex h-7 items-center gap-1 rounded-lg bg-orange-600 px-3 text-[12px] font-semibold text-white hover:bg-orange-500 transition-colors cursor-pointer"
+                  >
+                    <span>↑</span>
+                    <span>Send</span>
+                  </button>
                 </div>
               </div>
             </div>
@@ -7624,9 +7614,20 @@ function RowEditor({
     <div className={stageMode ? "flex-1 min-h-0 flex flex-col md:h-full" : undefined}>
       <div className={stageMode ? "flex-1 min-h-0 flex flex-col md:h-full" : undefined}>
         {stageMode ? (
-          <div className="shrink-0 space-y-2.5 pb-2.5 border-b border-zinc-800/80">
-            <div className="flex flex-wrap items-center justify-between gap-2.5 font-mono text-[12px] text-zinc-400">
-              <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+          <div className="shrink-0 space-y-1.5 pb-1.5 border-b border-zinc-800/80">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                {onToggleSidebar && (
+                  <button
+                    type="button"
+                    onClick={onToggleSidebar}
+                    className="hidden md:inline-flex h-6 items-center justify-center rounded border border-zinc-800 bg-zinc-900/80 px-1.5 font-mono text-[11px] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                    title={sidebarCollapsed ? "Expand task list sidebar" : "Collapse task list sidebar"}
+                    aria-label={sidebarCollapsed ? "Expand task list sidebar" : "Collapse task list sidebar"}
+                  >
+                    {sidebarCollapsed ? "»" : "«"}
+                  </button>
+                )}
                 <span
                   className={`h-2 w-2 shrink-0 rounded-full ${
                     triage === "needs_you"
@@ -7636,22 +7637,80 @@ function RowEditor({
                         : "bg-zinc-600"
                   }`}
                 />
-                {configCapsuleEl}
-                {effectiveJira && !configOpen && (
-                  <span className="inline-flex items-center gap-1 rounded border border-blue-500/40 bg-blue-950/40 px-1.5 py-0.5 font-mono text-[11px] font-medium text-blue-300">
-                    🎫 {effectiveJira}
+                <input
+                  className="min-w-0 flex-1 bg-transparent text-[15px] sm:text-[16px] font-semibold tracking-[-0.01em] text-zinc-100 outline-none placeholder:text-zinc-600"
+                  value={title}
+                  onChange={(e) => {
+                    setTitle(e.target.value);
+                    scheduleFlush();
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                  }}
+                  placeholder="Task title…"
+                />
+                {saveState && (
+                  <span className="shrink-0 font-mono text-[11px] text-zinc-500">
+                    {saveState === "saving" ? "Saving…" : "Saved ✓"}
                   </span>
                 )}
               </div>
 
-              <div className="flex shrink-0 items-center gap-2">
+              <div className="flex shrink-0 flex-wrap items-center gap-1.5 font-mono text-[11px]">
+                {effectiveJira && !configOpen && (
+                  <span className="inline-flex items-center gap-1 rounded border border-blue-500/40 bg-blue-950/40 px-1.5 py-0.5 font-mono text-[10.5px] font-medium text-blue-300">
+                    🎫 {effectiveJira}
+                  </span>
+                )}
+                {configCapsuleEl}
+                <button
+                  type="button"
+                  onClick={() => setNotesOpen((o) => !o)}
+                  title="Toggle task notes & context"
+                  className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 font-mono text-[11px] transition-colors ${
+                    notesOpen || note.trim()
+                      ? "border-orange-500/40 bg-orange-500/10 text-orange-300"
+                      : "border-zinc-800 bg-zinc-900/80 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                  }`}
+                >
+                  <span>📝</span>
+                  <span className="hidden sm:inline">Notes</span>
+                  {note.trim() && (
+                    <span className="text-[10px] text-orange-300/80">
+                      {note.trim().split(/\s+/).filter(Boolean).length}w
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowMeta((s) => !s)}
+                  title="More task options (Jira, session link, timer durations)"
+                  className={`rounded-md border px-1.5 py-0.5 font-mono text-[11px] transition-colors ${
+                    showMeta
+                      ? "border-orange-500/40 bg-orange-500/10 text-orange-300"
+                      : "border-zinc-800 bg-zinc-900/80 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                  }`}
+                >
+                  ⋯
+                </button>
                 {dur}
                 {actions}
+                {onComplete && (
+                  <button
+                    type="button"
+                    onClick={onComplete}
+                    title="Mark task Done"
+                    aria-label="Done"
+                    className="inline-flex h-6 items-center justify-center rounded border border-zinc-800 bg-zinc-900 px-2 font-sans text-[11px] font-medium text-zinc-200 transition-colors hover:border-zinc-700 hover:bg-zinc-800 hover:text-white"
+                  >
+                    ✓ Done
+                  </button>
+                )}
                 {onToggleZen && (
                   <button
                     type="button"
                     onClick={onToggleZen}
-                    className="shrink-0 rounded px-2 py-1 font-mono text-[13px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                    className="shrink-0 rounded px-1.5 py-0.5 font-mono text-[12px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
                     title="Full screen focus mode (⌘E or F)"
                     aria-label="Full screen focus mode"
                   >
@@ -7663,25 +7722,21 @@ function RowEditor({
 
             {configDrawerEl}
 
-            <div className="flex items-center gap-2.5">
-              <input
-                className="w-full bg-transparent text-[22px] sm:text-[24px] font-semibold tracking-[-0.015em] text-zinc-100 outline-none"
-                value={title}
-                onChange={(e) => {
-                  setTitle(e.target.value);
-                  scheduleFlush();
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                }}
-                placeholder="Task title…"
-              />
-              {saveState && (
-                <span className="shrink-0 font-mono text-[12px] text-zinc-500">
-                  {saveState === "saving" ? "Saving…" : "Saved ✓"}
-                </span>
-              )}
-            </div>
+            {notesOpen && (
+              <div className="rounded-lg border border-zinc-800/80 bg-zinc-950/90 p-2.5">
+                <textarea
+                  ref={noteRef}
+                  value={note}
+                  onChange={(e) => {
+                    setNote(e.target.value);
+                    scheduleFlush();
+                  }}
+                  placeholder="Task notes, specs, steps, links, API snippets, or context…"
+                  rows={2}
+                  className="w-full resize-none overflow-hidden bg-transparent text-[13px] leading-relaxed text-zinc-100 placeholder:text-zinc-600 outline-none"
+                />
+              </div>
+            )}
           </div>
         ) : (
           <div
@@ -7727,7 +7782,7 @@ function RowEditor({
           </div>
         )}
 
-        <div className={stageMode ? "flex-1 min-h-0 flex flex-col pt-3" : "row-expand"}>
+        <div className={stageMode ? "flex-1 min-h-0 flex flex-col pt-1.5" : "row-expand"}>
           <div
             className={
               stageMode
@@ -7737,13 +7792,13 @@ function RowEditor({
           >
             {!stageMode && configDrawerEl}
 
-            {/* Scrollable workspace region */}
+            {/* Scrollable workspace region — uses maximum available window height */}
             <div
               ref={threadScrollRef}
               onScroll={handleThreadScroll}
               className={
                 stageMode
-                  ? "flex-1 min-h-0 overflow-y-auto space-y-4 pr-1.5 py-1 [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent]"
+                  ? "flex-1 min-h-0 overflow-y-auto space-y-2.5 pr-1 py-1 [scrollbar-width:thin] [scrollbar-color:rgba(113,113,122,0.3)_transparent]"
                   : "max-h-96 overflow-y-auto space-y-3 pr-1"
               }
             >
@@ -7875,86 +7930,25 @@ function RowEditor({
                   </div>
                 </div>
               )}
-
-              {/* Task Notes & Context: Collapsed by default to maximize prompt & response view */}
-              {stageMode && (
-                <div className="rounded-xl border border-zinc-800/70 bg-zinc-950/50 transition-colors">
-                  <div className="flex items-center justify-between px-3.5 py-2 text-[11px]">
-                    <button
-                      type="button"
-                      onClick={() => setNotesOpen((o) => !o)}
-                      className="flex items-center gap-2 font-mono text-zinc-400 hover:text-zinc-200 transition-colors"
-                    >
-                      <span className="text-zinc-500 text-[10px]">{notesOpen ? "▼" : "▶"}</span>
-                      <span className="font-medium text-zinc-300">Task Notes &amp; Context</span>
-                      <span className="text-zinc-500 font-sans">
-                        {note.trim()
-                          ? `(${note.trim().split(/\s+/).filter(Boolean).length} words)`
-                          : "(empty)"}
-                      </span>
-                    </button>
-                    {!notesOpen && !note.trim() ? (
-                      <button
-                        type="button"
-                        onClick={() => setNotesOpen(true)}
-                        className="text-zinc-500 hover:text-orange-400 text-[11px]"
-                      >
-                        + Add notes
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => setNotesOpen((o) => !o)}
-                        className="text-zinc-500 hover:text-zinc-300 font-mono text-[10px]"
-                      >
-                        {notesOpen ? "Collapse ▲" : "Expand ▼"}
-                      </button>
-                    )}
-                  </div>
-                  {notesOpen && (
-                    <div className="border-t border-zinc-900/80 p-3.5 pt-2.5">
-                      <textarea
-                        ref={noteRef}
-                        value={note}
-                        onChange={(e) => {
-                          setNote(e.target.value);
-                          scheduleFlush();
-                        }}
-                        placeholder="Task notes, specs, steps, links, API snippets, or context…"
-                        rows={2}
-                        className="w-full resize-none overflow-hidden bg-transparent text-[13px] sm:text-[14px] leading-relaxed text-zinc-100 placeholder:text-zinc-600 outline-none"
-                      />
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
 
-            {/* 5. Steer / Prompt Composer */}
-            <div className={`rounded-xl border border-zinc-800/90 bg-zinc-950 focus-within:border-zinc-700 ${stageMode ? "shrink-0 p-3.5 space-y-2 mt-3" : "p-2.5"}`}>
-              {stageMode && (
-                <div className="flex items-center justify-between font-mono text-[11px] text-zinc-400">
-                  <span className="font-medium text-zinc-300">
-                    {!server
-                      ? "Human Focus (Self-directed)"
-                      : hasSessionOutput
-                        ? `Steer OpenCode on ${targetLabel}`
-                        : `Prompt for ${targetLabel}`}
-                  </span>
-                  <span className="text-zinc-500">{!server ? "Personal timer" : "⌘↵ to send"}</span>
-                </div>
-              )}
+            {/* 5. Compact Single-Line Steer / Prompt Composer */}
+            <div
+              className={`flex items-end gap-2 rounded-lg border border-zinc-800/90 bg-zinc-950 px-2.5 py-1.5 focus-within:border-zinc-700 ${
+                stageMode ? "shrink-0 mt-1.5" : "mt-2"
+              }`}
+            >
               <textarea
                 ref={promptRef}
-                className="w-full resize-none overflow-y-auto max-h-36 bg-transparent text-[13px] sm:text-[14px] leading-relaxed text-zinc-100 outline-none placeholder:text-zinc-600"
+                className="min-w-0 flex-1 resize-none overflow-y-auto max-h-36 bg-transparent py-0.5 text-[13px] sm:text-[13.5px] leading-relaxed text-zinc-100 outline-none placeholder:text-zinc-600"
                 placeholder={
                   !server
                     ? "Add notes, steps, or scratchpad for this focus session…"
                     : hasSessionOutput
-                      ? `Steer OpenCode on ${targetLabel}…`
-                      : `Prompt for ${targetLabel}…`
+                      ? `Steer OpenCode on ${targetLabel}… (⌘↵ to send)`
+                      : `Prompt for ${targetLabel}… (⌘↵ to run)`
                 }
-                rows={2}
+                rows={1}
                 value={inputVal}
                 onChange={(e) => {
                   if (hasSessionOutput && server) {
@@ -7971,97 +7965,85 @@ function RowEditor({
                   }
                 }}
               />
-              <div className="mt-1.5 flex items-center justify-between border-t border-zinc-800/60 pt-2 text-[12px]">
-                <div className="flex items-center gap-2">
+              <div className="flex shrink-0 items-center gap-1 pb-0.5 text-[12px]">
+                {!stageMode && (
                   <button
                     type="button"
                     onClick={() => setShowMeta((s) => !s)}
-                    className="text-zinc-500 hover:text-zinc-300"
+                    className="rounded px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
+                    title="More options"
                   >
-                    {showMeta ? "Hide options" : "More options"}
+                    ⋯
                   </button>
-                  {onToggleZen && (
-                    <button
-                      type="button"
-                      onClick={onToggleZen}
-                      className="text-zinc-500 hover:text-zinc-300"
-                      title="Toggle full-screen focus mode (⌘E)"
-                    >
-                      ⤢ Zen mode
-                    </button>
-                  )}
-                </div>
-
-                <div className="flex items-center gap-1.5">
-                  {onMove && (
-                    <button
-                      type="button"
-                      onClick={() => onMove(t)}
-                      title="Move task to Focus"
-                      aria-label="Move to Focus"
-                      className="inline-flex h-7 items-center justify-center gap-1 rounded border border-zinc-800 bg-zinc-900 px-2.5 text-[12px] font-medium text-orange-400 transition-colors hover:border-orange-500/50 hover:bg-zinc-800 hover:text-orange-300"
-                    >
-                      → Focus
-                    </button>
-                  )}
-                  {onDemote && (
-                    <button
-                      type="button"
-                      onClick={() => onDemote(t)}
-                      title="Move to Backlog"
-                      aria-label="Move to Backlog"
-                      className="inline-flex h-7 items-center justify-center rounded px-2 text-[12px] text-zinc-400 transition-colors hover:bg-zinc-900 hover:text-zinc-200"
-                    >
-                      ↓ Backlog
-                    </button>
-                  )}
-                  {onComplete && (
-                    <button
-                      type="button"
-                      onClick={onComplete}
-                      title="Done"
-                      aria-label="Done"
-                      className="inline-flex h-7 items-center justify-center rounded px-2.5 text-[12px] font-medium text-zinc-200 transition-colors hover:bg-zinc-900 hover:text-zinc-100"
-                    >
-                      ✓ Done
-                    </button>
-                  )}
+                )}
+                {onMove && (
                   <button
                     type="button"
-                    onClick={submitToAgent}
-                    title={
-                      !server
-                        ? "Start Pomodoro countdown timer (⌘↵)"
-                        : hasSessionOutput
-                          ? "Send (⌘↵)"
-                          : isTargetServerOnline
-                            ? onMove
-                              ? `Run on ${targetLabel} & move to Focus (⌘↵)`
-                              : `Run on ${targetLabel} (⌘↵)`
-                            : `Queue for ${targetLabel} (⌘↵)`
-                    }
-                    aria-label={
-                      !server
-                        ? "Start Timer"
-                        : hasSessionOutput
-                          ? "Send"
-                          : isTargetServerOnline
-                            ? onMove
-                              ? `Run on ${targetLabel} & move to Focus`
-                              : `Run on ${targetLabel}`
-                            : `Queue for ${targetLabel}`
-                    }
-                    className="inline-flex h-7 items-center justify-center gap-1 rounded bg-orange-600 px-3 text-[13px] font-medium text-white transition-colors hover:bg-orange-500"
+                    onClick={() => onMove(t)}
+                    title="Move task to Focus"
+                    aria-label="Move to Focus"
+                    className="inline-flex h-6.5 items-center justify-center gap-1 rounded border border-zinc-800 bg-zinc-900 px-2 text-[11.5px] font-medium text-orange-400 transition-colors hover:border-orange-500/50 hover:bg-zinc-800 hover:text-orange-300"
                   >
-                    {!server
-                      ? "⏱ Start Timer"
-                      : hasSessionOutput
-                        ? "↑ Send"
-                        : onMove
-                          ? `▶ Run & Focus →`
-                          : "▶ Run Agent"}
+                    → Focus
                   </button>
-                </div>
+                )}
+                {onDemote && (
+                  <button
+                    type="button"
+                    onClick={() => onDemote(t)}
+                    title="Move to Backlog"
+                    aria-label="Move to Backlog"
+                    className="inline-flex h-6.5 items-center justify-center rounded px-1.5 text-[11.5px] text-zinc-400 transition-colors hover:bg-zinc-900 hover:text-zinc-200"
+                  >
+                    ↓ Backlog
+                  </button>
+                )}
+                {!stageMode && onComplete && (
+                  <button
+                    type="button"
+                    onClick={onComplete}
+                    title="Done"
+                    aria-label="Done"
+                    className="inline-flex h-6.5 items-center justify-center rounded px-2 text-[11.5px] font-medium text-zinc-200 transition-colors hover:bg-zinc-900 hover:text-zinc-100"
+                  >
+                    ✓ Done
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={submitToAgent}
+                  title={
+                    !server
+                      ? "Start Pomodoro countdown timer (⌘↵)"
+                      : hasSessionOutput
+                        ? "Send (⌘↵)"
+                        : isTargetServerOnline
+                          ? onMove
+                            ? `Run on ${targetLabel} & move to Focus (⌘↵)`
+                            : `Run on ${targetLabel} (⌘↵)`
+                          : `Queue for ${targetLabel} (⌘↵)`
+                  }
+                  aria-label={
+                    !server
+                      ? "Start Timer"
+                      : hasSessionOutput
+                        ? "Send"
+                        : isTargetServerOnline
+                          ? onMove
+                            ? `Run on ${targetLabel} & move to Focus`
+                            : `Run on ${targetLabel}`
+                          : `Queue for ${targetLabel}`
+                  }
+                  className="inline-flex h-6.5 items-center justify-center gap-1 rounded bg-orange-600 px-2.5 text-[12px] font-medium text-white transition-colors hover:bg-orange-500"
+                >
+                  {!server
+                    ? "⏱ Start"
+                    : hasSessionOutput
+                      ? "↑ Send"
+                      : onMove
+                        ? `▶ Run & Focus →`
+                        : "▶ Run"}
+                </button>
               </div>
             </div>
 
@@ -10709,43 +10691,3 @@ function ProjectSelect({
   );
 }
 
-function ProjectChips({
-  projects: chips,
-  projectId,
-  onProject,
-  wide = false,
-}: {
-  projects: Project[];
-  projectId: string;
-  onProject: (id: string) => void;
-  wide?: boolean;
-}) {
-  if (chips.length < 2) return null;
-  return (
-    <div className="border-t border-zinc-900 bg-zinc-950/60">
-      <div
-        className={`mx-auto flex w-full items-center gap-1 overflow-x-auto px-4 py-1.5 sm:px-6 lg:px-8 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden ${
-          wide ? "max-w-none" : "max-w-5xl"
-        }`}
-      >
-        <span className="mr-1 shrink-0 font-mono text-[11px] text-zinc-600">
-          List:
-        </span>
-        {chips.map((p) => (
-          <button
-            key={p.id}
-            title={`Switch to ${p.name}`}
-            className={`max-w-40 shrink-0 truncate rounded px-2.5 py-0.5 text-[12px] ${
-              p.id === projectId
-                ? "bg-zinc-800 font-medium text-zinc-100"
-                : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
-            }`}
-            onClick={() => p.id !== projectId && onProject(p.id)}
-          >
-            {p.name}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
